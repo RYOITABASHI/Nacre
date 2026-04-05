@@ -20,7 +20,7 @@ NacreDictionary.kt が2,267行で辞書管理・Viterbi・ユーザー学習・K
 | `ViterbiEngine.kt` | ビーム探索、パス構築、コスト計算、文節分割 | ~600 |
 | `UserLearner.kt` | unigram/bigram/trigram/4-gram boost、時間減衰、永続化 | ~400 |
 | `CandidateRanker.kt` | KenLMリスコア、POS文脈コスト、LLMリランク統合、最終ソート | ~300 |
-| `EnglishMatcher.kt` | 英語辞書検索、スペル補正、edit distance | ~300 |
+| `EnglishMatcher.kt` | 英語辞書検索・予測・スペル補正・bigram学習・edit distance | ~450 |
 | `ConversionPipeline.kt` | convert/predictの統合パイプライン（公開API） | ~200 |
 
 ### 1.3 依存関係
@@ -39,7 +39,12 @@ ConversionPipeline (公開API — InputEngineが呼ぶ)
 
 ### 1.4 API互換性
 
-既存のpublic APIシグネチャ（`convert()`, `predict()`, `recordSelection()`, `commitCandidate()`）は `ConversionPipeline` がそのまま引き継ぐ。InputEngine側の変更は import パスの変更のみ。
+`ConversionPipeline` は既存の `DictionaryProvider` インターフェースを実装する:
+- `convert()`, `predict()`, `recordSelection()` — 変換・予測・学習
+- `predictEnglish()`, `recordEnglishSelection()` — 英語入力（EnglishMatcherに委譲）
+- `predictNextWord()` — 次単語予測（bigram/trigram/静的bigram/POS/履歴ベース、ConversionPipeline内に配置）
+
+**注意**: `commitCandidate()` は InputEngine 側のメソッドであり、ConversionPipeline のスコープ外。InputEngine側の変更は import パスの変更のみ。
 
 ### 1.5 配置先
 
@@ -88,12 +93,41 @@ fun selectModel(): String {
 
 ### 2.5 重み分岐
 
-| パラメータ | 3-gram使用時 | 5-gram使用時 |
-|---|---|---|
-| VITERBI_LM_WEIGHT | 2200 | 3000 |
-| リスコア dynamicWeight (短文) | 1500 | 1800-2200 |
-| リスコア dynamicWeight (長文) | 2500 | 3200 |
-| contextMultiplier | ×1.0-1.15 | ×1.0-1.25 |
+既存の定数 `VITERBI_LM_WEIGHT = 3000f`, `KENLM_WEIGHT = 5000f`（NacreDictionary.kt companion object）を置き換え、3-gram/5-gramで分岐する。すべての重みパラメータを `CandidateRanker` に集約:
+
+| パラメータ | 3-gram使用時 | 5-gram使用時 | 旧定数名 |
+|---|---|---|---|
+| VITERBI_LM_WEIGHT | 2200 | 3000 | VITERBI_LM_WEIGHT |
+| RESCORE_WEIGHT (短文≤3) | 1500 | 1800-2200 | dynamicWeight in kenLmRescore() |
+| RESCORE_WEIGHT (中文4-7) | 2000 | 2500 | dynamicWeight in kenLmRescore() |
+| RESCORE_WEIGHT (長文8+) | 2500 | 3200 | dynamicWeight in kenLmRescore() |
+| CONTEXT_MULTIPLIER | ×1.0-1.15 | ×1.0-1.25 | contextMultiplier in kenLmRescore() |
+
+### 2.6 モデル選択ロジック
+
+`KenLmScorer.selectModel()` はモデルパスを返し、`load()` に渡す（既存APIを維持）:
+
+```kotlin
+fun selectModel(filesDir: File, externalDirs: List<File>): String? {
+    // 1. 外部5-gramを探す（最優先）
+    for (dir in externalDirs) {
+        val path = File(dir, "models/japanese-5gram.klm")
+        if (path.exists()) return path.absolutePath
+    }
+    // 2. バンドル3-gramを使う
+    val bundled = File(filesDir, "models/japanese-3gram.klm")
+    if (bundled.exists()) return bundled.absolutePath
+    return null
+}
+
+// 呼び出し側
+val modelPath = scorer.selectModel(filesDir, externalDirs)
+if (modelPath != null) {
+    scorer.load(modelPath)
+    val order = scorer.getOrder() // 3 or 5
+    ranker.configureWeights(order) // 重み分岐
+}
+```
 
 ### 2.6 APKサイズ影響
 
@@ -121,22 +155,37 @@ ambiguity = 同じ読みに対する辞書エントリ数 / 平均エントリ�
 
 ### 3.2 文節レベルセグメンテーション（長文対応）
 
-ATOK最大の強みである長文一括変換を実現:
+ATOK最大の強みである長文一括変換を実現。**2パスアプローチ**:
 
-1. **助詞・接続詞で文節境界を推定**: 入力かなの中で「を」「に」「が」「は」「で」「と」「も」「の」「へ」+ その直後が文節境界候補
-2. **文節単位Viterbi**: 長文（12文字以上）を文節境界で分割し、文節ごとにViterbiを適用
-3. **文節間接続**: 文節間のPOS接続コスト + KenLMスコアで最適な文節境界を選択
-4. **フォールバック**: 文節分割で良い結果が出ない場合は全文Viterbiにフォールバック
+**Pass 1 — POS推定用の軽量Viterbi**:
+1. 小さいビーム幅（K=10）で全文Viterbiを実行し、各位置のPOSを推定
+2. 助詞（POS ID 268-433）の直後を文節境界候補としてマーク
+3. これにより「にほんに」の「に」が助詞か名詞の一部かをPOSで判別できる
+   - 「にほん(名詞) + に(助詞)」→ 「に」の後が境界
+   - 「にほんに(？)」→ 辞書にないのでPass 1で名詞+助詞に分解される
 
-### 3.3 Forward-Backward Rescoring
+**Pass 2 — 文節単位の高精度Viterbi**:
+1. Pass 1の文節境界で入力を分割
+2. 各文節を大きいビーム幅（K=40）でViterbi実行
+3. 文節間のPOS接続コスト + KenLMスコアで最適な文節境界を選択
+4. **フォールバック**: Pass 2の総コストがPass 1の全文結果より悪い場合はPass 1の結果を採用
 
-前方Viterbi後、後方からもスコアリング:
+**トリガー**: 12文字以上の入力のみ。短文はPass 2不要。
 
-1. Forward pass: 通常のViterbi（左→右）
-2. Backward pass: 右→左にViterbiを実行、各ノードにbackwardスコアを付与
-3. Combined score: `forward_cost * 0.6 + backward_cost * 0.4`（前方を重視、後方は補助）
+### 3.3 Backward KenLM Rescoring
 
-計算コスト: Viterbiが2回走るが、2回目はforward passの上位パスのみ再計算するので実質 ×1.3 程度。
+前方Viterbi後、KenLMで後方文脈を考慮したリスコアリングを行う。
+
+**注意**: Mozc接続コスト行列はleft→rightの形態素遷移を前提としており、逆方向Viterbiを正しく実行するには行列の転置が必要。これは複雑でバグのリスクが高い。代わりに**KenLMの後方スコアリング**で同等の効果を得る。
+
+**アルゴリズム**:
+1. Forward pass: 通常のViterbi（左→右）→ 上位N候補パスを取得
+2. Backward KenLM: 各候補パスを逆順にKenLMでスコアリング（右→左の文字列としてスコア計算）
+3. Combined score: `forward_cost + backward_lm_bonus * 0.3`（前方Viterbiが主、後方KenLMは補助）
+
+**効果**: 「はしをわたる」→ Forward Viterbiで「橋を渡る」「箸を渡る」が同スコアの場合、後方KenLMが「渡る」との共起で「橋」を優先。
+
+計算コスト: KenLMスコアリングのみ（Viterbiは1回）なので実質 ×1.1 程度。
 
 ### 3.4 タイムバジェット
 
@@ -218,6 +267,8 @@ data class DomainBoost(
 
 EditorInfo の packageName をキーにドメイン分離。ターミナルでは技術用語、メールでは敬語が優先される。共通ドメイン + アプリ固有ドメインの2層。
 
+**永続化戦略**: SharedPreferences `"nacre_domain_boost_{packageName}"` でドメインごとに分離保存。上位5ドメインのみ永続化（使用頻度順）。それ以外はメモリ上のみ（セッション終了で破棄）。データ量上限: ドメインあたりunigram 1000、bigram 500。
+
 ### 4.5 リジェクト学習
 
 ```kotlin
@@ -235,9 +286,20 @@ fun recordRejection(candidate: ConversionCandidate, penalty: Int) {
     val key = "${candidate.reading}:${candidate.surface}"
     rejectCount[key] = (rejectCount[key] ?: 0) + 1
     if (rejectCount[key]!! >= 3) {
-        // 3回リジェクトで強ペナルティ
-        permanentPenalty[key] = 2000
+        // 3回リジェクトでペナルティ（上限2000、時間減衰あり）
+        rejectionPenalty[key] = RejectionEntry(
+            penalty = min(2000, rejectCount[key]!! * 500),
+            lastRejectedAt = System.currentTimeMillis()
+        )
     }
+}
+
+// リジェクトペナルティも時間減衰する（7日で半減、30日で消滅）
+// また、明示的に候補を選択（recordSelection）すると
+// その候補のリジェクトカウントはリセットされる
+fun onPositiveSelection(key: String) {
+    rejectCount.remove(key)
+    rejectionPenalty.remove(key)
 }
 ```
 
@@ -266,6 +328,11 @@ fun onBackspace() {
 - フィールド: 読み（自動入力）、表記（自動入力）、品詞（名詞/固有名詞/動詞のDropdown）
 - 登録先: `UserLearner.userDictionary`、減衰対象外フラグ付き
 - UI: Compose ModalBottomSheet、最小限のフォーム
+- **POS IDマッピング**: 品詞Dropdownの選択をMozc POS IDに変換
+  - 一般名詞: leftId=1847, rightId=1847
+  - 固有名詞: leftId=1921, rightId=1921
+  - 動詞: leftId=798, rightId=798（五段活用・基本形）
+  - 既存の `registerUserWord()` が leftGroup=0, rightGroup=0 (BOS/EOS) を割り当てている問題を修正
 
 ---
 
@@ -292,6 +359,8 @@ VoiceInputManager のストリーミングロジックを改修:
 - `SherpaRecognizer.processAudio()` をチャンク完了ごとに呼び出し
 - 部分結果を `InputConnection.setComposingText()` で表示
 - 安定した部分を `commitText()` で確定
+
+**安定判定の定義**: SenseVoiceの連続チャンク処理で、あるテキストプレフィックスが3回連続で同一（文字列完全一致）の場合、そのプレフィックスを「安定」と判定してコミットする。既存の `partialStableCount`（VoiceInputManager line 57、SpeechRecognizer用）と同じロジックをSenseVoiceチャンクに適用。差分: SpeechRecognizerはpartial result callback駆動だが、SenseVoiceはチャンク処理完了イベント駆動。
 
 ### 5.2 句読点自動挿入の強化
 
@@ -482,3 +551,7 @@ Phase 1と2は並行実行可能。Phase 3-5はPhase 1完了後に並行可能�
 | 音声ストリーミングで部分結果のちらつき | UX悪化 | 安定判定の閾値調整（3回→5回一致） |
 | APKサイズ増大 | DL数減少 | 3-gramモデルをAPK Expansion File化も選択肢として残す |
 | ユーザー学習の減衰が強すぎる | よく使う単語が消える | 減衰係数をConfigRepositoryで調整可能にする |
+| 接続コスト行列のインデックス転置 | リファクタ時に right_id/left_id を取り違える | スナップショットテストで多様なPOS遷移をカバー + DictionaryManager に `getConnectionCost(rightId, leftId)` メソッドでカプセル化 |
+| 意味的類似度判定の限界 | 言い直し検出で「問題」vs「課題」を見逃す | v1はLevenshtein+読み一致。将来的にembeddingベース類似度を検討 |
+| 音声テストインフラ不在 | 音声E2Eテストが手動のみ | CI用にWAVファイルセットを用意、SherpaRecognizerを直接呼ぶheadlessテストを構築 |
+| タイムバジェット50msが端末依存 | 低性能端末で打ち切りが多すぎる | ConfigRepositoryで調整可能にする（デフォルト50ms、30-100ms範囲） |
