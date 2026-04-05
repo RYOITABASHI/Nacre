@@ -42,7 +42,7 @@ ConversionPipeline (公開API — InputEngineが呼ぶ)
 `ConversionPipeline` は既存の `DictionaryProvider` インターフェースを実装する:
 - `convert()`, `predict()`, `recordSelection()` — 変換・予測・学習
 - `predictEnglish()`, `recordEnglishSelection()` — 英語入力（EnglishMatcherに委譲）
-- `predictNextWord()` — 次単語予測（bigram/trigram/静的bigram/POS/履歴ベース、ConversionPipeline内に配置）
+- `predictNextWord()` — 次単語予測（bigram/trigram/静的bigram/POS/履歴ベース）。**DictionaryProviderインターフェースに追加**して、InputEngine側のキャスト（`as? NacreDictionary`）を除去する
 
 **注意**: `commitCandidate()` は InputEngine 側のメソッドであり、ConversionPipeline のスコープ外。InputEngine側の変更は import パスの変更のみ。
 
@@ -124,12 +124,12 @@ fun selectModel(filesDir: File, externalDirs: List<File>): String? {
 val modelPath = scorer.selectModel(filesDir, externalDirs)
 if (modelPath != null) {
     scorer.load(modelPath)
-    val order = scorer.getOrder() // 3 or 5
+    val order = scorer.getOrder() // 3 or 5 (既存JNI API。未実装の場合はファイル名から推定)
     ranker.configureWeights(order) // 重み分岐
 }
 ```
 
-### 2.6 APKサイズ影響
+### 2.7 APKサイズ影響
 
 現状 ~50MB → 70-80MB。Gboard (200MB+)、ATOK (100MB+) と比較して許容範囲。
 
@@ -161,6 +161,7 @@ ATOK最大の強みである長文一括変換を実現。**2パスアプロー�
 1. 小さいビーム幅（K=10）で全文Viterbiを実行し、各位置のPOSを推定
 2. 助詞（POS ID 268-433）の直後を文節境界候補としてマーク
 3. これにより「にほんに」の「に」が助詞か名詞の一部かをPOSで判別できる
+   - **注**: POS ID範囲（助詞=268-433等）はMozc OSS標準POS表に基づく。実装時に `connection.bin` のヘッダまたは辞書ビルド時のPOSテーブルと照合すること
    - 「にほん(名詞) + に(助詞)」→ 「に」の後が境界
    - 「にほんに(？)」→ 辞書にないのでPass 1で名詞+助詞に分解される
 
@@ -186,6 +187,8 @@ ATOK最大の強みである長文一括変換を実現。**2パスアプロー�
 **効果**: 「はしをわたる」→ Forward Viterbiで「橋を渡る」「箸を渡る」が同スコアの場合、後方KenLMが「渡る」との共起で「橋」を優先。
 
 計算コスト: KenLMスコアリングのみ（Viterbiは1回）なので実質 ×1.1 程度。
+
+**注意**: KenLMは左→右のn-gramモデルなので、逆順トークンのスコアは真の後方確率ではなく近似値。経験的に共起の多様性シグナルとして有効だが、重み（0.3）を低めに設定して前方Viterbiの判断を崩さないようにする。チューニング時に効果が薄ければこのステップを省略可。
 
 ### 3.4 タイムバジェット
 
@@ -333,6 +336,7 @@ fun onBackspace() {
   - 固有名詞: leftId=1921, rightId=1921
   - 動詞: leftId=798, rightId=798（五段活用・基本形）
   - 既存の `registerUserWord()` が leftGroup=0, rightGroup=0 (BOS/EOS) を割り当てている問題を修正
+  - **注**: 上記POS IDはMozc OSS標準POS表に基づく。実装時にNacreの辞書ビルドで使用している実際のPOSテーブルと照合し、正確なIDを確定すること
 
 ---
 
