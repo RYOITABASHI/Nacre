@@ -1100,6 +1100,14 @@ class InputEngine(private val service: NacreInputMethodService) {
         }
     }
 
+    /**
+     * Register a word in the user dictionary.
+     * Delegates to ConversionPipeline → UserLearner.registerUserWord.
+     */
+    fun registerUserWord(reading: String, surface: String, posCategory: String = "") {
+        (dictionary as? ConversionPipeline)?.registerUserWord(reading, surface, posCategory)
+    }
+
     fun destroy() {
         llmReranker.destroy()
         scope.cancel()
