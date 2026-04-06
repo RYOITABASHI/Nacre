@@ -125,7 +125,52 @@ class KenLmScorer {
         }
     }
 
+    /**
+     * Get the n-gram order of the loaded model.
+     * @return Order (e.g., 3 for 3-gram, 5 for 5-gram), or 0 if not loaded.
+     */
+    fun getModelOrder(): Int {
+        return try {
+            if (isReady()) KenLmJni.getOrder() else 0
+        } catch (_: Exception) { 0 }
+    }
+
     companion object {
         private const val TAG = "KenLmScorer"
+
+        /**
+         * Find the best available KenLM model file.
+         * Priority: external 5-gram > quick paths 5-gram > bundled 3-gram.
+         *
+         * @param filesDir App's internal files directory
+         * @param externalDirs List of external storage directories
+         * @return Absolute path to the best model, or null if none found
+         */
+        fun selectModel(
+            filesDir: java.io.File,
+            externalDirs: List<java.io.File>,
+            quickPaths: List<String> = listOf("/sdcard/Download", "/sdcard/models")
+        ): String? {
+            // 1. External dirs: 5-gram (highest priority)
+            for (dir in externalDirs) {
+                val path = java.io.File(dir, "models/japanese-5gram.klm")
+                if (path.exists() && path.length() > 0) return path.absolutePath
+            }
+            // 2. Quick paths for sideloaded 5-gram
+            quickPaths.forEach { p ->
+                val f = java.io.File(p, "japanese-5gram.klm")
+                if (f.exists() && f.length() > 0) return f.absolutePath
+            }
+            // 3. Internal files dir: 5-gram (copied from external)
+            val internal5gram = java.io.File(filesDir, "models/japanese-5gram.klm")
+            if (internal5gram.exists() && internal5gram.length() > 0) return internal5gram.absolutePath
+            // 4. Compact model (intermediate)
+            val compact = java.io.File(filesDir, "models/japanese-compact.klm")
+            if (compact.exists() && compact.length() > 0) return compact.absolutePath
+            // 5. Bundled 3-gram (fallback)
+            val bundled3gram = java.io.File(filesDir, "models/japanese-3gram.klm")
+            if (bundled3gram.exists() && bundled3gram.length() > 0) return bundled3gram.absolutePath
+            return null
+        }
     }
 }
