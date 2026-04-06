@@ -4,11 +4,17 @@ import android.content.Context
 import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStreamReader
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.zip.GZIPInputStream
 import space.manus.nacre.ai.KenLmScorer
+import space.manus.nacre.ime.input.DictionaryManager.Companion.DEFAULT_CONNECTION_COST
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isAdjective
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isAuxVerb
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isContentWord
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isFunctionWord
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isNoun
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isParticle
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isSymbol
+import space.manus.nacre.ime.input.DictionaryManager.Companion.isVerb
 
 /**
  * Nacre Japanese Dictionary with POS-aware Viterbi conversion.
@@ -27,15 +33,13 @@ import space.manus.nacre.ai.KenLmScorer
  */
 class NacreDictionary(private val context: Context) : DictionaryProvider {
 
-    // reading → list of entries with POS info (initial capacity smaller to avoid OOM on allocation)
-    private val dict = HashMap<String, MutableList<DictEntry>>(400000)
+    // Delegated dictionary loading, lookup, connection cost
+    val dictManager = DictionaryManager(context)
 
-    // Sorted readings for prefix search
-    private var sortedReadings: Array<String> = emptyArray()
-
-    // Full Mozc connection cost matrix as flat ShortArray [right_id * numIds + left_id]
-    private var connectionCostFlat: ShortArray = ShortArray(0)
-    private var numIds = 0
+    // Convenience accessors for dictManager fields (reduces diff in this transitional step)
+    private inline val dict get() = dictManager.dict
+    private inline val sortedReadings get() = dictManager.sortedReadings
+    private inline val staticBigrams get() = dictManager.staticBigrams
 
     // User learning: boost for selected candidates (thread-safe)
     private val userBoost = ConcurrentHashMap<String, Int>(1000)
@@ -60,9 +64,6 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     // Learning epoch: increments each session, used for frequency decay
     private var learningEpoch: Int = 0
-
-    // Static bigram data: "prevSurface→nextReading:nextSurface" → boost value
-    private val staticBigrams = HashMap<String, Int>(2000)
 
     // English word dictionary (hiragana reading → English words)
     private val englishDict = HashMap<String, MutableList<DictEntry>>(5000)
@@ -94,67 +95,17 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     private var lastSaveTime = 0L
 
     /** Total number of dictionary entries loaded (for debug display) */
-    var entryCount = 0
-        private set
-
-    data class DictEntry(
-        val surface: String,
-        val cost: Int,
-        val leftGroup: Int = 1,   // POS group for left context (default: noun)
-        val rightGroup: Int = 1,  // POS group for right context
-    )
-
-    data class UserDictEntry(
-        val reading: String,
-        val surface: String,
-        val comment: String = "",  // Optional user memo (e.g. "work address")
-    )
-
-    data class PhraseEntry(
-        val reading: String,       // Full hiragana reading
-        val surface: String,       // Full committed surface text
-        var count: Int = 1,        // Times this phrase was committed
-        var lastEpoch: Int = 0,    // Last epoch when this phrase was used
-    )
+    val entryCount: Int get() = dictManager.entryCount
 
     fun load() {
         if (loaded) return
 
-        loadConnectionMatrix()
-        loadMozcDictionary()
-        loadSlangDictionary()
-        loadSupplementaryDict("dict/common_phrases.tsv", "common phrases")
-        loadSupplementaryDict("dict/person_names.tsv", "person names")
-        loadSupplementaryDict("dict/emoji_kaomoji.tsv", "emoji/kaomoji")
-        loadSupplementaryDict("dict/symbols.tsv", "symbols")
-
-        // Boost person name entries: Mozc defaults are too high (median ~6500)
-        // Reduce by 1500 to make names more competitive with common nouns
-        var namesBoosted = 0
-        for (entries in dict.values) {
-            for (i in entries.indices) {
-                val e = entries[i]
-                if (e.leftGroup in 1921..1923 && e.cost > 3500) {
-                    entries[i] = e.copy(cost = e.cost - 1500)
-                    namesBoosted++
-                }
-            }
-        }
-        if (namesBoosted > 0) {
-            Log.i("NacreDictionary", "Boosted $namesBoosted person name entries (cost -1500)")
-        }
-
-        // Sort all entries and build index ONCE after all dicts loaded (avoids OOM from repeated sorts)
-        for (entries in dict.values) {
-            entries.sortBy { it.cost }
-        }
-        sortedReadings = dict.keys.toTypedArray().also { it.sort() }
-        Log.i("NacreDictionary", "Index built: ${dict.size} readings, ${sortedReadings.size} sorted")
+        // Load dictionaries, connection matrix, static bigrams via DictionaryManager
+        dictManager.load()
 
         loadEnglishDict()
         buildRomajiEnglishIndex()
         loadEnglishFullDict()
-        loadStaticBigrams()
         loadUserBoost()
         loadUserDictionary()
         loadPhraseMemory()
@@ -168,180 +119,6 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         saveEpoch()
 
         loaded = true
-    }
-
-    private fun loadConnectionMatrix() {
-        try {
-            context.assets.open("dict/connection.bin").use { stream ->
-                val dis = java.io.DataInputStream(java.io.BufferedInputStream(stream, 65536))
-                // First 4 bytes: uint32 num_ids (little-endian)
-                val b = ByteArray(4)
-                dis.readFully(b)
-                numIds = ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).int
-                val total = numIds * numIds
-                connectionCostFlat = ShortArray(total)
-                // Read int16 values in 8KB chunks to avoid 14MB byte[] allocation
-                val chunkBytes = ByteArray(8192)
-                var idx = 0
-                while (idx < total) {
-                    val remaining = (total - idx) * 2
-                    val toRead = minOf(chunkBytes.size, remaining)
-                    dis.readFully(chunkBytes, 0, toRead)
-                    val chunk = ByteBuffer.wrap(chunkBytes, 0, toRead).order(ByteOrder.LITTLE_ENDIAN)
-                    val count = toRead / 2
-                    for (j in 0 until count) {
-                        connectionCostFlat[idx++] = chunk.short
-                    }
-                }
-                Log.i("NacreDictionary", "Connection matrix loaded: ${numIds}x${numIds} (${total * 2 / 1024}KB)")
-            }
-        } catch (e: Exception) {
-            Log.e("NacreDictionary", "Failed to load binary connection matrix, trying TSV fallback", e)
-            loadConnectionMatrixTsvFallback()
-        }
-    }
-
-    private fun loadConnectionMatrixTsvFallback() {
-        try {
-            val rows = mutableListOf<IntArray>()
-            var n = 14
-            context.assets.open("dict/connection_group.tsv").use { stream ->
-                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-                    reader.forEachLine { line ->
-                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
-                        val trimmed = line.trim()
-                        if (rows.isEmpty() && trimmed.toIntOrNull() != null) {
-                            n = trimmed.toInt()
-                            return@forEachLine
-                        }
-                        val values = trimmed.split('\t').map { it.toIntOrNull() ?: 5000 }
-                        rows.add(values.toIntArray())
-                    }
-                }
-            }
-            numIds = n
-            connectionCostFlat = ShortArray(n * n)
-            for (r in 0 until minOf(n, rows.size)) {
-                for (c in 0 until minOf(n, rows[r].size)) {
-                    connectionCostFlat[r * n + c] = rows[r][c].coerceIn(-32768, 32767).toShort()
-                }
-            }
-            Log.i("NacreDictionary", "Connection matrix (TSV fallback): ${n}x${n}")
-        } catch (e2: Exception) {
-            Log.e("NacreDictionary", "TSV fallback also failed", e2)
-            numIds = 0
-            connectionCostFlat = ShortArray(0)
-        }
-    }
-
-    private fun loadMozcDictionary() {
-        try {
-            // Try gzip binary first, fall back to plain TSV
-            val stream = try {
-                GZIPInputStream(context.assets.open("dict/mozc_dict.bin"))
-            } catch (_: Exception) {
-                context.assets.open("dict/mozc_dict.tsv")
-            }
-
-            stream.use { rawStream ->
-                BufferedReader(InputStreamReader(rawStream, Charsets.UTF_8), 65536).use { reader ->
-                    var count = 0
-                    reader.forEachLine { line ->
-                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
-                        val parts = line.split('\t')
-                        if (parts.size >= 5) {
-                            val reading = parts[0]
-                            val surface = parts[1]
-                            val leftGroup = parts[2].toIntOrNull() ?: 1
-                            val rightGroup = parts[3].toIntOrNull() ?: 1
-                            val cost = parts[4].toIntOrNull() ?: 10000
-                            dict.getOrPut(reading) { mutableListOf() }
-                                .add(DictEntry(surface, cost, leftGroup, rightGroup))
-                            count++
-                        } else if (parts.size >= 3) {
-                            val reading = parts[0]
-                            val surface = parts[1]
-                            val cost = parts[2].toIntOrNull() ?: 10000
-                            if (cost <= 15000) {
-                                dict.getOrPut(reading) { mutableListOf() }
-                                    .add(DictEntry(surface, cost))
-                            }
-                            count++
-                        }
-                    }
-                    entryCount = count
-                    Log.i("NacreDictionary", "Dictionary loaded: $count entries, ${dict.size} unique readings")
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("NacreDictionary", "Failed to load dictionary", e)
-        }
-
-        // Sorting deferred to load() after all dicts are loaded
-    }
-
-    private fun loadSlangDictionary() {
-        try {
-            context.assets.open("dict/slang_words.tsv").use { stream ->
-                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-                    var count = 0
-                    reader.forEachLine { line ->
-                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
-                        val parts = line.split('\t')
-                        if (parts.size >= 5) {
-                            val reading = parts[0]
-                            val surface = parts[1]
-                            val leftGroup = parts[2].toIntOrNull() ?: 1
-                            val rightGroup = parts[3].toIntOrNull() ?: 1
-                            val cost = parts[4].toIntOrNull() ?: 5000
-                            val entries = dict.getOrPut(reading) { mutableListOf() }
-                            // Only add if not already present (Mozc takes priority for same surface)
-                            if (entries.none { it.surface == surface }) {
-                                entries.add(DictEntry(surface, cost, leftGroup, rightGroup))
-                                count++
-                            }
-                        }
-                    }
-                    Log.i("NacreDictionary", "Slang dict loaded: $count new entries")
-                }
-            }
-            // Sorting deferred to load()
-        } catch (e: Exception) {
-            Log.i("NacreDictionary", "No slang dictionary found (optional)")
-        }
-    }
-
-    /**
-     * Load a supplementary TSV dictionary (emoji, symbols, etc).
-     * Format: reading\tsurface\tleft_id\tright_id\tcost
-     */
-    private fun loadSupplementaryDict(assetPath: String, label: String) {
-        try {
-            context.assets.open(assetPath).use { stream ->
-                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-                    var count = 0
-                    reader.forEachLine { line ->
-                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
-                        val parts = line.split('\t')
-                        if (parts.size >= 5) {
-                            val reading = parts[0]
-                            val surface = parts[1]
-                            val leftGroup = parts[2].toIntOrNull() ?: 2641
-                            val rightGroup = parts[3].toIntOrNull() ?: 2641
-                            val cost = parts[4].toIntOrNull() ?: 5500
-                            val entries = dict.getOrPut(reading) { mutableListOf() }
-                            if (entries.none { it.surface == surface }) {
-                                entries.add(DictEntry(surface, cost, leftGroup, rightGroup))
-                                count++
-                            }
-                        }
-                    }
-                    Log.i("NacreDictionary", "$label dict loaded: $count entries")
-                }
-            }
-        } catch (e: Exception) {
-            Log.i("NacreDictionary", "No $label dictionary found (optional)")
-        }
     }
 
     // --- DictionaryProvider implementation ---
@@ -843,21 +620,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         }
     }
 
-    // --- Connection cost ---
+    // --- Connection cost (delegated to DictionaryManager) ---
 
-    /**
-     * Get the POS-based connection cost between two words.
-     * Uses the full Mozc 2670×2670 connection cost matrix.
-     */
-    private fun getConnectionCost(prevRightId: Int, currLeftId: Int): Int {
-        if (connectionCostFlat.isEmpty() || numIds == 0) return DEFAULT_CONNECTION_COST
-        val r = prevRightId.coerceIn(0, numIds - 1)
-        val l = currLeftId.coerceIn(0, numIds - 1)
-        val idx = r * numIds + l
-        if (idx >= connectionCostFlat.size) return DEFAULT_CONNECTION_COST
-        // Mozc connection costs range roughly -1000..32000; /3 scaling lets the matrix guide more
-        return connectionCostFlat[idx].toInt() / 3
-    }
+    private fun getConnectionCost(prevRightId: Int, currLeftId: Int): Int =
+        dictManager.getConnectionCost(prevRightId, currLeftId)
 
     // --- Boost calculation ---
 
@@ -1155,36 +921,6 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             Log.i("NacreDictionary", "English full dict loaded: ${englishFullDict.size} keys, ${englishSortedKeys.size} sorted")
         } catch (e: Exception) {
             Log.i("NacreDictionary", "No english_full.tsv found (optional)")
-        }
-    }
-
-    /**
-     * Load static bigram data from bigrams.tsv.
-     * Format: prev_surface\tnext_reading\tnext_surface\tboost
-     */
-    private fun loadStaticBigrams() {
-        try {
-            context.assets.open("dict/bigrams.tsv").use { stream ->
-                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
-                    var count = 0
-                    reader.forEachLine { line ->
-                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
-                        val parts = line.split('\t')
-                        if (parts.size >= 4) {
-                            val prevSurface = parts[0]
-                            val nextReading = parts[1]
-                            val nextSurface = parts[2]
-                            val boost = parts[3].toIntOrNull() ?: 1000
-                            val key = "$prevSurface→$nextReading:$nextSurface"
-                            staticBigrams[key] = boost
-                            count++
-                        }
-                    }
-                    Log.i("NacreDictionary", "Static bigrams loaded: $count entries")
-                }
-            }
-        } catch (e: Exception) {
-            Log.i("NacreDictionary", "No bigrams.tsv found (optional)")
         }
     }
 
@@ -1626,45 +1362,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // --- Viterbi segmentation with POS connection costs ---
 
     companion object {
-        private const val DEFAULT_CONNECTION_COST = 2000
         // KenLM weight for post-hoc rescoring (high: LM should strongly influence final ranking)
         private const val KENLM_WEIGHT = 5000f
         // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
         private const val VITERBI_LM_WEIGHT = 3000f
-
-        // Mozc POS ID range checks (from id.def)
-        fun isNoun(id: Int) = id in 1841..2193
-        fun isVerb(id: Int) = id in 434..1840
-        fun isAdjective(id: Int) = id in 2194..2588
-        fun isAuxVerb(id: Int) = id in 29..267
-        fun isParticle(id: Int) = id in 268..433
-        fun isContentWord(id: Int) = id in 434..2588  // 動詞+名詞+形容詞
-        fun isFunctionWord(id: Int) = id in 29..433   // 助動詞+助詞
-        fun isAdverb(id: Int) = id in 12..28
-        fun isConjunction(id: Int) = id in 2591..2593
-        fun isInterjection(id: Int) = id in 2589..2590
-        fun isSymbol(id: Int) = id in 2641..2656
-
-        // Full-width katakana -> half-width katakana mapping
-        private val HALF_WIDTH_KATAKANA_MAP = mapOf(
-            'ァ' to "ｧ", 'ア' to "ｱ", 'ィ' to "ｨ", 'イ' to "ｲ", 'ゥ' to "ｩ",
-            'ウ' to "ｳ", 'ェ' to "ｪ", 'エ' to "ｴ", 'ォ' to "ｫ", 'オ' to "ｵ",
-            'カ' to "ｶ", 'キ' to "ｷ", 'ク' to "ｸ", 'ケ' to "ｹ", 'コ' to "ｺ",
-            'サ' to "ｻ", 'シ' to "ｼ", 'ス' to "ｽ", 'セ' to "ｾ", 'ソ' to "ｿ",
-            'タ' to "ﾀ", 'チ' to "ﾁ", 'ツ' to "ﾂ", 'テ' to "ﾃ", 'ト' to "ﾄ",
-            'ナ' to "ﾅ", 'ニ' to "ﾆ", 'ヌ' to "ﾇ", 'ネ' to "ﾈ", 'ノ' to "ﾉ",
-            'ハ' to "ﾊ", 'ヒ' to "ﾋ", 'フ' to "ﾌ", 'ヘ' to "ﾍ", 'ホ' to "ﾎ",
-            'マ' to "ﾏ", 'ミ' to "ﾐ", 'ム' to "ﾑ", 'メ' to "ﾒ", 'モ' to "ﾓ",
-            'ヤ' to "ﾔ", 'ュ' to "ｭ", 'ユ' to "ﾕ", 'ョ' to "ｮ", 'ヨ' to "ﾖ",
-            'ラ' to "ﾗ", 'リ' to "ﾘ", 'ル' to "ﾙ", 'レ' to "ﾚ", 'ロ' to "ﾛ",
-            'ワ' to "ﾜ", 'ヲ' to "ｦ", 'ン' to "ﾝ",
-            'ガ' to "ｶﾞ", 'ギ' to "ｷﾞ", 'グ' to "ｸﾞ", 'ゲ' to "ｹﾞ", 'ゴ' to "ｺﾞ",
-            'ザ' to "ｻﾞ", 'ジ' to "ｼﾞ", 'ズ' to "ｽﾞ", 'ゼ' to "ｾﾞ", 'ゾ' to "ｿﾞ",
-            'ダ' to "ﾀﾞ", 'ヂ' to "ﾁﾞ", 'ヅ' to "ﾂﾞ", 'デ' to "ﾃﾞ", 'ド' to "ﾄﾞ",
-            'バ' to "ﾊﾞ", 'ビ' to "ﾋﾞ", 'ブ' to "ﾌﾞ", 'ベ' to "ﾍﾞ", 'ボ' to "ﾎﾞ",
-            'パ' to "ﾊﾟ", 'ピ' to "ﾋﾟ", 'プ' to "ﾌﾟ", 'ペ' to "ﾍﾟ", 'ポ' to "ﾎﾟ",
-            'ッ' to "ｯ", 'ャ' to "ｬ", 'ー' to "ｰ", 'ヴ' to "ｳﾞ",
-        )
     }
 
     private fun lengthBonus(segLen: Int): Int {
@@ -1966,7 +1667,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         val sb = StringBuilder(hiragana.length * 2) // dakuten can expand
         for (ch in hiragana) {
             val kata = if (ch in '\u3041'..'\u3096') (ch + 0x60) else ch
-            val hw = HALF_WIDTH_KATAKANA_MAP[kata]
+            val hw = DictionaryManager.HALF_WIDTH_KATAKANA_MAP[kata]
             if (hw != null) {
                 sb.append(hw)
             } else {
