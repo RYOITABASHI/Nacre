@@ -138,16 +138,18 @@ class NacreInputMethodService :
                 inputEngine.refreshPredictionsIfNeeded()
             }
 
-            // Load KenLM model: prefer full 5-gram (sideloaded), fall back to bundled compact model
+            // Load KenLM model using selectModel() priority: 5-gram > compact > bundled 3-gram
             try {
+                val downloader = space.manus.nacre.ai.ModelDownloader(this@NacreInputMethodService)
+
+                // 1. Extract bundled 3-gram from assets (first launch)
+                downloader.extractBundledKenLm()
+
+                // 2. Copy sideloaded model to internal if found externally
                 val modelsDir = java.io.File(filesDir, "models")
                 modelsDir.mkdirs()
                 val fullModel = java.io.File(modelsDir, "japanese-5gram.klm")
-                val compactModel = java.io.File(modelsDir, "japanese-compact.klm")
-
-                // Search for model anywhere on device (Download, Documents, etc.)
                 if (!fullModel.exists()) {
-                    val downloader = space.manus.nacre.ai.ModelDownloader(this@NacreInputMethodService)
                     val foundPath = downloader.getKenLmModelPath()
                     if (foundPath != null && foundPath != fullModel.absolutePath) {
                         val extSource = java.io.File(foundPath)
@@ -157,31 +159,28 @@ class NacreInputMethodService :
                     }
                 }
 
-                // Extract bundled compact model from assets if no full model and compact not yet extracted
+                // 3. Extract bundled compact model from assets if needed
+                val compactModel = java.io.File(modelsDir, "japanese-compact.klm")
                 if (!fullModel.exists() && !compactModel.exists()) {
                     try {
                         assets.open("models/japanese-compact.klm").use { input ->
-                            compactModel.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
+                            compactModel.outputStream().use { output -> input.copyTo(output) }
                         }
-                        android.util.Log.i("NacreIME", "Bundled compact KenLM extracted (${compactModel.length() / 1024 / 1024}MB)")
-                    } catch (_: Exception) {
-                        android.util.Log.i("NacreIME", "No bundled compact KenLM model in assets")
-                    }
+                        android.util.Log.i("NacreIME", "Bundled compact KenLM extracted")
+                    } catch (_: Exception) {}
                 }
 
-                // Load the best available model: full > compact
-                val modelToLoad = when {
-                    fullModel.exists() -> fullModel
-                    compactModel.exists() -> compactModel
-                    else -> null
-                }
-                if (modelToLoad != null) {
+                // 4. Select best model using priority chain
+                val externalDirs: List<java.io.File> = listOfNotNull(getExternalFilesDir(null))
+                val modelPath = KenLmScorer.selectModel(filesDir, externalDirs)
+
+                if (modelPath != null) {
                     val scorer = KenLmScorer()
-                    if (scorer.load(modelToLoad.absolutePath)) {
+                    if (scorer.load(modelPath)) {
                         dict.kenLmScorer = scorer
-                        android.util.Log.i("NacreIME", "KenLM loaded: ${modelToLoad.name} (${modelToLoad.length() / 1024 / 1024}MB)")
+                        // 5. Configure weights based on model order
+                        dict.candidateRanker.configureWeights(scorer.getModelOrder())
+                        android.util.Log.i("NacreIME", "KenLM loaded: ${java.io.File(modelPath).name} (order=${scorer.getModelOrder()})")
                     }
                 } else {
                     android.util.Log.i("NacreIME", "No KenLM model available (conversion quality will be limited)")
