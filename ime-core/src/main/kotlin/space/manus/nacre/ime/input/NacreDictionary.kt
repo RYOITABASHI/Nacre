@@ -36,7 +36,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     private inline val sortedReadings get() = dictManager.sortedReadings
 
     // Delegated user learning, boost, context, persistence
-    val userLearner = UserLearner(context, dictManager) { kenLmScorer }
+    val userLearner = UserLearner(context, dictManager)
+
+    // Delegated candidate ranking pipeline (boost + POS + KenLM + filter + sort)
+    val candidateRanker = CandidateRanker({ kenLmScorer }, dictManager, userLearner)
 
     // English word dictionary (hiragana reading → English words)
     private val englishDict = HashMap<String, MutableList<DictEntry>>(5000)
@@ -73,9 +76,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
         loaded = true
 
-        // Wire ViterbiEngine callbacks to UserLearner
+        // Wire ViterbiEngine callbacks
         viterbiEngine.boostFunction = userLearner::applyBoost
-        viterbiEngine.posContextCostFunction = userLearner::posContextCost
+        viterbiEngine.posContextCostFunction = candidateRanker::posContextCost
+
+        // Wire UserLearner's rescore callback to CandidateRanker
+        userLearner.rescoreFunction = candidateRanker::kenLmRescore
     }
 
     // --- DictionaryProvider implementation ---
@@ -197,22 +203,8 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             results.add(ConversionCandidate(surface = kana, reading = kana, cost = maxCost + 200))
         }
 
-        // Sort: apply user boost + POS context + KenLM rescoring
-        val boosted = results.map { c ->
-            var cost = userLearner.applyBoost(c.reading, c.surface, c.cost)
-            cost = userLearner.posContextCost(c.reading, c.surface, cost)
-            c.copy(cost = cost)
-        }.toMutableList()
-
-        userLearner.kenLmRescore(boosted)
-
-        // Post-rescore filter: remove candidates with catastrophically bad LM scores
-        if (kenLmScorer?.isReady() == true && boosted.size > 3) {
-            val bestCost = boosted.minOf { it.cost }
-            boosted.removeAll { it.cost > bestCost + 10000 && it.cost > bestCost * 3 }
-        }
-
-        return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 30)
+        // Rank: boost + POS context + KenLM rescore + filter + sort
+        return candidateRanker.rank(results, kana)
     }
 
     override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
@@ -336,16 +328,8 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             }
         }
 
-        // Final sort: apply user boost + POS context + KenLM to all candidates
-        val boosted = results.map { c ->
-            var cost = userLearner.applyBoost(c.reading, c.surface, c.cost)
-            cost = userLearner.posContextCost(c.reading, c.surface, cost)
-            c.copy(cost = cost)
-        }.toMutableList()
-
-        userLearner.kenLmRescore(boosted)
-
-        return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 25)
+        // Rank: boost + POS context + KenLM rescore + filter + sort
+        return candidateRanker.rank(results, kana, limit = if (kana.length <= 3) 40 else 25)
     }
 
     override fun recordSelection(candidate: ConversionCandidate) {
@@ -397,7 +381,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 if (entries == null) { idx++; continue }
                 for (entry in entries.take(takePerReading)) {
                     var cost = userLearner.applyBoost(reading, entry.surface, entry.cost)
-                    cost = userLearner.posContextCost(reading, entry.surface, cost)
+                    cost = candidateRanker.posContextCost(reading, entry.surface, cost)
                     // Graduated penalty: first few extra chars are cheap, gets expensive
                     cost += when (extraChars) {
                         1 -> 150
