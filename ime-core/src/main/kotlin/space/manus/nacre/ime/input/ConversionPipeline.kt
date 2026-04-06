@@ -79,7 +79,12 @@ class ConversionPipeline(private val context: Context) : DictionaryProvider {
         addUnique(viterbiEngine.exactMatch(kana))
 
         // 2. Viterbi multi-word conversion (best segmentation)
-        addUnique(viterbiEngine.search(kana))
+        //    For long inputs (12+ chars), use two-pass clause segmentation
+        if (kana.length >= 12) {
+            addUnique(viterbiEngine.convertWithClauseSegmentation(kana))
+        } else {
+            addUnique(viterbiEngine.search(kana))
+        }
 
         // 2.5 Kana variant conversion (を→お/うぉ, ぢ→じ, づ→ず etc.)
         val kanaVariants = viterbiEngine.generateKanaVariants(kana)

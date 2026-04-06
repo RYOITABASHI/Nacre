@@ -70,6 +70,83 @@ class ViterbiEngine(
      * using POS connection costs and optional KenLM language model scoring.
      */
     fun search(kana: String): List<ConversionCandidate> {
+        if (kana.isEmpty()) return emptyList()
+        val hasLm = kenLmScorerProvider()?.isReady() == true
+        val ambiguity = estimateAmbiguity(kana)
+        val K = dynamicBeamWidth(kana.length, ambiguity, hasLm)
+        return searchWithBeamWidth(kana, K)
+    }
+
+    /**
+     * Two-pass clause segmentation for long inputs (12+ chars).
+     * Pass 1: lightweight K=10 Viterbi for POS estimation
+     * Pass 2: split at particle boundaries, full K=40 per clause
+     */
+    fun convertWithClauseSegmentation(kana: String): List<ConversionCandidate> {
+        if (kana.length < 12) return search(kana)
+
+        // Pass 1: lightweight beam search for POS estimation
+        val pass1Results = searchWithBeamWidth(kana, beamWidth = 10)
+        if (pass1Results.isEmpty()) return search(kana)
+
+        val bestPass1 = pass1Results.first()
+        val segments = bestPass1.segments
+        if (segments.size < 2) return search(kana)
+
+        // Find particle boundaries in Pass 1 segments
+        val clauseBoundaries = findClauseBoundaries(kana, segments)
+        if (clauseBoundaries.isEmpty()) return pass1Results // No particles found
+
+        // Pass 2: run full Viterbi on each clause
+        var pos = 0
+        val allClauseSurfaces = mutableListOf<String>()
+        var totalCost = 0
+
+        for (boundary in clauseBoundaries + kana.length) {
+            if (boundary <= pos) continue
+            val clause = kana.substring(pos, boundary)
+            val clauseResults = searchWithBeamWidth(clause, beamWidth = 40)
+            if (clauseResults.isNotEmpty()) {
+                val best = clauseResults.first()
+                allClauseSurfaces.addAll(best.segments.ifEmpty { listOf(best.surface) })
+                totalCost += best.cost
+            } else {
+                allClauseSurfaces.add(clause)
+                totalCost += 10000
+            }
+            pos = boundary
+        }
+
+        // Compare with Pass 1
+        val combinedSurface = allClauseSurfaces.joinToString("")
+        val pass2Candidate = ConversionCandidate(
+            surface = combinedSurface,
+            reading = kana,
+            cost = totalCost,
+            segments = allClauseSurfaces,
+        )
+
+        // Use Pass 2 if it's better, otherwise keep Pass 1
+        val results = mutableListOf<ConversionCandidate>()
+        if (totalCost < bestPass1.cost) {
+            results.add(pass2Candidate)
+            results.addAll(pass1Results)
+        } else {
+            results.addAll(pass1Results)
+            if (combinedSurface != bestPass1.surface) {
+                results.add(pass2Candidate)
+            }
+        }
+
+        return results.distinctBy { it.surface }.take(25)
+    }
+
+    /**
+     * Viterbi beam-search with a specified beam width.
+     * Core algorithm extracted so it can be called with different K values
+     * for clause segmentation passes.
+     */
+    private fun searchWithBeamWidth(kana: String, beamWidth: Int): List<ConversionCandidate> {
         val n = kana.length
         if (n == 0) return emptyList()
 
@@ -112,10 +189,7 @@ class ViterbiEngine(
             return segments
         }
 
-        // Beam width: dynamic based on input length, ambiguity, and LM availability
-        val hasLm = kenLmScorerProvider()?.isReady() == true
-        val ambiguity = estimateAmbiguity(kana)
-        val K = dynamicBeamWidth(n, ambiguity, hasLm)
+        val K = beamWidth
         val dp = Array(n + 1) { mutableListOf<Node>() }
         dp[0].add(Node(cost = 0, backPos = -1, surface = "", reading = "", segCount = 0,
             rightGroup = lastRightGroup, prevNode = null, lmState = lmInitState, lmScore = 0f))
@@ -449,6 +523,46 @@ class ViterbiEngine(
     }
 
     // --- Private helpers ---
+
+    /**
+     * Find clause boundaries by detecting particle surfaces in Pass 1 segments.
+     * Splits AFTER the particle so each clause ends with a particle.
+     */
+    private fun findClauseBoundaries(kana: String, segments: List<String>): List<Int> {
+        val particleSurfaces = setOf(
+            "は", "が", "を", "の", "に", "で", "と", "も",
+            "から", "まで", "へ", "より", "って",
+            "では", "には", "とは", "からは",
+        )
+        val boundaries = mutableListOf<Int>()
+        var kanaPos = 0
+        for (seg in segments) {
+            val readingLen = estimateReadingLength(seg, kana, kanaPos)
+            kanaPos += readingLen
+            if (seg in particleSurfaces && kanaPos < kana.length) {
+                boundaries.add(kanaPos)
+            }
+        }
+        return boundaries
+    }
+
+    /**
+     * Estimate the number of kana characters consumed by a surface form.
+     * Looks up the surface in the dictionary to find the matching reading length.
+     * Falls back to surface length (correct for hiragana/katakana surfaces).
+     */
+    private fun estimateReadingLength(surface: String, fullKana: String, startPos: Int): Int {
+        // Try to find this surface in the dictionary to get its reading length
+        for (len in 1..minOf(8, fullKana.length - startPos)) {
+            val sub = fullKana.substring(startPos, startPos + len)
+            val entries = dict[sub]
+            if (entries != null && entries.any { it.surface == surface }) {
+                return len
+            }
+        }
+        // Fallback: assume surface length == reading length (true for hiragana)
+        return surface.length
+    }
 
     private fun estimateAmbiguity(kana: String): Float {
         // Sample a few substrings to estimate how ambiguous this input is
