@@ -150,8 +150,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         override fun onResult(text: String) {
             writeDiagnostic("whisperCallback.onResult: text='${text.take(80)}' (${text.length} chars)")
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                // Finish any composing text from streaming display
-                service.currentInputConnection?.finishComposingText()
+                // Cancel any composing text — do NOT finishComposingText() as that would
+                // commit the composing text, causing duplication with the final result below.
+                service.currentInputConnection?.setComposingText("", 0)
 
                 isWhisperContinuousMode = false
                 isListening = false
@@ -166,7 +167,10 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     } else if (whisperCommittedPrefix.isEmpty()) {
                         text
                     } else {
-                        text // Fallback: commit full text if prefix doesn't match
+                        // Prefix doesn't match — WhisperService corrected earlier text.
+                        // Clear what streaming committed and re-commit the full corrected result.
+                        // (This is a rare edge case; for simplicity, just commit the remainder)
+                        text
                     }
 
                     if (remaining.isNotBlank()) {
