@@ -396,11 +396,44 @@ class ModelDownloader(private val context: Context) {
         return null
     }
 
+    /**
+     * Extract bundled KenLM 3-gram model from APK assets to internal storage.
+     * Called on first launch. Skips if already extracted.
+     *
+     * @return Absolute path to extracted model, or null if extraction failed or no bundled model
+     */
+    fun extractBundledKenLm(): String? {
+        val targetDir = File(context.filesDir, "models")
+        targetDir.mkdirs()
+        val target = File(targetDir, KENLM_3GRAM_FILENAME)
+        if (target.exists() && target.length() > 1_000_000) return target.absolutePath
+
+        return try {
+            context.assets.open("models/$KENLM_3GRAM_FILENAME").use { input ->
+                target.outputStream().use { output ->
+                    input.copyTo(output, bufferSize = 65536)
+                }
+            }
+            if (target.exists() && target.length() > 0) {
+                Log.i(TAG, "Bundled KenLM 3-gram extracted (${target.length() / 1024 / 1024}MB)")
+                target.absolutePath
+            } else null
+        } catch (e: java.io.FileNotFoundException) {
+            // No bundled model in assets — expected when model hasn't been added yet
+            Log.i(TAG, "No bundled KenLM 3-gram in assets (will be added after CI training)")
+            null
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extract bundled KenLM: ${e.message}")
+            null
+        }
+    }
+
     companion object {
         private const val TAG = "ModelDownloader"
         const val SENSEVOICE_DIR = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
         const val VAD_FILENAME = "silero_vad.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
+        const val KENLM_3GRAM_FILENAME = "japanese-3gram.klm"
         const val LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
         const val KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-5gram.klm"
     }
