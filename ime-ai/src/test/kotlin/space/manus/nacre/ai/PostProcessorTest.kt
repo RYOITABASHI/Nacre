@@ -919,4 +919,155 @@ class PostProcessorTest {
         val result = processor.process("hello    world")
         assertEquals("hello world.", result.text)
     }
+
+    // ══════════════════════════════════════════════════════
+    //  17. Context-aware filler removal (Task 22)
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `removeFiller removes ano as filler when not followed by noun`() {
+        assertEquals("明日会議があります", processor.removeFiller("あの明日会議があります"))
+        assertEquals("行きます", processor.removeFiller("あのー行きます"))
+    }
+
+    @Test
+    fun `removeFiller keeps ano when followed by demonstrative noun hito`() {
+        assertEquals("あの人が来た", processor.removeFiller("あの人が来た"))
+    }
+
+    @Test
+    fun `removeFiller keeps ano when followed by demonstrative noun toki`() {
+        assertEquals("あの時のことを話す", processor.removeFiller("あの時のことを話す"))
+    }
+
+    @Test
+    fun `removeFiller keeps ano when followed by demonstrative noun hi`() {
+        assertEquals("あの日のことです", processor.removeFiller("あの日のことです"))
+    }
+
+    @Test
+    fun `removeFiller keeps ano when followed by kata`() {
+        assertEquals("あの方はどなた", processor.removeFiller("あの方はどなた"))
+    }
+
+    @Test
+    fun `removeFiller removes sono as filler when not followed by noun`() {
+        assertEquals("質問です", processor.removeFiller("そのー質問です"))
+    }
+
+    @Test
+    fun `removeFiller keeps sono when followed by demonstrative noun`() {
+        assertEquals("その件について", processor.removeFiller("その件について"))
+        assertEquals("その話は知ってる", processor.removeFiller("その話は知ってる"))
+    }
+
+    @Test
+    fun `removeFiller keeps ano elongated when followed by noun`() {
+        // あのー (elongated) + noun → demonstrative, keep
+        assertEquals("あのー人はだれ", processor.removeFiller("あのー人はだれ"))
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  18. User-specific filler auto-learning (Task 22b)
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `recordFillerDeletion increments count`() {
+        val p = PostProcessor()
+        assertEquals(0, p.getFillerDeletionCount("まじで"))
+        p.recordFillerDeletion("まじで")
+        p.recordFillerDeletion("まじで")
+        assertEquals(2, p.getFillerDeletionCount("まじで"))
+    }
+
+    @Test
+    fun `removeFiller does not remove word below threshold`() {
+        val p = PostProcessor()
+        repeat(4) { p.recordFillerDeletion("要するに") }
+        assertEquals("要するに大事なのは", p.removeFiller("要するに大事なのは"))
+    }
+
+    @Test
+    fun `removeFiller removes user-learned filler at threshold`() {
+        val p = PostProcessor()
+        repeat(5) { p.recordFillerDeletion("要するに") }
+        assertEquals("大事なのは", p.removeFiller("要するに大事なのは"))
+    }
+
+    @Test
+    fun `removeFiller removes user-learned filler above threshold`() {
+        val p = PostProcessor()
+        repeat(7) { p.recordFillerDeletion("なんていうか") }
+        assertEquals("そういうことです", p.removeFiller("なんていうかそういうことです"))
+    }
+
+    @Test
+    fun `recordFillerDeletion works for multiple different words`() {
+        val p = PostProcessor()
+        repeat(5) { p.recordFillerDeletion("word1") }
+        repeat(3) { p.recordFillerDeletion("word2") }
+        assertEquals("text", p.removeFiller("word1 text"))
+        // word2 is below threshold — should remain
+        assertEquals("word2 text", p.removeFiller("word2 text"))
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  19. Rephrase detection (Task 22c)
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `resolveRephrases removes earlier phrase when suffix overlaps`() {
+        // "明日行きます" and "明後日行きます" share suffix "行きます" (5 chars) with different prefix
+        val result = processor.resolveRephrases("明日行きます明後日行きます")
+        assertEquals("明後日行きます", result)
+    }
+
+    @Test
+    fun `resolveRephrases removes earlier phrase for two-char suffix overlap`() {
+        // "火曜です" and "水曜です" share suffix "曜です" — keep the later one
+        val result = processor.resolveRephrases("火曜です水曜です")
+        assertEquals("水曜です", result)
+    }
+
+    @Test
+    fun `resolveRephrases preserves text with no rephrase`() {
+        val result = processor.resolveRephrases("今日は天気がいい")
+        assertEquals("今日は天気がいい", result)
+    }
+
+    @Test
+    fun `resolveRephrases handles near-identical phrases edit distance 1`() {
+        // "行きます" vs "行います" — one char different (き vs い), distance 1
+        val result = processor.resolveRephrases("行きます行います")
+        assertEquals("行います", result)
+    }
+
+    @Test
+    fun `isRephrase returns true for suffix overlap`() {
+        assertTrue(processor.isRephrase("明日行きます", "明後日行きます"))
+    }
+
+    @Test
+    fun `isRephrase returns true for near-identical strings`() {
+        // "行きます" (6 chars) vs "行います" (6 chars) — distance 1
+        assertTrue(processor.isRephrase("行きます", "行います"))
+    }
+
+    @Test
+    fun `isRephrase returns false for unrelated phrases`() {
+        assertFalse(processor.isRephrase("今日は天気がいい", "明日は雨です"))
+    }
+
+    @Test
+    fun `isRephrase returns false for short phrases`() {
+        assertFalse(processor.isRephrase("は", "が"))
+    }
+
+    @Test
+    fun `resolveCorrections applies rephrase detection after explicit corrections`() {
+        // After explicit correction, rephrase detection should still work on remainder
+        val result = processor.resolveCorrections("火曜日行きます水曜日行きます")
+        // suffix "行きます" shared → keep second
+        assertEquals("水曜日行きます", result)
+    }
 }

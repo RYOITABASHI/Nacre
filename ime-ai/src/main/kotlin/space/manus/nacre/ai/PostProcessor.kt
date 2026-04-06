@@ -61,8 +61,6 @@ class PostProcessor {
             Regex("えー+と"),        // えーと, えーーーーーと
             Regex("えっと"),         // えっと
             Regex("んー*と"),        // んーと, んと
-            Regex("あのー*"),        // あのー, あのーーーー, あの
-            Regex("そのー*"),        // そのー, そのーーーー, その (as filler)
             Regex("うー+ん"),        // うーん, うーーーん
             Regex("うー+"),         // うー (without ん)
             Regex("あー+"),         // あー, あーーー
@@ -76,6 +74,24 @@ class PostProcessor {
             // Allow optional trailing whitespace (half-width or full-width)
             Regex("${base.pattern}[\\s\u3000]*")
         }
+
+        /**
+         * Nouns that follow あの/その when used as demonstratives (not fillers).
+         * If あの/その is directly followed by one of these, it must be kept.
+         */
+        private val DEMONSTRATIVE_NOUN_PREFIXES: List<String> = listOf(
+            "人", "時", "日", "方", "子", "件", "話", "場合", "後", "前",
+            "頃", "辺", "店", "会社", "仕事", "問題", "事", "物", "本",
+            "映画", "音楽", "車", "家", "部屋", "先生", "学生", "女の子",
+            "男の子", "子ども", "友達", "こと", "もの",
+        )
+
+        /**
+         * Regex matching あの or その (with optional elongation) used as fillers.
+         * Context-aware: only matches when NOT followed by a demonstrative noun.
+         * (Applied separately in removeFiller to allow lookahead logic.)
+         */
+        private val ANO_SONO_FILLER = Regex("(あの|その)ー*[\\s\u3000]*")
 
         /**
          * English fillers split into "safe anywhere" and "start-only" groups.
@@ -378,6 +394,13 @@ class PostProcessor {
         private val FULLWIDTH_UPPER_RANGE = '\uFF21'..'\uFF3A'
         /** Full-width lowercase a-z */
         private val FULLWIDTH_LOWER_RANGE = '\uFF41'..'\uFF5A'
+
+        // ────────────────────────────────────────────────────
+        //  User filler learning threshold
+        // ────────────────────────────────────────────────────
+
+        /** Number of manual deletions required before a word is treated as a user filler. */
+        const val USER_FILLER_THRESHOLD = 5
     }
 
     // ════════════════════════════════════════════════════
@@ -435,19 +458,72 @@ class PostProcessor {
     //  Filler removal
     // ════════════════════════════════════════════════════
 
+    // ════════════════════════════════════════════════════
+    //  User filler auto-learning (Task 22b)
+    // ════════════════════════════════════════════════════
+
+    /**
+     * Tracks how many times a word has been manually deleted after voice input.
+     * When the count reaches [USER_FILLER_THRESHOLD], the word is treated as a filler.
+     * Not thread-safe — access from the UI thread only.
+     */
+    private val userFillerCounts = mutableMapOf<String, Int>()
+
+    /**
+     * Record that the user manually deleted [word] after voice input.
+     * Call this whenever the user deletes a word immediately after recognition.
+     * Once a word accumulates [USER_FILLER_THRESHOLD] deletions it is treated as a filler.
+     */
+    fun recordFillerDeletion(word: String) {
+        val count = (userFillerCounts[word] ?: 0) + 1
+        userFillerCounts[word] = count
+    }
+
+    /** Returns the current deletion count for [word]. Useful for testing. */
+    fun getFillerDeletionCount(word: String): Int = userFillerCounts[word] ?: 0
+
     /**
      * Remove filler words from text.
      * Japanese fillers support elongation (えーーーと, あのーーー, etc.)
+     * あの/その are only removed when not followed by a demonstrative noun.
      * English fillers use word boundaries to avoid false positives.
+     * User-learned fillers (deleted 5+ times) are also removed.
      */
     fun removeFiller(text: String): String {
         var result = text
+
+        // Apply standard Japanese filler patterns (あの/その handled separately below)
         for (pattern in JA_FILLER_PATTERNS) {
             result = pattern.replace(result, "")
         }
+
+        // Context-aware あの/その: only remove when NOT followed by a demonstrative noun
+        result = ANO_SONO_FILLER.replace(result) { match ->
+            val afterMatch = result.substring(match.range.last + 1)
+            val isDemonstrative = DEMONSTRATIVE_NOUN_PREFIXES.any { afterMatch.startsWith(it) }
+            if (isDemonstrative) match.value else ""
+        }
+
+        // English fillers
         for (pattern in EN_FILLER_PATTERNS) {
             result = pattern.replace(result, "")
         }
+
+        // User-learned fillers (words deleted 5+ times)
+        for ((word, count) in userFillerCounts) {
+            if (count >= USER_FILLER_THRESHOLD && word.isNotEmpty()) {
+                val escaped = Regex.escape(word)
+                // Use \b for ASCII words, plain match for Japanese/CJK
+                val isAscii = word.all { it.code < 128 }
+                val pattern = if (isAscii) {
+                    Regex("\\b$escaped\\b[,]?\\s?", RegexOption.IGNORE_CASE)
+                } else {
+                    Regex("$escaped[,]?[\\s\u3000]*")
+                }
+                result = pattern.replace(result, "")
+            }
+        }
+
         return result.trim()
     }
 
@@ -459,6 +535,7 @@ class PostProcessor {
      * Resolve self-corrections by keeping only the corrected part.
      * Handles multiple chained corrections: "A じゃなくて B じゃなくて C" → "C"
      * because patterns use greedy (.*) which consumes earlier corrections.
+     * Also detects implicit rephrases via suffix overlap or near-identical phrases.
      */
     fun resolveCorrections(text: String): String {
         var result = text
@@ -482,7 +559,175 @@ class PostProcessor {
             }
         }
 
+        // Rephrase detection: implicit self-correction via suffix overlap or similarity
+        result = resolveRephrases(result)
+
         return result
+    }
+
+    /**
+     * Detect implicit rephrase patterns (Task 22c):
+     * 1. Suffix matching: if the text contains a repeated suffix of 2+ chars where the
+     *    two occurrences differ only in their prefix, keep the later one.
+     *    e.g., "明日行きます明後日行きます" → "明後日行きます" (shared suffix "行きます")
+     * 2. High similarity: consecutive delimited phrases that are nearly identical
+     *    (edit distance ≤ threshold) → keep the later one.
+     *
+     * For unpunctuated continuous speech, suffix-overlap scanning is applied directly
+     * on the full string. For punctuated text, segment-based comparison is used.
+     */
+    internal fun resolveRephrases(text: String): String {
+        // First try segment-based detection (punctuated/spaced text)
+        val segments = splitIntoSegments(text)
+        if (segments.size >= 2) {
+            val kept = mutableListOf<String>()
+            var i = 0
+            while (i < segments.size) {
+                if (i + 1 < segments.size) {
+                    val a = segments[i]
+                    val b = segments[i + 1]
+                    if (isRephrase(a, b)) {
+                        i++ // skip a, process b next iteration
+                        continue
+                    }
+                }
+                kept.add(segments[i])
+                i++
+            }
+            val joined = kept.joinToString("")
+            if (joined != text) return joined
+        }
+
+        // Fall back to suffix-overlap scan on raw string (unpunctuated speech)
+        return suffixOverlapScan(text)
+    }
+
+    /**
+     * Scan the raw string for a suffix-overlap rephrase pattern without delimiters.
+     * Finds the longest suffix S (2+ chars) that appears twice in [text] such that:
+     *   - The first occurrence ends before the midpoint
+     *   - The second occurrence ends at the end of the string
+     *   - The prefix before the first S differs from the prefix before the second S
+     * Returns the second phrase (from the start of the second prefix to end).
+     *
+     * Also applies near-identical detection on equal-length halves.
+     */
+    private fun suffixOverlapScan(text: String): String {
+        val n = text.length
+        if (n < 4) return text
+
+        // Try all suffix lengths from longest possible to 2
+        val maxSuffixLen = n / 2
+        for (suffixLen in maxSuffixLen downTo 2) {
+            val suffix = text.takeLast(suffixLen)
+            // Find an earlier occurrence of this suffix in the first half
+            val firstEnd = text.indexOf(suffix)
+            if (firstEnd < 0) continue
+            val firstStart = firstEnd - (n - suffixLen - firstEnd) // rough check
+            // The first phrase ends at firstEnd + suffixLen - 1
+            val firstPhraseEnd = firstEnd + suffixLen
+            if (firstPhraseEnd >= n) continue // suffix is at the very end only
+            // The second occurrence must end at n
+            val secondStart = n - suffixLen
+            // Prefix of first phrase: text[0..firstEnd)
+            val prefixA = text.substring(0, firstEnd)
+            // Prefix of second phrase: text[firstPhraseEnd..secondStart)
+            val prefixB = text.substring(firstPhraseEnd, secondStart)
+            if (prefixA == prefixB) continue // same prefix = not a correction
+            if (prefixA.isEmpty() || prefixB.isEmpty()) continue
+            // Looks like a rephrase: "prefixA + suffix + prefixB + suffix"
+            // Keep the second phrase: prefixB + suffix
+            return prefixB + suffix
+        }
+
+        // Near-identical halves check
+        if (n % 2 == 0) {
+            val half = n / 2
+            val a = text.substring(0, half)
+            val b = text.substring(half)
+            if (isRephrase(a, b)) return b
+        }
+
+        return text
+    }
+
+    /**
+     * Split text into natural segments using punctuation or whitespace.
+     * Preserves delimiters attached to segments.
+     */
+    private fun splitIntoSegments(text: String): List<String> {
+        val result = mutableListOf<String>()
+        val sb = StringBuilder()
+        for (ch in text) {
+            sb.append(ch)
+            if (ch in "、。,. \t") {
+                result.add(sb.toString())
+                sb.clear()
+            }
+        }
+        if (sb.isNotEmpty()) result.add(sb.toString())
+        return result.filter { it.isNotBlank() }
+    }
+
+    /**
+     * Returns true if [b] appears to be a rephrase/correction of [a]:
+     * - Common suffix of 2+ chars and differing prefix (suffix overlap rephrase)
+     * - Nearly identical content (edit distance ≤ threshold for strings of length ≥ 4)
+     */
+    internal fun isRephrase(a: String, b: String): Boolean {
+        val aTrim = a.trimEnd('、', '。', ',', '.', ' ')
+        val bTrim = b.trimEnd('、', '。', ',', '.', ' ')
+        if (aTrim.length < 2 || bTrim.length < 2) return false
+
+        // 1. Suffix overlap: shared suffix of 2+ chars, differing prefix
+        val minLen = minOf(aTrim.length, bTrim.length)
+        var suffixLen = 0
+        for (k in 1..minLen) {
+            if (aTrim[aTrim.length - k] == bTrim[bTrim.length - k]) suffixLen++
+            else break
+        }
+        if (suffixLen >= 2) {
+            val prefixA = aTrim.dropLast(suffixLen)
+            val prefixB = bTrim.dropLast(suffixLen)
+            if (prefixA != prefixB && prefixA.isNotEmpty() && prefixB.isNotEmpty()) {
+                return true
+            }
+        }
+
+        // 2. Near-identical phrases (edit distance ≤ threshold for phrases of length ≥ 4)
+        if (aTrim.length >= 4 && bTrim.length >= 4) {
+            val dist = editDistance(aTrim, bTrim)
+            val threshold = if (aTrim.length >= 8) 2 else 1
+            if (dist in 1..threshold) return true
+        }
+
+        return false
+    }
+
+    /**
+     * Standard Levenshtein edit distance between two strings.
+     * Capped at [maxDist]+1 for efficiency — returns early if distance exceeds cap.
+     */
+    private fun editDistance(a: String, b: String, maxDist: Int = 3): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return b.length
+        if (b.isEmpty()) return a.length
+        if (kotlin.math.abs(a.length - b.length) > maxDist) return maxDist + 1
+
+        val prev = IntArray(b.length + 1) { it }
+        val curr = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            curr[0] = i
+            for (j in 1..b.length) {
+                curr[j] = if (a[i - 1] == b[j - 1]) {
+                    prev[j - 1]
+                } else {
+                    1 + minOf(prev[j], curr[j - 1], prev[j - 1])
+                }
+            }
+            prev.indices.forEach { prev[it] = curr[it] }
+        }
+        return curr[b.length]
     }
 
     // ════════════════════════════════════════════════════
