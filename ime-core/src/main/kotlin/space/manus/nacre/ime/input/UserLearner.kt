@@ -17,7 +17,10 @@ import space.manus.nacre.ime.input.DictionaryManager.Companion.isVerb
  * from dictionary I/O (DictionaryManager) and Viterbi conversion (ViterbiEngine).
  *
  * Responsibilities:
- * - Unigram / bigram / trigram boost tracking
+ * - Unigram / bigram / trigram / 4-gram boost tracking
+ * - Time-decay based boost scoring
+ * - Rejection learning (negative feedback)
+ * - Domain-specific learning (per-app boost)
  * - POS-aware context cost adjustment
  * - KenLM rescoring
  * - Recent history and next-word prediction
@@ -26,6 +29,30 @@ import space.manus.nacre.ime.input.DictionaryManager.Companion.isVerb
  * - Frequency decay across sessions
  * - Persistence to SharedPreferences
  */
+
+data class BoostEntry(val count: Int, val lastUsedAt: Long, val sessionCount: Int = 1) {
+    companion object {
+        fun decayedBoost(entry: BoostEntry, now: Long): Int {
+            val daysSinceUse = ((now - entry.lastUsedAt) / (24 * 60 * 60 * 1000L)).toInt()
+            val rawBoost = when {
+                entry.count >= 5 -> 5500
+                entry.count >= 4 -> 5200
+                entry.count >= 3 -> 4500
+                entry.count >= 2 -> 3500
+                entry.count >= 1 -> 2000
+                else -> 0
+            }
+            val decayFactor = when {
+                daysSinceUse <= 3 -> 1.0f
+                daysSinceUse <= 7 -> 0.85f
+                daysSinceUse <= 14 -> 0.6f
+                daysSinceUse <= 30 -> 0.15f
+                else -> 0.0f  // expired
+            }
+            return (rawBoost * decayFactor).toInt()
+        }
+    }
+}
 class UserLearner(
     private val context: Context,
     private val dictManager: DictionaryManager,
@@ -34,14 +61,27 @@ class UserLearner(
     private inline val dict get() = dictManager.dict
     private inline val staticBigrams get() = dictManager.staticBigrams
 
-    // User learning: boost for selected candidates (thread-safe)
+    // User learning: boost for selected candidates (thread-safe) with timestamps
     private val userBoost = ConcurrentHashMap<String, Int>(1000)
+    private val userBoostTimestamp = ConcurrentHashMap<String, Long>(1000)
 
     // Bigram learning: "prevSurface→reading:surface" → count
     private val bigramBoost = ConcurrentHashMap<String, Int>(500)
 
     // Trigram learning: "prev2→prev1→reading:surface" → count
     private val trigramBoost = ConcurrentHashMap<String, Int>(300)
+
+    // 4-gram learning: "prev3→prev2→prev1→reading:surface" → count
+    private val fourgramBoost = ConcurrentHashMap<String, Int>(200)
+
+    // Rejection learning: track when users skip candidates
+    private val rejectionCount = ConcurrentHashMap<String, Int>(200)
+    private var lastCommit: String = ""
+    private var lastCommitTime: Long = 0L
+
+    // Domain-specific learning: per-app boost
+    var currentDomain: String = ""
+    private val domainBoost = ConcurrentHashMap<String, ConcurrentHashMap<String, Int>>(5)
 
     // Recent history: ordered list of recently committed candidates (newest first)
     val recentHistory = java.util.LinkedList<ConversionCandidate>()
@@ -98,7 +138,15 @@ class UserLearner(
      */
     fun applyBoost(reading: String, surface: String, baseCost: Int): Int {
         val key = "$reading:$surface"
+        val now = System.currentTimeMillis()
+
+        // Unigram boost with time decay
         val unigramCount = userBoost[key] ?: 0
+        val unigramTimestamp = userBoostTimestamp[key] ?: 0L
+        val unigramBoostVal = if (unigramCount > 0) {
+            BoostEntry.decayedBoost(BoostEntry(unigramCount, unigramTimestamp), now)
+        } else 0
+
         val bigramCount = if (lastCommittedSurface.isNotEmpty()) {
             bigramBoost["$lastCommittedSurface→$key"] ?: 0
         } else 0
@@ -106,24 +154,31 @@ class UserLearner(
             trigramBoost["$secondLastCommittedSurface→$lastCommittedSurface→$key"] ?: 0
         } else 0
 
+        // 4-gram boost
+        val thirdLast = committedContext.getOrNull(2) ?: ""
+        val fourgramCount = if (thirdLast.isNotEmpty() && secondLastCommittedSurface.isNotEmpty() && lastCommittedSurface.isNotEmpty()) {
+            fourgramBoost["$thirdLast→$secondLastCommittedSurface→$lastCommittedSurface→$key"] ?: 0
+        } else 0
+
         // Static bigram boost (from bigrams.tsv — common Japanese collocations)
         val staticBoostVal = if (lastCommittedSurface.isNotEmpty()) {
             staticBigrams["$lastCommittedSurface→$key"] ?: 0
         } else 0
 
-        // First use gets the biggest boost (diminishing returns after)
-        // 1st use: 2000, 2nd: 3500, 3rd: 4500, 4th: 5200, 5th+: 5500
-        val unigramBoostVal = when {
-            unigramCount >= 5 -> 5500
-            unigramCount >= 4 -> 5200
-            unigramCount >= 3 -> 4500
-            unigramCount >= 2 -> 3500
-            unigramCount >= 1 -> 2000
-            else -> 0
-        }
+        // Domain-specific boost
+        val domainBoostVal = getDomainBoost(reading, surface)
+
         val bigramBoostVal = minOf(bigramCount, 4) * 2500
         val trigramBoostVal = minOf(trigramCount, 3) * 3500
-        val totalBoost = minOf(unigramBoostVal + bigramBoostVal + trigramBoostVal + staticBoostVal, 22000)
+        val fourgramBoostVal = minOf(fourgramCount, 3) * 4000
+
+        // Rejection penalty
+        val rejectionPenalty = getRejectionPenalty(key)
+
+        val totalBoost = minOf(
+            unigramBoostVal + bigramBoostVal + trigramBoostVal + fourgramBoostVal + staticBoostVal + domainBoostVal - rejectionPenalty,
+            22000
+        )
         return maxOf(100, baseCost - totalBoost)
     }
 
@@ -133,8 +188,23 @@ class UserLearner(
      * Record user selection: updates boost, bigram, trigram, history, and POS context.
      */
     fun recordSelection(candidate: ConversionCandidate) {
+        val now = System.currentTimeMillis()
         val key = "${candidate.reading}:${candidate.surface}"
+
+        // Correction detection: if user backspaces within 500ms of last commit,
+        // the last commit was likely wrong → record rejection
+        if (lastCommit.isNotEmpty() && now - lastCommitTime < 500) {
+            recordRejection(lastCommit)
+        }
+        lastCommit = key
+        lastCommitTime = now
+
+        // Unigram boost with timestamp
         userBoost[key] = (userBoost[key] ?: 0) + 1
+        userBoostTimestamp[key] = now
+
+        // Positive selection resets rejection count
+        onPositiveSelection(key)
 
         // Bigram
         if (lastCommittedSurface.isNotEmpty()) {
@@ -146,8 +216,27 @@ class UserLearner(
             val trigramKey = "$secondLastCommittedSurface→$lastCommittedSurface→$key"
             trigramBoost[trigramKey] = (trigramBoost[trigramKey] ?: 0) + 1
         }
+        // 4-gram
+        val thirdLast = committedContext.getOrNull(2) ?: ""
+        if (thirdLast.isNotEmpty() && secondLastCommittedSurface.isNotEmpty() && lastCommittedSurface.isNotEmpty()) {
+            val fourgramKey = "$thirdLast→$secondLastCommittedSurface→$lastCommittedSurface→$key"
+            fourgramBoost[fourgramKey] = (fourgramBoost[fourgramKey] ?: 0) + 1
+            // Cap 4-gram entries at 1000
+            if (fourgramBoost.size > 1000) {
+                val lowest = fourgramBoost.entries.minByOrNull { it.value }
+                if (lowest != null) fourgramBoost.remove(lowest.key)
+            }
+        }
+
         committedContext.addFirst(candidate.surface)
         while (committedContext.size > 4) committedContext.removeLast()
+
+        // Domain-specific learning
+        if (currentDomain.isNotEmpty()) {
+            val domainMap = domainBoost.getOrPut(currentDomain) { ConcurrentHashMap(200) }
+            val domainKey = "${candidate.reading}:${candidate.surface}"
+            domainMap[domainKey] = (domainMap[domainKey] ?: 0) + 1
+        }
 
         // Update POS context from the selected candidate's dictionary entry
         val entries = dict[candidate.reading]
@@ -356,6 +445,30 @@ class UserLearner(
         return results
     }
 
+    // --- Rejection learning ---
+
+    fun recordRejection(key: String, penalty: Int = 500) {
+        val count = (rejectionCount[key] ?: 0) + 1
+        rejectionCount[key] = count
+    }
+
+    fun getRejectionPenalty(key: String): Int {
+        val count = rejectionCount[key] ?: 0
+        return minOf(count * 500, 2000)  // cap at 2000
+    }
+
+    fun onPositiveSelection(key: String) {
+        rejectionCount.remove(key)
+    }
+
+    // --- Domain-specific learning ---
+
+    fun getDomainBoost(reading: String, surface: String): Int {
+        if (currentDomain.isEmpty()) return 0
+        val domainMap = domainBoost[currentDomain] ?: return 0
+        return domainMap["$reading:$surface"] ?: 0
+    }
+
     // --- Debounced save ---
 
     private fun debouncedSave() {
@@ -451,13 +564,22 @@ class UserLearner(
     private fun loadUserBoost() {
         try {
             val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
+            val now = System.currentTimeMillis()
+            val thirtyDaysMs = 30L * 24 * 60 * 60 * 1000
 
             val data = prefs.getString("boost", null)
             if (data != null) {
                 for (line in data.split('\n')) {
                     val parts = line.split('\t')
-                    if (parts.size == 2) {
-                        userBoost[parts[0]] = parts[1].toIntOrNull() ?: 0
+                    if (parts.size >= 2) {
+                        val key = parts[0]
+                        val count = parts[1].toIntOrNull() ?: 0
+                        // New format: key\tcount\ttimestamp; old format: key\tcount (timestamp=0)
+                        val timestamp = if (parts.size >= 3) parts[2].toLongOrNull() ?: 0L else 0L
+                        // Session cleanup: delete entries older than 30 days
+                        if (timestamp > 0 && now - timestamp > thirtyDaysMs) continue
+                        userBoost[key] = count
+                        userBoostTimestamp[key] = timestamp
                     }
                 }
             }
@@ -482,6 +604,17 @@ class UserLearner(
                 }
             }
 
+            // 4-gram data
+            val fourgramData = prefs.getString("fourgram", null)
+            if (fourgramData != null) {
+                for (line in fourgramData.split('\n')) {
+                    val parts = line.split('\t')
+                    if (parts.size == 2) {
+                        fourgramBoost[parts[0]] = parts[1].toIntOrNull() ?: 0
+                    }
+                }
+            }
+
             val historyData = prefs.getString("history", null)
             if (historyData != null) {
                 for (line in historyData.split('\n')) {
@@ -496,6 +629,9 @@ class UserLearner(
                     }
                 }
             }
+
+            // Load domain boost (top 5 domains)
+            loadDomainBoost(prefs)
         } catch (e: Exception) {
             Log.w("UserLearner", "Failed to load user boost", e)
         }
@@ -505,10 +641,11 @@ class UserLearner(
         try {
             val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
 
+            // Save with timestamp: key\tcount\ttimestamp
             val data = userBoost.entries
                 .sortedByDescending { it.value }
                 .take(5000)
-                .joinToString("\n") { "${it.key}\t${it.value}" }
+                .joinToString("\n") { "${it.key}\t${it.value}\t${userBoostTimestamp[it.key] ?: 0}" }
 
             val bigramData = bigramBoost.entries
                 .sortedByDescending { it.value }
@@ -520,6 +657,11 @@ class UserLearner(
                 .take(2000)
                 .joinToString("\n") { "${it.key}\t${it.value}" }
 
+            val fourgramData = fourgramBoost.entries
+                .sortedByDescending { it.value }
+                .take(1000)
+                .joinToString("\n") { "${it.key}\t${it.value}" }
+
             val historyData = recentHistory
                 .take(maxHistory)
                 .joinToString("\n") { "${it.surface}\t${it.reading}" }
@@ -528,8 +670,12 @@ class UserLearner(
                 .putString("boost", data)
                 .putString("bigram", bigramData)
                 .putString("trigram", trigramData)
+                .putString("fourgram", fourgramData)
                 .putString("history", historyData)
                 .apply()
+
+            // Save domain boost (top 5 domains)
+            saveDomainBoost(prefs)
         } catch (e: Exception) {
             Log.w("UserLearner", "Failed to save user boost", e)
         }
@@ -625,6 +771,41 @@ class UserLearner(
         } catch (e: Exception) {
             Log.w("UserLearner", "Failed to save phrase memory", e)
         }
+    }
+
+    // --- Persistence: domain boost ---
+
+    private fun loadDomainBoost(prefs: android.content.SharedPreferences) {
+        val domainList = prefs.getString("domain_list", null) ?: return
+        for (domain in domainList.split('\n')) {
+            if (domain.isBlank()) continue
+            val domainData = prefs.getString("nacre_domain_boost_$domain", null) ?: continue
+            val map = ConcurrentHashMap<String, Int>(200)
+            for (line in domainData.split('\n')) {
+                val parts = line.split('\t')
+                if (parts.size == 2) {
+                    map[parts[0]] = parts[1].toIntOrNull() ?: 0
+                }
+            }
+            domainBoost[domain] = map
+        }
+    }
+
+    private fun saveDomainBoost(prefs: android.content.SharedPreferences) {
+        // Save top 5 domains by total entry count
+        val topDomains = domainBoost.entries
+            .sortedByDescending { it.value.size }
+            .take(5)
+        val editor = prefs.edit()
+        editor.putString("domain_list", topDomains.joinToString("\n") { it.key })
+        for ((domain, map) in topDomains) {
+            val data = map.entries
+                .sortedByDescending { it.value }
+                .take(500)
+                .joinToString("\n") { "${it.key}\t${it.value}" }
+            editor.putString("nacre_domain_boost_$domain", data)
+        }
+        editor.apply()
     }
 
     // --- Frequency decay ---
