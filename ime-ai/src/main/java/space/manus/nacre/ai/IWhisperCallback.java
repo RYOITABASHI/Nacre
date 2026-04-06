@@ -7,13 +7,13 @@ package space.manus.nacre.ai;
 public interface IWhisperCallback extends android.os.IInterface {
 
     void onResult(String text) throws android.os.RemoteException;
-    void onPartialResult(String text) throws android.os.RemoteException;
+    void onPartialResult(String text, boolean isStable) throws android.os.RemoteException;
     void onError(String message) throws android.os.RemoteException;
 
     /** Default implementation */
     public static class Default implements IWhisperCallback {
         @Override public void onResult(String text) throws android.os.RemoteException {}
-        @Override public void onPartialResult(String text) throws android.os.RemoteException {}
+        @Override public void onPartialResult(String text, boolean isStable) throws android.os.RemoteException {}
         @Override public void onError(String message) throws android.os.RemoteException {}
         @Override public android.os.IBinder asBinder() { return null; }
     }
@@ -49,7 +49,8 @@ public interface IWhisperCallback extends android.os.IInterface {
                 case TRANSACTION_onPartialResult: {
                     data.enforceInterface(DESCRIPTOR);
                     String _arg0 = data.readString();
-                    this.onPartialResult(_arg0);
+                    boolean _arg1 = (data.readInt() != 0);
+                    this.onPartialResult(_arg0, _arg1);
                     return true;
                 }
                 case TRANSACTION_onError: {
@@ -78,11 +79,12 @@ public interface IWhisperCallback extends android.os.IInterface {
             }
 
             @Override
-            public void onPartialResult(String text) throws android.os.RemoteException {
+            public void onPartialResult(String text, boolean isStable) throws android.os.RemoteException {
                 android.os.Parcel _data = android.os.Parcel.obtain();
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
                     _data.writeString(text);
+                    _data.writeInt(isStable ? 1 : 0);
                     mRemote.transact(TRANSACTION_onPartialResult, _data, null, android.os.IBinder.FLAG_ONEWAY);
                 } finally { _data.recycle(); }
             }

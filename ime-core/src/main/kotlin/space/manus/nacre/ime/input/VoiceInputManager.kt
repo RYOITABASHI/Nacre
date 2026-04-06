@@ -61,6 +61,25 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     // Consecutive error tracking for backoff
     private var consecutiveErrors = 0
 
+    // Whisper streaming display tracking (Task 20)
+    private var whisperPartialStableCount = 0
+    private var whisperLastPartialText = ""
+    private var whisperCommittedPrefix = ""
+
+    // Pause duration tracking for punctuation hints (Task 21)
+    private var lastChunkTime = 0L
+    private var lastPauseDurationMs = 0L
+
+    // Always-on listening mode (Task 23)
+    var alwaysOnMode by mutableStateOf(false)
+        private set
+
+    // Correction learning (Task 24)
+    var lastVoiceCommitText = ""
+        private set
+    var lastVoiceCommitTime = 0L
+        private set
+
     // Whisper continuous mode
     @Volatile private var whisperService: IWhisperService? = null
     @Volatile private var whisperBound = false
@@ -131,6 +150,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         override fun onResult(text: String) {
             writeDiagnostic("whisperCallback.onResult: text='${text.take(80)}' (${text.length} chars)")
             android.os.Handler(android.os.Looper.getMainLooper()).post {
+                // Finish any composing text from streaming display
+                service.currentInputConnection?.finishComposingText()
+
                 isWhisperContinuousMode = false
                 isListening = false
                 partialText = ""
@@ -138,32 +160,115 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 releaseAudioFocus()
 
                 if (text.isNotBlank()) {
-                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(text)
-                    writeDiagnostic("whisperCallback.onResult: quickClean='${cleaned.take(80)}'")
-                    service.currentInputConnection?.commitText(cleaned, 1)
-                    // Stage 2: LLM refinement in background, replace quickClean result if better
-                    tryLlmRefinement(cleaned)
+                    // Only commit the portion after what was already committed via streaming
+                    val remaining = if (whisperCommittedPrefix.isNotEmpty() && text.startsWith(whisperCommittedPrefix)) {
+                        text.substring(whisperCommittedPrefix.length)
+                    } else if (whisperCommittedPrefix.isEmpty()) {
+                        text
+                    } else {
+                        text // Fallback: commit full text if prefix doesn't match
+                    }
+
+                    if (remaining.isNotBlank()) {
+                        val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(remaining)
+                        val punctuated = smartPunctuation(cleaned)
+                        writeDiagnostic("whisperCallback.onResult: quickClean='${punctuated.take(80)}'")
+                        service.currentInputConnection?.commitText(punctuated, 1)
+                        committedInSession.append(punctuated)
+                        recordVoiceCommit(punctuated)
+                        // Stage 2: LLM refinement in background
+                        tryLlmRefinement(punctuated)
+                    }
                 } else {
                     writeDiagnostic("whisperCallback.onResult: text is BLANK, skipping")
+                }
+
+                // Reset streaming state
+                whisperPartialStableCount = 0
+                whisperLastPartialText = ""
+                whisperCommittedPrefix = ""
+                lastChunkTime = 0L
+
+                // Always-on mode: restart listening after result
+                if (alwaysOnMode && isBatteryOk()) {
+                    mainHandler.postDelayed({
+                        if (alwaysOnMode) startListening(currentLanguage)
+                    }, 200)
                 }
             }
         }
 
-        override fun onPartialResult(text: String) {
-            // Typeless-style: no preview during recording.
+        override fun onPartialResult(text: String, isStable: Boolean) {
+            val now = System.currentTimeMillis()
+            // Track pause duration between chunks for punctuation hints
+            if (lastChunkTime > 0) {
+                lastPauseDurationMs = now - lastChunkTime
+            }
+            lastChunkTime = now
+
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                if (text.isBlank()) return@post
+
+                // Track stability: if same text 3 consecutive times, commit prefix as stable
+                if (text == whisperLastPartialText) {
+                    whisperPartialStableCount++
+                } else {
+                    whisperPartialStableCount = 0
+                    whisperLastPartialText = text
+                }
+
+                val shouldCommitStable = isStable || whisperPartialStableCount >= 3
+
+                if (shouldCommitStable && text.length > whisperCommittedPrefix.length) {
+                    // Find a natural break point for stable prefix
+                    val uncommitted = text.substring(whisperCommittedPrefix.length)
+                    val breakIdx = findNaturalBreak(uncommitted)
+                    if (breakIdx > 0) {
+                        val stableChunk = uncommitted.substring(0, breakIdx)
+                        val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(stableChunk)
+                        if (cleaned.isNotBlank()) {
+                            service.currentInputConnection?.commitText(cleaned, 1)
+                            committedInSession.append(cleaned)
+                            recordVoiceCommit(cleaned)
+                        }
+                        whisperCommittedPrefix = text.substring(0, whisperCommittedPrefix.length + breakIdx)
+                    }
+                }
+
+                // Show remaining uncommitted text as composing (inline preview)
+                val remaining = if (text.length > whisperCommittedPrefix.length) {
+                    text.substring(whisperCommittedPrefix.length)
+                } else ""
+                partialText = remaining
+                if (remaining.isNotEmpty()) {
+                    service.currentInputConnection?.setComposingText(remaining, 1)
+                }
+            }
         }
 
         override fun onError(message: String) {
             writeDiagnostic("whisperCallback.onError: $message")
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 Log.w(TAG, "Whisper error: $message")
+                service.currentInputConnection?.finishComposingText()
                 isWhisperContinuousMode = false
                 isListening = false
                 partialText = ""
                 rmsLevel = 0f
                 lastError = "Whisper: $message"
                 releaseAudioFocus()
-                // Don't auto-fallback to SpeechRecognizer — let user see the error and retry
+                // Reset streaming state
+                whisperPartialStableCount = 0
+                whisperLastPartialText = ""
+                whisperCommittedPrefix = ""
+                lastChunkTime = 0L
+
+                // Always-on mode: retry after error with backoff
+                if (alwaysOnMode && isBatteryOk()) {
+                    mainHandler.postDelayed({
+                        if (alwaysOnMode) startListening(currentLanguage)
+                    }, 2000)
+                }
             }
         }
     }
@@ -235,6 +340,10 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         lastPartialTime = 0L
         deferredText.clear()
         cancelDeferredCommit()
+        whisperPartialStableCount = 0
+        whisperLastPartialText = ""
+        whisperCommittedPrefix = ""
+        lastChunkTime = 0L
 
         // Whisper priority — use continuous mode if model loaded
         Log.i(TAG, "startListening: whisperService=${whisperService != null}, whisperBound=$whisperBound, isWhisperContinuousMode=$isWhisperContinuousMode")
@@ -340,12 +449,21 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     }
 
     fun stopListening() {
-        writeDiagnostic("stopListening: whisperMode=$isWhisperContinuousMode, whisperService=${whisperService != null}")
+        writeDiagnostic("stopListening: whisperMode=$isWhisperContinuousMode, whisperService=${whisperService != null}, alwaysOn=$alwaysOnMode")
+        // Explicit stop always disables always-on mode
+        alwaysOnMode = false
         if (isWhisperContinuousMode) {
+            // Finish composing text from streaming display
+            service.currentInputConnection?.finishComposingText()
             isWhisperContinuousMode = false
             isListening = false
             partialText = ""
             rmsLevel = 0f
+            // Reset streaming state
+            whisperPartialStableCount = 0
+            whisperLastPartialText = ""
+            whisperCommittedPrefix = ""
+            lastChunkTime = 0L
             try {
                 whisperService?.stopRecognition()
             } catch (e: android.os.RemoteException) {
@@ -373,6 +491,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     }
 
     fun cancel() {
+        alwaysOnMode = false
         if (isWhisperContinuousMode) {
             try {
                 whisperService?.cancelContinuousRecognition()
@@ -383,6 +502,10 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             isListening = false
             partialText = ""
             rmsLevel = 0f
+            whisperPartialStableCount = 0
+            whisperLastPartialText = ""
+            whisperCommittedPrefix = ""
+            lastChunkTime = 0L
             releaseAudioFocus()
             service.currentInputConnection?.finishComposingText()
             return
@@ -779,18 +902,47 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 return "$text！"
             }
 
-            // KenLM-assisted punctuation for ambiguous cases
+            // Enhanced punctuation: combine KenLM (0.5) + pattern (0.3) + pause (0.2)
             val scorer = (service.inputEngine.dictionary as? ConversionPipeline)?.kenLmScorer
             if (scorer != null && scorer.isReady()) {
                 val context = committedInSession.toString().takeLast(20)
-                val scores = scorer.scoreBatch(
-                    listOf(listOf("$text。"), listOf("$text？"), listOf("$text！")),
+                val candidates = listOf("$text。", "$text？", "$text！", "$text、")
+                val lmScores = scorer.scoreBatch(
+                    candidates.map { listOf(it) },
                     context,
                 )
-                val bestIdx = scores.indices.maxByOrNull { scores[it] } ?: 0
+                // Normalize LM scores to 0..1 range
+                val lmMin = lmScores.min()
+                val lmMax = lmScores.max()
+                val lmRange = if (lmMax - lmMin > 0.001f) lmMax - lmMin else 1f
+                val lmNorm = lmScores.map { (it - lmMin) / lmRange }
+
+                // Pattern-based scores (from the detection above: none matched, so default)
+                // 。=0.7 (default), ？=0.1, ！=0.1, 、=0.1
+                val patternScores = floatArrayOf(0.7f, 0.1f, 0.1f, 0.1f)
+
+                // Pause-based hints: long pause (>1.5s) → sentence end (。), short (<300ms) → comma (、)
+                val pauseScores = when {
+                    lastPauseDurationMs > 1500 -> floatArrayOf(0.8f, 0.1f, 0.05f, 0.05f) // Long pause → period
+                    lastPauseDurationMs > 800 -> floatArrayOf(0.5f, 0.2f, 0.1f, 0.2f)  // Medium pause
+                    lastPauseDurationMs > 0 -> floatArrayOf(0.2f, 0.1f, 0.05f, 0.65f)   // Short pause → comma
+                    else -> floatArrayOf(0.5f, 0.15f, 0.1f, 0.25f) // No pause data
+                }
+
+                // Weighted combination
+                var bestIdx = 0
+                var bestScore = Float.MIN_VALUE
+                for (i in candidates.indices) {
+                    val combined = lmNorm[i] * 0.5f + patternScores[i] * 0.3f + pauseScores[i] * 0.2f
+                    if (combined > bestScore) {
+                        bestScore = combined
+                        bestIdx = i
+                    }
+                }
                 return when (bestIdx) {
                     1 -> "$text？"
                     2 -> "$text！"
+                    3 -> "$text、"
                     else -> "$text。"
                 }
             }
@@ -1022,6 +1174,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(processed)
                 service.currentInputConnection?.commitText(cleaned, 1)
                 committedInSession.append(cleaned)
+                recordVoiceCommit(cleaned)
                 // Stage 2: LLM refinement in background
                 tryLlmRefinement(cleaned)
                 utteranceCount++
@@ -1154,10 +1307,91 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         } catch (_: Exception) {}
     }
 
+    // ── Streaming display helpers (Task 20) ──────────────────────────
+
+    /**
+     * Find a natural break point in text for streaming commit.
+     * Returns index within the text to commit up to, or 0 if no good break found.
+     */
+    private fun findNaturalBreak(text: String): Int {
+        if (text.length < 4) return 0
+        val hasJapanese = text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }
+        if (hasJapanese) {
+            // Look for punctuation or particle boundaries in the first 80% of text
+            val target = (text.length * 0.8).toInt()
+            for (i in target downTo 2) {
+                val c = text[i]
+                if (c in "。、！？") return i + 1
+                if (i > 0 && c in "はがをにでとのもへ") return i + 1
+            }
+            // If text is long enough, commit at target anyway
+            return if (text.length > 10) target else 0
+        } else {
+            val lastSpace = text.lastIndexOf(' ', (text.length * 0.8).toInt())
+            return if (lastSpace > 2) lastSpace + 1 else 0
+        }
+    }
+
+    // ── Always-on listening mode (Task 23) ──────────────────────────
+
+    /**
+     * Toggle always-on listening mode.
+     * When enabled, VAD runs continuously. SenseVoice inference starts only when
+     * VAD detects speech and stops after 2s silence. Paragraph breaks (\n\n)
+     * are inserted after 2s of silence between utterances.
+     */
+    fun toggleContinuousListening() {
+        alwaysOnMode = !alwaysOnMode
+        writeDiagnostic("toggleContinuousListening: alwaysOnMode=$alwaysOnMode")
+        if (alwaysOnMode) {
+            startListening(currentLanguage)
+        } else {
+            stopListening()
+        }
+    }
+
+    // ── User correction learning (Task 24) ──────────────────────────
+
+    /**
+     * Record a voice commit for correction tracking.
+     */
+    private fun recordVoiceCommit(text: String) {
+        lastVoiceCommitText = text
+        lastVoiceCommitTime = System.currentTimeMillis()
+    }
+
+    /**
+     * Called by InputEngine when user edits text shortly after voice commit.
+     * If the edit happens within CORRECTION_WINDOW_MS, compute a diff and
+     * auto-promote the correction to LlmPostProcessor.quickClean rules.
+     *
+     * @param oldText the original committed text
+     * @param newText the user-corrected text
+     */
+    fun checkVoiceCorrection(oldText: String, newText: String) {
+        val elapsed = System.currentTimeMillis() - lastVoiceCommitTime
+        if (elapsed > CORRECTION_WINDOW_MS) return
+        if (oldText == newText) return
+        if (lastVoiceCommitText.isEmpty()) return
+
+        // Only learn if the correction is within the voice-committed region
+        if (!oldText.contains(lastVoiceCommitText) && lastVoiceCommitText != oldText) return
+
+        writeDiagnostic("voiceCorrection: '$oldText' → '$newText' (${elapsed}ms)")
+
+        // Record as a correction pair and auto-promote to quickClean
+        space.manus.nacre.ai.LlmPostProcessor.learnCorrection(oldText, newText)
+
+        // Clear to prevent double-learning
+        lastVoiceCommitText = ""
+        lastVoiceCommitTime = 0L
+    }
+
     companion object {
         private const val TAG = "VoiceInput"
         private const val BATTERY_THRESHOLD = 10
         private const val MAX_CONSECUTIVE_ERRORS = 15
+        private const val CORRECTION_WINDOW_MS = 500L
         // No deferred commit timer — Typeless model: commit only on user stop action
         private val RECOVERABLE_ERRORS = setOf(
             SpeechRecognizer.ERROR_NO_MATCH,

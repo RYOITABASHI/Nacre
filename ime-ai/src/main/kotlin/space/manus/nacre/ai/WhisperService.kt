@@ -94,7 +94,7 @@ class WhisperService : Service() {
             recordingJob = scope.launch {
                 try {
                     val audioData = recordAudioUntilSilence()
-                    try { callback?.onPartialResult("Transcribing...") } catch (_: RemoteException) {}
+                    try { callback?.onPartialResult("Transcribing...", false) } catch (_: RemoteException) {}
                     val rec = sherpaRecognizer ?: return@launch
                     val results = rec.processAudio(audioData)
                     val flushed = rec.flush()
@@ -215,6 +215,9 @@ class WhisperService : Service() {
                 val readBuffer = FloatArray(VAD_WINDOW_SIZE)
                 val maxReads = SAMPLE_RATE * CONTINUOUS_MAX_DURATION_SEC / VAD_WINDOW_SIZE
                 var totalReads = 0
+                var lastPartialText = ""
+                var partialStableCount = 0
+                var silentReads = 0
                 val rec = sherpaRecognizer ?: run {
                     writeDiag("ERROR: sherpaRecognizer is null in recording loop")
                     return@launch
@@ -231,16 +234,29 @@ class WhisperService : Service() {
                         val segments = rec.processAudio(samples)
 
                         if (segments.isNotEmpty()) {
+                            silentReads = 0
                             for (text in segments) {
                                 textBuffer.append(text)
                             }
-                            writeDiag("Segment detected: '${textBuffer}' (totalReads=$totalReads)")
+                            val currentText = textBuffer.toString()
+                            // Track stability: if text unchanged for 3 consecutive segment events, mark stable
+                            val isStable = if (currentText == lastPartialText) {
+                                partialStableCount++
+                                partialStableCount >= 3
+                            } else {
+                                partialStableCount = 0
+                                lastPartialText = currentText
+                                false
+                            }
+                            writeDiag("Segment detected: '${textBuffer}' (totalReads=$totalReads, stable=$isStable)")
                             try {
-                                continuousCallback?.onPartialResult(textBuffer.toString())
+                                continuousCallback?.onPartialResult(currentText, isStable)
                             } catch (_: RemoteException) {
                                 Log.w(TAG, "Partial result callback failed, stopping")
                                 break
                             }
+                        } else {
+                            silentReads++
                         }
                     }
                 } finally {
@@ -348,7 +364,7 @@ class WhisperService : Service() {
                         val text = partialResults?.getStringArrayList(
                             android.speech.SpeechRecognizer.RESULTS_RECOGNITION
                         )?.firstOrNull() ?: return
-                        try { callback?.onPartialResult(text) } catch (_: RemoteException) {}
+                        try { callback?.onPartialResult(text, false) } catch (_: RemoteException) {}
                     }
                     override fun onError(error: Int) {
                         isRecognizing = false

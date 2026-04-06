@@ -190,7 +190,7 @@ class AiPipelineManager(private val context: Context) {
                     onTranscriptionResult?.invoke(text)
                 }
 
-                override fun onPartialResult(text: String) {
+                override fun onPartialResult(text: String, isStable: Boolean) {
                     status = AiStatus.Transcribing
                 }
 

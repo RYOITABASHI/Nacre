@@ -240,6 +240,11 @@ object LlmPostProcessor {
             text = text.replace(wrong, correct)
         }
 
+        // B2. User-learned corrections (from voice correction tracking)
+        for ((wrong, correct) in learnedCorrections) {
+            text = text.replace(wrong, correct)
+        }
+
         // B. Technical term dictionary
         for ((kana, term) in TECH_TERMS) {
             text = text.replace(kana, term)
@@ -354,6 +359,28 @@ object LlmPostProcessor {
             writeDiag("Exception: ${e.javaClass.simpleName}: ${e.message}")
         }
         return rawText
+    }
+
+    // ── User correction learning (Task 24) ──────────────────────────
+
+    /**
+     * Learned corrections from user edits after voice commit.
+     * Maps wrong text → correct text. Applied during quickClean.
+     * Thread-safe: accessed from main thread (learning) and voice thread (cleaning).
+     */
+    private val learnedCorrections = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * Learn a correction pair from user's post-voice-commit edit.
+     * The correction is auto-promoted to quickClean rules.
+     */
+    fun learnCorrection(oldText: String, newText: String) {
+        if (oldText.isBlank() || newText.isBlank()) return
+        if (oldText == newText) return
+        // Only learn short corrections (single word/phrase level)
+        if (oldText.length > 30 || newText.length > 30) return
+        learnedCorrections[oldText] = newText
+        writeDiag("learnCorrection: '$oldText' → '$newText' (total=${learnedCorrections.size})")
     }
 
     fun isAvailable(): Boolean {
