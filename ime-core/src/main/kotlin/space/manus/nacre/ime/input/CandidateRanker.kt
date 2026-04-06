@@ -134,6 +134,21 @@ class CandidateRanker(
             val lmBonus = (scores[i] * -contextWeight / kotlin.math.sqrt(wordCount.toFloat())).toInt()
             candidates[i] = candidates[i].copy(cost = candidates[i].cost + lmBonus)
         }
+
+        // Backward KenLM rescoring: score reversed segments
+        // Weight: 0.3 (weaker than forward to avoid over-correction)
+        val backwardWeight = 0.3f
+        if (maxScore > 1) {
+            val reversedSegmentLists = candidates.take(maxScore).map { c ->
+                (c.segments.ifEmpty { listOf(c.surface) }).reversed()
+            }
+            val backwardScores = scorer.scoreBatchNormalized(reversedSegmentLists, "")
+            for (i in 0 until minOf(maxScore, backwardScores.size)) {
+                val wordCount = reversedSegmentLists[i].size.coerceAtLeast(1)
+                val backwardBonus = (backwardScores[i] * -contextWeight * backwardWeight / kotlin.math.sqrt(wordCount.toFloat())).toInt()
+                candidates[i] = candidates[i].copy(cost = candidates[i].cost + backwardBonus)
+            }
+        }
     }
 
     /**
