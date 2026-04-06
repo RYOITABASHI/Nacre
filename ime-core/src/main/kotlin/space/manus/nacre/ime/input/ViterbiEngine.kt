@@ -24,6 +24,31 @@ class ViterbiEngine(
         const val KENLM_WEIGHT = 5000f
         // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
         const val VITERBI_LM_WEIGHT = 3000f
+
+        /**
+         * Calculate dynamic beam width based on input length, ambiguity, and LM availability.
+         * @param inputLength number of kana characters
+         * @param ambiguity ratio of dictionary entries with multiple readings (0.0-1.0)
+         * @param hasLM whether a language model is available
+         * @return beam width K
+         */
+        fun dynamicBeamWidth(inputLength: Int, ambiguity: Float = 0.5f, hasLM: Boolean = false): Int {
+            // Base beam: shorter input needs wider beam (more ambiguity per char)
+            val base = when {
+                inputLength <= 4 -> 40
+                inputLength <= 6 -> 35
+                inputLength <= 10 -> 30
+                inputLength <= 15 -> 25
+                else -> 20
+            }
+            // Ambiguity multiplier: high ambiguity (many homophone readings) = wider beam
+            val ambiguityMult = 1.0f + ambiguity * 0.5f  // 1.0x to 1.5x
+            val adjusted = (base * ambiguityMult).toInt()
+            // LM bonus: language model can better discriminate, allow more candidates
+            val lmBonus = if (hasLM) 10 else 0
+            // Cap: never exceed 60 (memory/time), never below 15 (quality)
+            return (adjusted + lmBonus).coerceIn(15, 60)
+        }
     }
 
     // These are set by the caller (ConversionPipeline) to provide context
@@ -87,18 +112,23 @@ class ViterbiEngine(
             return segments
         }
 
-        // Beam width: wider when KenLM is available (LM scoring benefits from more paths)
+        // Beam width: dynamic based on input length, ambiguity, and LM availability
         val hasLm = kenLmScorerProvider()?.isReady() == true
-        val K = when {
-            n <= 6 -> if (hasLm) 40 else 25
-            n <= 10 -> if (hasLm) 35 else 22
-            else -> if (hasLm) 30 else 18
-        }
+        val ambiguity = estimateAmbiguity(kana)
+        val K = dynamicBeamWidth(n, ambiguity, hasLm)
         val dp = Array(n + 1) { mutableListOf<Node>() }
         dp[0].add(Node(cost = 0, backPos = -1, surface = "", reading = "", segCount = 0,
             rightGroup = lastRightGroup, prevNode = null, lmState = lmInitState, lmScore = 0f))
 
+        val startTimeNanos = System.nanoTime()
+        val timeBudgetNanos = 50_000_000L // 50ms default
+
         for (endPos in 1..n) {
+            // Time budget check: if we've exceeded the budget and have at least some results, break
+            if (endPos > 3 && System.nanoTime() - startTimeNanos > timeBudgetNanos) {
+                // Partial result: reconstruct from what we have so far
+                break
+            }
             val allCandidates = mutableListOf<Node>()
             val maxSegLen = minOf(endPos, if (n <= 10) 12 else 10)
 
@@ -419,6 +449,23 @@ class ViterbiEngine(
     }
 
     // --- Private helpers ---
+
+    private fun estimateAmbiguity(kana: String): Float {
+        // Sample a few substrings to estimate how ambiguous this input is
+        var multiEntryCount = 0
+        var totalChecked = 0
+        for (len in 1..minOf(3, kana.length)) {
+            for (start in 0..kana.length - len) {
+                val sub = kana.substring(start, start + len)
+                val entries = dict[sub]
+                if (entries != null) {
+                    totalChecked++
+                    if (entries.size > 3) multiEntryCount++
+                }
+            }
+        }
+        return if (totalChecked == 0) 0.5f else multiEntryCount.toFloat() / totalChecked
+    }
 
     private fun lengthBonus(segLen: Int): Int {
         // Strongly prefer longer segments — key for matching Google IME quality.
