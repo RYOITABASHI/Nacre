@@ -27,18 +27,159 @@ object LlmPostProcessor {
     ).sortedByDescending { it.length }
 
     // Technical term dictionary (katakana → proper notation)
+    // Sorted longest-first at build time to avoid partial matches.
     private val TECH_TERMS = mapOf(
-        "エーピーアイ" to "API", "エルエルエム" to "LLM",
-        "ジーピーティー" to "GPT", "チャットジーピーティー" to "ChatGPT",
-        "ピーティーワイ" to "PTY", "ジェイソン" to "JSON",
-        "エイチティーティーピー" to "HTTP", "ユーアールエル" to "URL",
-        "エスキューエル" to "SQL", "ギットハブ" to "GitHub", "ギット" to "Git",
-        "タイプスクリプト" to "TypeScript", "コトリン" to "Kotlin",
-        "リアクト" to "React", "アンドロイド" to "Android",
-        "エーピーケー" to "APK", "えーあい" to "AI",
-        "ウィスパー" to "Whisper", "シェルパ" to "sherpa",
-        "センスボイス" to "SenseVoice", "タイプレス" to "Typeless",
+        // ── Previously existing ──────────────────────────────────
+        "チャットジーピーティー" to "ChatGPT",
+        "エーピーアイ" to "API",
+        "エルエルエム" to "LLM",
+        "ジーピーティー" to "GPT",
+        "ピーティーワイ" to "PTY",
+        "ジェイソン" to "JSON",
+        "エイチティーティーピー" to "HTTP",
+        "ユーアールエル" to "URL",
+        "エスキューエル" to "SQL",
+        "ギットハブ" to "GitHub",
+        "ギット" to "Git",
+        "タイプスクリプト" to "TypeScript",
+        "コトリン" to "Kotlin",
+        "リアクト" to "React",
+        "アンドロイド" to "Android",
+        "エーピーケー" to "APK",
+        "えーあい" to "AI",
+        "ウィスパー" to "Whisper",
+        "シェルパ" to "sherpa",
+        "センスボイス" to "SenseVoice",
+        "タイプレス" to "Typeless",
         "ターミナル" to "ターミナル", // keep as-is (prevent partial match issues)
+
+        // ── Languages ────────────────────────────────────────────
+        "ジャバスクリプト" to "JavaScript",
+        "パイソン" to "Python",
+        "スウィフト" to "Swift",
+        "エリクサー" to "Elixir",
+        "ダート" to "Dart",
+        "ルビー" to "Ruby",
+        "パール" to "Perl",
+        "シーシャープ" to "C#",
+        "ラスト" to "Rust",
+        "ゴー" to "Go",
+
+        // ── Frameworks ────────────────────────────────────────────
+        "ファストエーピーアイ" to "FastAPI",
+        "アンギュラー" to "Angular",
+        "エクスプレス" to "Express",
+        "ネクスト" to "Next.js",
+        "ヌクスト" to "Nuxt.js",
+        "スプリング" to "Spring",
+        "ジャンゴ" to "Django",
+        "フラスク" to "Flask",
+        "レイルズ" to "Rails",
+        "ビュー" to "Vue",
+
+        // ── Tools ─────────────────────────────────────────────────
+        "クーバネティス" to "Kubernetes",
+        "テラフォーム" to "Terraform",
+        "ジェンキンス" to "Jenkins",
+        "ウェブパック" to "Webpack",
+        "ドッカー" to "Docker",
+        "エヌピーエム" to "npm",
+        "ヤーン" to "Yarn",
+        "バイト" to "Vite",
+
+        // ── Cloud ─────────────────────────────────────────────────
+        "クラウドフレア" to "Cloudflare",
+        "エーダブリューエス" to "AWS",
+        "ネットリファイ" to "Netlify",
+        "アジュール" to "Azure",
+        "バーセル" to "Vercel",
+        "ジーシーピー" to "GCP",
+        "ヘロク" to "Heroku",
+
+        // ── Databases ─────────────────────────────────────────────
+        "エラスティックサーチ" to "Elasticsearch",
+        "マイエスキューエル" to "MySQL",
+        "ポストグレス" to "PostgreSQL",
+        "モンゴディービー" to "MongoDB",
+        "レディス" to "Redis",
+
+        // ── Concepts ──────────────────────────────────────────────
+        "マイクロサービス" to "Microservices",
+        "シーアイシーディー" to "CI/CD",
+        "サーバーレス" to "Serverless",
+        "コンテナ" to "Container",
+        "デブオプス" to "DevOps",
+        "エスディーケー" to "SDK",
+        "シーエルアイ" to "CLI",
+        "アイディーイー" to "IDE",
+        "オーアールエム" to "ORM",
+
+        // ── Services ──────────────────────────────────────────────
+        "コンフルエンス" to "Confluence",
+        "ギットラボ" to "GitLab",
+        "ディスコード" to "Discord",
+        "ノーション" to "Notion",
+        "フィグマ" to "Figma",
+        "スラック" to "Slack",
+        "ジラ" to "Jira",
+
+        // ── Mobile / Native ───────────────────────────────────────
+        "リアクトネイティブ" to "React Native",
+        "フラッター" to "Flutter",
+        "エクスポ" to "Expo",
+        "アイオーエス" to "iOS",
+
+        // ── AI / ML ───────────────────────────────────────────────
+        "トランスフォーマー" to "Transformer",
+        "テンソルフロー" to "TensorFlow",
+        "パイトーチ" to "PyTorch",
+        "オープンエーアイ" to "OpenAI",
+        "ジェミナイ" to "Gemini",
+        "クロード" to "Claude",
+        "ラマ" to "LLaMA",
+
+        // ── Protocols / Formats ───────────────────────────────────
+        "ウェブソケット" to "WebSocket",
+        "グラフキューエル" to "GraphQL",
+        "レストエーピーアイ" to "REST API",
+        "エイチティーエムエル" to "HTML",
+        "シーエスエス" to "CSS",
+        "エックスエムエル" to "XML",
+        "ヤムル" to "YAML",
+        "ティーオーエムエル" to "TOML",
+        "マークダウン" to "Markdown",
+
+        // ── Editors / IDEs ────────────────────────────────────────
+        "ビジュアルスタジオコード" to "Visual Studio Code",
+        "ビーエスコード" to "VS Code",
+        "インテリジェイ" to "IntelliJ",
+        "アンドロイドスタジオ" to "Android Studio",
+        "エックスコード" to "Xcode",
+        "ヴィム" to "Vim",
+        "ネオビム" to "Neovim",
+        "イーマックス" to "Emacs",
+
+        // ── Infrastructure ────────────────────────────────────────
+        "エヌジンクス" to "Nginx",
+        "アパッチ" to "Apache",
+        "リナックス" to "Linux",
+        "ウィンドウズ" to "Windows",
+        "マックオーエス" to "macOS",
+        "ユニックス" to "Unix",
+
+        // ── Version control ───────────────────────────────────────
+        "プルリクエスト" to "Pull Request",
+        "マージリクエスト" to "Merge Request",
+        "ブランチ" to "branch",
+        "コミット" to "commit",
+        "リポジトリ" to "repository",
+
+        // ── Testing ───────────────────────────────────────────────
+        "ユニットテスト" to "unit test",
+        "エンドトゥエンド" to "end-to-end",
+        "ジェスト" to "Jest",
+        "ジューニット" to "JUnit",
+        "エスプレッソ" to "Espresso",
     ).entries.sortedByDescending { it.key.length }
 
     // Common SenseVoice misrecognition dictionary (wrong → correct)

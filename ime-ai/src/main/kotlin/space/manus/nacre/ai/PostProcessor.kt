@@ -381,6 +381,22 @@ class PostProcessor {
             "([零〇一二三四五六七八九十百千万億兆]{2,})(?![月日つ個人本枚台匹頭冊回件歳才年時分秒円ドルキロメートルグラムリットル])"
         )
 
+        /**
+         * Time pattern: 漢数字時漢数字分 → H:MM
+         * e.g., 十四時三十分 → 14:30, 九時五分 → 9:05
+         */
+        private val JA_TIME_PATTERN = Regex(
+            "([零〇一二三四五六七八九十百千]+)時([零〇一二三四五六七八九十百千]+)分"
+        )
+
+        /**
+         * Money pattern: Arabic number followed by 円 or ドル with value >= 1000.
+         * Applied after kanji-to-number conversion, adds comma grouping.
+         */
+        private val MONEY_PATTERN = Regex(
+            "(\\d{4,})(円|ドル)"
+        )
+
         // ────────────────────────────────────────────────────
         //  Text normalization
         // ────────────────────────────────────────────────────
@@ -442,14 +458,17 @@ class PostProcessor {
         // 4-9. Text processing pipeline
         var processed = removeFiller(textToProcess)
         processed = resolveCorrections(processed)
+        processed = normalizeTimes(processed)
         processed = normalizeDates(processed)
         processed = normalizeCounters(processed)
         processed = normalizeStandaloneNumbers(processed)
+        processed = formatMoneyCommas(processed)
         processed = normalizeText(processed)
         if (processed.isNotBlank()) {
             processed = insertClauseCommas(processed)
             processed = insertPunctuation(processed)
         }
+        updateFormalityTracker(processed)
 
         return ProcessResult(text = processed, command = command)
     }
@@ -983,6 +1002,47 @@ class PostProcessor {
         }
     }
 
+    /**
+     * Normalize time expressions: 漢数字時漢数字分 → H:MM.
+     * e.g., "十四時三十分" → "14:30", "九時五分" → "9:05"
+     * Minutes are zero-padded to 2 digits.
+     */
+    fun normalizeTimes(text: String): String {
+        return JA_TIME_PATTERN.replace(text) { match ->
+            val hour = kanjiToNumber(match.groupValues[1])
+            val min = kanjiToNumber(match.groupValues[2])
+            if (hour != null && min != null) {
+                val minStr = min.toString().padStart(2, '0')
+                "$hour:$minStr"
+            } else {
+                match.value
+            }
+        }
+    }
+
+    /**
+     * Add comma grouping to monetary amounts >= 1000.
+     * Applied after kanji-to-number conversion so input is Arabic digits.
+     * e.g., "2500円" → "2,500円", "1000000ドル" → "1,000,000ドル"
+     */
+    fun formatMoneyCommas(text: String): String {
+        return MONEY_PATTERN.replace(text) { match ->
+            val numStr = match.groupValues[1]
+            val currency = match.groupValues[2]
+            val num = numStr.toLongOrNull() ?: return@replace match.value
+            if (num < 1000) return@replace match.value
+            val formatted = buildString {
+                val s = numStr
+                val startOffset = s.length % 3
+                for (i in s.indices) {
+                    if (i > 0 && (i - startOffset) % 3 == 0) append(',')
+                    append(s[i])
+                }
+            }
+            "$formatted$currency"
+        }
+    }
+
     // ════════════════════════════════════════════════════
     //  Text normalization
     // ════════════════════════════════════════════════════
@@ -1011,5 +1071,52 @@ class PostProcessor {
         in FULLWIDTH_UPPER_RANGE -> ('A' + (ch - '\uFF21'))
         in FULLWIDTH_LOWER_RANGE -> ('a' + (ch - '\uFF41'))
         else -> ch
+    }
+
+    // ════════════════════════════════════════════════════
+    //  Formality tracker (Task 27)
+    // ════════════════════════════════════════════════════
+
+    /**
+     * Counts of formal (です/ます) vs casual (だ/である) sentence endings seen so far.
+     * Not thread-safe — access from the UI thread only.
+     */
+    private var formalCount = 0
+    private var casualCount = 0
+
+    /**
+     * Ratio of formal sentences in the recent window.
+     * 0.0 = fully casual, 1.0 = fully formal.
+     * Returns 0.5 when no data is available yet.
+     * CandidateRanker can read this to adjust candidate scoring.
+     */
+    val formalityRatio: Float
+        get() = if (formalCount + casualCount == 0) 0.5f
+                else formalCount.toFloat() / (formalCount + casualCount)
+
+    /**
+     * Scan [text] for formality markers and update the running counters.
+     * Called automatically at the end of [process].
+     * Keeps only the last 3 sentences worth of signal (6 total counts max).
+     */
+    private fun updateFormalityTracker(text: String) {
+        if (text.contains("です") || text.contains("ます") ||
+            text.contains("ました") || text.contains("でした")) {
+            formalCount++
+        }
+        if (text.contains("だ。") || text.contains("である") || text.contains("だった")) {
+            casualCount++
+        }
+        // Keep only last ~3 sentences worth of tracking (6 total counts)
+        if (formalCount + casualCount > 6) {
+            formalCount = (formalCount * 3) / (formalCount + casualCount)
+            casualCount = 3 - formalCount
+        }
+    }
+
+    /** Reset formality counters (e.g., on new session). */
+    fun resetFormalityTracker() {
+        formalCount = 0
+        casualCount = 0
     }
 }

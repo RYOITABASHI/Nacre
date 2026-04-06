@@ -1070,4 +1070,95 @@ class PostProcessorTest {
         // suffix "行きます" shared → keep second
         assertEquals("水曜日行きます", result)
     }
+
+    // ══════════════════════════════════════════════════════
+    //  Task 25 — Time normalization
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `normalizeTimes converts standard time`() {
+        assertEquals("14:30", processor.normalizeTimes("十四時三十分"))
+    }
+
+    @Test
+    fun `normalizeTimes zero-pads minutes`() {
+        assertEquals("9:05", processor.normalizeTimes("九時五分"))
+    }
+
+    @Test
+    fun `normalizeTimes handles midnight and noon`() {
+        assertEquals("0:00", processor.normalizeTimes("〇時〇〇分"))
+        assertEquals("12:00", processor.normalizeTimes("十二時〇〇分"))
+    }
+
+    @Test
+    fun `normalizeTimes normalizes within sentence`() {
+        assertEquals("会議は14:30から始まります。", processor.normalizeTimes("会議は十四時三十分から始まります。"))
+    }
+
+    @Test
+    fun `normalizeTimes leaves non-time kanji untouched`() {
+        assertEquals("三時間かかる", processor.normalizeTimes("三時間かかる"))
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  Task 25 — Money comma formatting
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `formatMoneyCommas adds commas to yen amounts`() {
+        assertEquals("2,500円", processor.formatMoneyCommas("2500円"))
+        assertEquals("1,000,000円", processor.formatMoneyCommas("1000000円"))
+        assertEquals("10,000円", processor.formatMoneyCommas("10000円"))
+    }
+
+    @Test
+    fun `formatMoneyCommas adds commas to dollar amounts`() {
+        assertEquals("1,000,000ドル", processor.formatMoneyCommas("1000000ドル"))
+        assertEquals("1,500ドル", processor.formatMoneyCommas("1500ドル"))
+    }
+
+    @Test
+    fun `formatMoneyCommas leaves amounts under 1000 unchanged`() {
+        assertEquals("500円", processor.formatMoneyCommas("500円"))
+        assertEquals("999ドル", processor.formatMoneyCommas("999ドル"))
+    }
+
+    @Test
+    fun `formatMoneyCommas handles amounts in sentence`() {
+        assertEquals("合計2,500円です。", processor.formatMoneyCommas("合計2500円です。"))
+    }
+
+    // ══════════════════════════════════════════════════════
+    //  Task 27 — Formality tracker
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `formalityRatio defaults to 0_5 with no data`() {
+        processor.resetFormalityTracker()
+        assertEquals(0.5f, processor.formalityRatio, 0.001f)
+    }
+
+    @Test
+    fun `formalityRatio increases toward 1 for formal sentences`() {
+        processor.resetFormalityTracker()
+        processor.process("今日は天気がいいです。")
+        processor.process("明日も晴れます。")
+        assertTrue(processor.formalityRatio > 0.5f)
+    }
+
+    @Test
+    fun `formalityRatio decreases toward 0 for casual sentences`() {
+        processor.resetFormalityTracker()
+        processor.process("今日は天気がいいだ。")
+        processor.process("それはそうだった。")
+        assertTrue(processor.formalityRatio < 0.5f)
+    }
+
+    @Test
+    fun `formalityRatio stays bounded between 0 and 1`() {
+        processor.resetFormalityTracker()
+        repeat(20) { processor.process("です。") }
+        assertTrue(processor.formalityRatio in 0f..1f)
+    }
 }
