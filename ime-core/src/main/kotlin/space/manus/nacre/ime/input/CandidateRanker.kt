@@ -137,9 +137,23 @@ class CandidateRanker(
     }
 
     /**
-     * Stub for Task 11: configure weights based on LM order.
+     * Configure ranking weights based on KenLM model order.
+     *
+     * 3-gram models have less context, so we reduce LM weights to avoid
+     * over-trusting a model with limited history. 5-gram models have
+     * more context and get higher weights.
      */
     fun configureWeights(lmOrder: Int) {
-        // Will be implemented in Task 11
+        if (lmOrder <= 3) {
+            // 3-gram: less context → lower LM weights, gentler rescoring
+            viterbiLmWeight = 2200f
+            rescoreWeight = 2000f
+            contextMultiplier = 1.10f
+        } else {
+            // 5-gram (or higher): full context → stronger LM influence
+            viterbiLmWeight = 3000f
+            rescoreWeight = 2500f
+            contextMultiplier = 1.25f
+        }
     }
 }
