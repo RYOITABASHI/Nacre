@@ -253,7 +253,16 @@ class ViterbiEngine(
                                 }
                             }
 
-                            val lBonus = lengthBonus(segLen)
+                            // Additional POS-specific function word tuning
+                            if (isHiraganaSegment && entry.surface == segment && segLen <= 2) {
+                                // の: noun→の is very common (-3000), verb→の is nominalizer (-1500)
+                                if (segment == "の") {
+                                    if (DictionaryManager.isNoun(prevRG)) cost -= 500  // extra on top of existing
+                                    // verb→の already gets particle bonus, no extra needed
+                                }
+                            }
+
+                            var lBonus = lengthBonus(segLen)
 
                             // KenLM incremental scoring within Viterbi
                             var lmCost = 0
@@ -268,6 +277,13 @@ class ViterbiEngine(
                                     // lmResult.first is log10(P(word|context)), typically -0.5 to -4.0
                                     lmCost = (lmResult.first * -VITERBI_LM_WEIGHT).toInt()
                                 }
+                            }
+
+                            // KenLM × length bonus interaction: if this node has a good LM score,
+                            // amplify the length bonus (long segments that LM agrees with are even better)
+                            if (lmAvailable && lmCost < 0 && lBonus < 0) {
+                                // Top 25% LM scores get 1.3x length bonus amplification
+                                lBonus = (lBonus * 1.3f).toInt()
                             }
 
                             val totalCost = prevNode.cost + cost + lBonus + lmCost

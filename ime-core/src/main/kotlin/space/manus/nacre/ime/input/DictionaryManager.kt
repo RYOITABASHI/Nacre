@@ -116,15 +116,26 @@ class DictionaryManager(private val context: Context) {
     /**
      * Get the POS-based connection cost between two words.
      * Uses the full Mozc 2670x2670 connection cost matrix.
+     *
+     * @param inputLength total length of the input being converted; controls division scale.
+     *   Shorter input → stronger division (less connection influence for precision),
+     *   longer input → weaker division (more connection influence for accuracy).
+     *   Default 8 produces divisor 3.0 (backward compatible).
      */
-    fun getConnectionCost(prevRightId: Int, currLeftId: Int): Int {
+    fun getConnectionCost(prevRightId: Int, currLeftId: Int, inputLength: Int = 8): Int {
         if (connectionCostFlat.isEmpty() || numIds == 0) return DEFAULT_CONNECTION_COST
         val r = prevRightId.coerceIn(0, numIds - 1)
         val l = currLeftId.coerceIn(0, numIds - 1)
         val idx = r * numIds + l
         if (idx >= connectionCostFlat.size) return DEFAULT_CONNECTION_COST
-        // Mozc connection costs range roughly -1000..32000; /3 scaling lets the matrix guide more
-        return connectionCostFlat[idx].toInt() / 3
+        // Dynamic scaling: shorter input = stronger division (less connection influence)
+        // Longer input = weaker division (more connection influence for accuracy)
+        val divisor = when {
+            inputLength <= 5 -> 4.0f
+            inputLength <= 10 -> 3.0f  // current default
+            else -> 2.5f
+        }
+        return (connectionCostFlat[idx].toInt() / divisor).toInt()
     }
 
     /**
