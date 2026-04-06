@@ -6,7 +6,7 @@ import space.manus.nacre.ai.KenLmScorer
  * Candidate ranking pipeline: boost, POS context, KenLM rescore, filter, sort.
  *
  * Extracted from UserLearner (kenLmRescore, posContextCost) and
- * NacreDictionary (inline ranking in convert/predict).
+ * ConversionPipeline (inline ranking in convert/predict).
  *
  * Encapsulates the full ranking pipeline so callers just call rank().
  */

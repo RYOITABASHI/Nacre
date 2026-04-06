@@ -41,7 +41,7 @@ data class PhraseEntry(
 /**
  * Manages dictionary loading, entry lookup, prefix search, and connection cost.
  *
- * Extracted from NacreDictionary to separate pure dictionary I/O and lookup
+ * Extracted from ConversionPipeline to separate pure dictionary I/O and lookup
  * from conversion logic (Viterbi, user learning, candidate ranking).
  *
  * Dictionary format: reading\tsurface\tleft_id\tright_id\tcost

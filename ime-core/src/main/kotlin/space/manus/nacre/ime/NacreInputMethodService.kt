@@ -27,7 +27,7 @@ import space.manus.nacre.ime.input.ClipboardManager
 import space.manus.nacre.ime.input.InputEngine
 import space.manus.nacre.ime.input.LayerManager
 import space.manus.nacre.ime.input.MacroEngine
-import space.manus.nacre.ime.input.NacreDictionary
+import space.manus.nacre.ime.input.ConversionPipeline
 import space.manus.nacre.ai.KenLmScorer
 import space.manus.nacre.ime.input.PhysicalKeyboardDetector
 import space.manus.nacre.ime.input.SnippetEngine
@@ -122,7 +122,7 @@ class NacreInputMethodService :
         // Load dictionary in background at low priority, publish on Main
         serviceScope.launch(Dispatchers.IO) {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            val dict = NacreDictionary(this@NacreInputMethodService)
+            val dict = ConversionPipeline(this@NacreInputMethodService)
             try {
                 dict.load()
             } catch (e: Exception) {
@@ -334,7 +334,7 @@ class NacreInputMethodService :
         inputEngine.destroy()
         clipboardManager.stopListening()
         foldableDetector.stopHingeAngleListening()
-        (inputEngine.dictionary as? NacreDictionary)?.flushPendingSave()
+        (inputEngine.dictionary as? ConversionPipeline)?.flushPendingSave()
         macroEngine.saveMacros(this)
         snippetEngine.saveSnippets(this)
         autoConvertEngine.saveRules(this)

@@ -769,11 +769,11 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun showNextWordPredictions() {
         if (isPasswordField) return
         if (!service.layerManager.isJapanese) return
-        val nacrDict = dictionary as? NacreDictionary ?: return
+        val dict = dictionary ?: return
         predictionJob?.cancel()
         predictionJob = scope.launch {
             val predictions = withContext(Dispatchers.Default) {
-                nacrDict.predictNextWord(limit = 8)
+                dict.predictNextWord(limit = 8)
             }
             if (predictions.isNotEmpty() && composingText.isEmpty()) {
                 androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
@@ -790,7 +790,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         val kana = japaneseEngine.romajiToHiragana(composingText, finalize = true)
         ic.commitText(kana, 1)
         // Update bigram context
-        (dictionary as? NacreDictionary)?.updateContext(kana)
+        dictionary?.updateContext(kana)
         composingText = ""
         composingFlickKana = ""
         composingKana = ""

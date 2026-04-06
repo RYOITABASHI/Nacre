@@ -11,7 +11,7 @@ import space.manus.nacre.ime.input.DictionaryManager.Companion.isContentWord
  *   DictionaryManager, ViterbiEngine, UserLearner, CandidateRanker, EnglishMatcher
  *
  * Implements DictionaryProvider so it can be used as a drop-in replacement
- * for NacreDictionary throughout the codebase.
+ * as the single DictionaryProvider implementation throughout the codebase.
  */
 class ConversionPipeline(private val context: Context) : DictionaryProvider {
 

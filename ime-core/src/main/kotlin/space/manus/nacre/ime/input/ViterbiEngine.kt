@@ -9,7 +9,7 @@ import space.manus.nacre.ime.input.DictionaryManager.Companion.isAuxVerb
 /**
  * Viterbi beam-search conversion engine with KenLM integration.
  *
- * Extracted from NacreDictionary — owns the core segmentation algorithm,
+ * Extracted from ConversionPipeline — owns the core segmentation algorithm,
  * kana variant generation, katakana conversion helpers, and exact-match lookup.
  *
  * Does NOT own user learning (boost) or POS-context ranking; those are
@@ -26,7 +26,7 @@ class ViterbiEngine(
         const val VITERBI_LM_WEIGHT = 3000f
     }
 
-    // These are set by the caller (NacreDictionary/ConversionPipeline) to provide context
+    // These are set by the caller (ConversionPipeline) to provide context
     var lastRightGroup: Int = 0
     var committedContext: ArrayDeque<String> = ArrayDeque(4)
 

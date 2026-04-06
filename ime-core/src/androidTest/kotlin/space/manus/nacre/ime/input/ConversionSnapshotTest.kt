@@ -12,7 +12,7 @@ import org.junit.runner.RunWith
 import java.io.File
 
 /**
- * Snapshot regression test for NacreDictionary.convert() and predict().
+ * Snapshot regression test for ConversionPipeline.convert() and predict().
  *
  * TWO MODES:
  *
@@ -39,7 +39,7 @@ import java.io.File
 class ConversionSnapshotTest {
 
     private lateinit var context: Context
-    private lateinit var dictionary: NacreDictionary
+    private lateinit var dictionary: ConversionPipeline
 
     // ── Baseline file location ──────────────────────────────────────────────
     // Written to the app's external files dir so no WRITE_EXTERNAL_STORAGE
@@ -152,10 +152,10 @@ class ConversionSnapshotTest {
     @Before
     fun setUp() {
         context = InstrumentationRegistry.getInstrumentation().targetContext
-        dictionary = NacreDictionary(context)
-        Log.i(TAG, "Loading NacreDictionary…")
+        dictionary = ConversionPipeline(context)
+        Log.i(TAG, "Loading ConversionPipeline…")
         dictionary.load()
-        Log.i(TAG, "NacreDictionary loaded (${dictionary.entryCount} entries)")
+        Log.i(TAG, "ConversionPipeline loaded (${dictionary.entryCount} entries)")
     }
 
     @After

@@ -477,7 +477,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             if (candidates.isEmpty()) return target
 
             // With KenLM: pick the boundary that creates the highest-scoring prefix
-            val scorer = (service.inputEngine.dictionary as? NacreDictionary)?.kenLmScorer
+            val scorer = (service.inputEngine.dictionary as? ConversionPipeline)?.kenLmScorer
             if (scorer != null && scorer.isReady() && candidates.size > 1) {
                 val context = committedInSession.toString().takeLast(20)
                 val prefixes = candidates.take(4).map { listOf(text.substring(0, it)) }
@@ -780,7 +780,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             }
 
             // KenLM-assisted punctuation for ambiguous cases
-            val scorer = (service.inputEngine.dictionary as? NacreDictionary)?.kenLmScorer
+            val scorer = (service.inputEngine.dictionary as? ConversionPipeline)?.kenLmScorer
             if (scorer != null && scorer.isReady()) {
                 val context = committedInSession.toString().takeLast(20)
                 val scores = scorer.scoreBatch(
@@ -878,7 +878,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         val confidences = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
 
         // Try KenLM re-ranking if available
-        val scorer = (service.inputEngine.dictionary as? NacreDictionary)?.kenLmScorer
+        val scorer = (service.inputEngine.dictionary as? ConversionPipeline)?.kenLmScorer
         if (scorer != null && scorer.isReady()) {
             val precedingContext = committedInSession.toString().takeLast(30)
             val sentences = alternatives.map { listOf(it) }

@@ -13,7 +13,7 @@ import space.manus.nacre.ime.input.DictionaryManager.Companion.isVerb
 /**
  * User learning, boost calculation, context management, and persistence.
  *
- * Extracted from NacreDictionary to separate user-learning concerns
+ * Extracted from ConversionPipeline to separate user-learning concerns
  * from dictionary I/O (DictionaryManager) and Viterbi conversion (ViterbiEngine).
  *
  * Responsibilities:
@@ -61,7 +61,7 @@ class UserLearner(
     // N-gram context: last 4 committed surfaces (for KenLM 5-gram)
     val committedContext = ArrayDeque<String>(4)
 
-    // Callback for KenLM rescoring — set by NacreDictionary to candidateRanker::kenLmRescore
+    // Callback for KenLM rescoring — set by ConversionPipeline to candidateRanker::kenLmRescore
     var rescoreFunction: ((MutableList<ConversionCandidate>) -> Unit)? = null
 
     // Last committed right POS group (for connection cost to next word)
