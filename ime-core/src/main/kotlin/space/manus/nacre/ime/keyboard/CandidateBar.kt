@@ -55,20 +55,22 @@ fun CandidateBar(
         return
     }
 
-    var showDictSheet by remember { mutableStateOf(false) }
-    var dictSheetCandidate by remember { mutableStateOf<ConversionCandidate?>(null) }
+    var showDictPanel by remember { mutableStateOf(false) }
+    var dictPanelCandidate by remember { mutableStateOf<ConversionCandidate?>(null) }
 
-    if (showDictSheet) {
-        val candidate = dictSheetCandidate
+    // Show inline registration panel instead of candidate bar when active
+    if (showDictPanel) {
+        val candidate = dictPanelCandidate
         if (candidate != null) {
-            DictRegistrationSheet(
+            DictRegistrationPanel(
                 reading = candidate.reading,
                 surface = candidate.surface,
                 onRegister = { reading, surface, posCategory ->
                     service.inputEngine.registerUserWord(reading, surface, posCategory)
                 },
-                onDismiss = { showDictSheet = false },
+                onDismiss = { showDictPanel = false },
             )
+            return
         }
     }
 
@@ -171,8 +173,8 @@ fun CandidateBar(
                         }
                     },
                     onLongClick = {
-                        dictSheetCandidate = candidate
-                        showDictSheet = true
+                        dictPanelCandidate = candidate
+                        showDictPanel = true
                     },
                     index = index,
                     chipBg = Color(theme.keyBackground.toInt()),

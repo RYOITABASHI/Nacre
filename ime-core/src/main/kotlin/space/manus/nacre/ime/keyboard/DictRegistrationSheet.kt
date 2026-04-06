@@ -6,53 +6,59 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Inline dictionary registration panel.
+ *
+ * Uses a Card instead of ModalBottomSheet because IME services don't have
+ * an Activity window token, which Dialog-based components require.
+ */
 @Composable
-fun DictRegistrationSheet(
+fun DictRegistrationPanel(
     reading: String,
     surface: String,
     onRegister: (reading: String, surface: String, posCategory: String) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(16.dp)) {
-            Text("辞書に登録", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(12.dp))
-            OutlinedTextField(
-                value = reading,
-                onValueChange = {},
-                label = { Text("読み") },
-                readOnly = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(4.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Column(Modifier.padding(12.dp)) {
+            Text("辞書に登録", style = MaterialTheme.typography.titleSmall)
             Spacer(Modifier.height(8.dp))
-            OutlinedTextField(
-                value = surface,
-                onValueChange = {},
-                label = { Text("表記") },
-                readOnly = true,
+            Row(
                 modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(Modifier.height(12.dp))
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("読み: $reading", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                Text("表記: $surface", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+            }
+            Spacer(Modifier.height(8.dp))
             var selectedPos by remember { mutableStateOf("名詞") }
             val posOptions = listOf("名詞", "固有名詞", "動詞")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 posOptions.forEach { pos ->
                     FilterChip(
                         selected = selectedPos == pos,
                         onClick = { selectedPos = pos },
-                        label = { Text(pos) },
+                        label = { Text(pos, style = MaterialTheme.typography.labelSmall) },
                     )
                 }
+                Spacer(Modifier.weight(1f))
+                FilledTonalButton(
+                    onClick = { onRegister(reading, surface, selectedPos); onDismiss() },
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                ) {
+                    Text("登録")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("✕")
+                }
             }
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = { onRegister(reading, surface, selectedPos); onDismiss() },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("登録")
-            }
-            Spacer(Modifier.height(16.dp))
         }
     }
 }
