@@ -1,4 +1,4 @@
-name: Train Japanese KenLM 5-gram
+name: Train Japanese KenLM Models
 
 on:
   workflow_dispatch:
@@ -285,5 +285,153 @@ jobs:
         with:
           name: japanese-5gram-kenlm
           path: japanese-5gram.klm
+          retention-days: 90
+          compression-level: 6
+
+  train-3gram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          df -h /
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake \
+            libboost-all-dev \
+            zlib1g-dev libbz2-dev liblzma-dev \
+            mecab libmecab-dev mecab-ipadic-utf8 \
+            python3-pip \
+            wget pigz
+
+      - name: Download Japanese Wikipedia dump
+        timeout-minutes: 60
+        run: |
+          wget --progress=dot:giga \
+            https://dumps.wikimedia.org/jawiki/latest/jawiki-latest-pages-articles.xml.bz2
+
+      - name: Extract plain text from Wikipedia dump
+        timeout-minutes: 120
+        run: |
+          python3 << 'PYEOF'
+          import bz2
+          import re
+          import xml.etree.ElementTree as ET
+
+          RE_BRACKETS = re.compile(r'\[\[(?:[^|\]]*\|)?([^\]]*)\]\]')
+          RE_TEMPLATES = re.compile(r'\{\{[^}]*\}\}')
+          RE_HTML = re.compile(r'<[^>]+>')
+          RE_REF = re.compile(r'<ref[^>]*>.*?</ref>', re.DOTALL)
+          RE_REF2 = re.compile(r'<ref[^>]*/>')
+          RE_HEADING = re.compile(r'={2,}[^=]+={2,}')
+          RE_BULLET = re.compile(r'^\*+\s*')
+          RE_MULTI_SPACE = re.compile(r'\s+')
+
+          def clean_wikitext(text):
+              text = RE_REF.sub('', text)
+              text = RE_REF2.sub('', text)
+              text = RE_TEMPLATES.sub('', text)
+              text = RE_BRACKETS.sub(r'\1', text)
+              text = RE_HTML.sub('', text)
+              text = RE_HEADING.sub('', text)
+              return text
+
+          count = 0
+          ns = None
+
+          with bz2.open('jawiki-latest-pages-articles.xml.bz2', 'rt', encoding='utf-8') as f, \
+               open('raw_text.txt', 'w', encoding='utf-8') as out:
+              for event, elem in ET.iterparse(f, events=('end',)):
+                  if ns is None and '}' in elem.tag:
+                      ns = elem.tag.split('}')[0] + '}'
+                  tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                  if tag == 'page':
+                      pfx = ns or ''
+                      ns_elem = elem.find(f'{pfx}ns')
+                      if ns_elem is not None and ns_elem.text != '0':
+                          elem.clear()
+                          continue
+                      rev = elem.find(f'{pfx}revision')
+                      if rev is not None:
+                          text_elem = rev.find(f'{pfx}text')
+                          if text_elem is not None and text_elem.text:
+                              text = text_elem.text
+                              if text.startswith('#REDIRECT') or text.startswith('#転送'):
+                                  elem.clear()
+                                  continue
+                              text = clean_wikitext(text)
+                              for line in text.split('\n'):
+                                  line = line.strip()
+                                  line = RE_BULLET.sub('', line)
+                                  line = RE_MULTI_SPACE.sub(' ', line).strip()
+                                  if len(line) > 20 and not line.startswith(('|', '!', '{', '}')):
+                                      out.write(line + '\n')
+                                      count += 1
+                      elem.clear()
+                      if count % 500000 == 0 and count > 0:
+                          print(f'  Extracted {count} lines...')
+          print(f'Done. Total lines: {count}')
+          PYEOF
+          rm -f jawiki-latest-pages-articles.xml.bz2
+          df -h /
+
+      - name: Tokenize with MeCab
+        timeout-minutes: 60
+        run: |
+          cat raw_text.txt | mecab -Owakati -b 262144 > tokenized.txt 2>/dev/null || true
+          wc -l tokenized.txt
+          rm -f raw_text.txt
+          df -h /
+
+      - name: Build KenLM from source
+        timeout-minutes: 20
+        run: |
+          git clone --depth 1 https://github.com/kpu/kenlm.git
+          cd kenlm && mkdir -p build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Train 3-gram language model with aggressive pruning
+        timeout-minutes: 60
+        run: |
+          echo "=== Training 3-gram model with pruning [0 2 3]: $(date) ==="
+          ./kenlm/build/bin/lmplz \
+            -o 3 \
+            --prune 0 2 3 \
+            --verbose_header \
+            --discount_fallback \
+            --skip_symbols \
+            -S 80% \
+            -T /tmp \
+            < tokenized.txt \
+            > japanese-3gram.arpa
+
+          ls -lh japanese-3gram.arpa
+          rm -f tokenized.txt
+          df -h /
+
+      - name: Convert to binary format
+        timeout-minutes: 15
+        run: |
+          ./kenlm/build/bin/build_binary trie japanese-3gram.arpa japanese-3gram.klm
+          ls -lh japanese-3gram.klm
+          SIZE_MB=$(du -m japanese-3gram.klm | cut -f1)
+          echo "Model size: ${SIZE_MB} MB"
+          if [ "$SIZE_MB" -gt 50 ]; then
+            echo "::warning::3-gram model size (${SIZE_MB} MB) exceeds 50 MB target for APK bundling."
+          fi
+          rm -f japanese-3gram.arpa
+          rm -rf kenlm
+
+      - name: Upload KenLM 3-gram artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: japanese-3gram-kenlm
+          path: japanese-3gram.klm
           retention-days: 90
           compression-level: 6
