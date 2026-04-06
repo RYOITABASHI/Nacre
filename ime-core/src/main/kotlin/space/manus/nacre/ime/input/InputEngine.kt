@@ -1126,4 +1126,6 @@ interface DictionaryProvider {
     fun recordSelection(candidate: ConversionCandidate)
     fun predictEnglish(prefix: String, limit: Int = 20): List<ConversionCandidate>
     fun recordEnglishSelection(word: String)
+    fun predictNextWord(limit: Int = 8): List<ConversionCandidate>
+    fun updateContext(kana: String)
 }

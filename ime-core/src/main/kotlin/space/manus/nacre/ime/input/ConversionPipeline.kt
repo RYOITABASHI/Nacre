@@ -5,42 +5,22 @@ import space.manus.nacre.ai.KenLmScorer
 import space.manus.nacre.ime.input.DictionaryManager.Companion.isContentWord
 
 /**
- * Nacre Japanese Dictionary with POS-aware Viterbi conversion.
+ * ConversionPipeline — the new public API for Japanese input conversion.
  *
- * Uses Mozc OSS dictionary with full 2670 POS IDs and the original
- * 2670×2670 connection cost matrix for maximum conversion accuracy.
+ * Orchestrates all extracted components:
+ *   DictionaryManager, ViterbiEngine, UserLearner, CandidateRanker, EnglishMatcher
  *
- * Dictionary format: reading\tsurface\tleft_id\tright_id\tcost
- * Connection matrix: binary 2670×2670 int16 (connection.bin)
- *
- * Mozc POS ID ranges:
- *   0=BOS/EOS, 2..11=フィラー, 12..28=副詞, 29..267=助動詞,
- *   268..433=助詞, 434..1840=動詞, 1841..2193=名詞,
- *   2194..2588=形容詞, 2589..2590=感動詞, 2591..2593=接続詞,
- *   2594..2640=接頭詞, 2641..2656=記号, 2657..2669=連体詞
+ * Implements DictionaryProvider so it can be used as a drop-in replacement
+ * for NacreDictionary throughout the codebase.
  */
-class NacreDictionary(private val context: Context) : DictionaryProvider {
+class ConversionPipeline(private val context: Context) : DictionaryProvider {
 
-    // Delegated dictionary loading, lookup, connection cost
     val dictManager = DictionaryManager(context)
-
-    // Delegated Viterbi conversion engine
     val viterbiEngine = ViterbiEngine(dictManager) { kenLmScorer }
-
-    // Convenience accessors for dictManager fields (reduces diff in this transitional step)
-    private inline val dict get() = dictManager.dict
-    private inline val sortedReadings get() = dictManager.sortedReadings
-
-    // Delegated user learning, boost, context, persistence
     val userLearner = UserLearner(context, dictManager)
-
-    // Delegated candidate ranking pipeline (boost + POS + KenLM + filter + sort)
     val candidateRanker = CandidateRanker({ kenLmScorer }, dictManager, userLearner)
-
-    // Delegated English word matching (hiragana/romaji → English)
     val englishMatcher = EnglishMatcher(context)
 
-    // KenLM 5-gram language model scorer (optional, loaded from ime-ai)
     @Volatile
     var kenLmScorer: KenLmScorer? = null
 
@@ -48,6 +28,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     /** Total number of dictionary entries loaded (for debug display) */
     val entryCount: Int get() = dictManager.entryCount
+
+    // Convenience accessors for dictManager fields
+    private inline val dict get() = dictManager.dict
+    private inline val sortedReadings get() = dictManager.sortedReadings
 
     fun load() {
         if (loaded) return
@@ -98,7 +82,6 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         addUnique(viterbiEngine.search(kana))
 
         // 2.5 Kana variant conversion (を→お/うぉ, ぢ→じ, づ→ず etc.)
-        // Google日本語入力方式: ローマ字テーブルは標準のまま、変換段階で読み替え候補を生成
         val kanaVariants = viterbiEngine.generateKanaVariants(kana)
         for (variant in kanaVariants) {
             val variantExact = viterbiEngine.exactMatch(variant)
@@ -330,6 +313,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         return userLearner.predictNextWord(limit)
     }
 
+    override fun predictEnglish(prefix: String, limit: Int): List<ConversionCandidate> =
+        englishMatcher.predict(prefix, limit)
+
+    override fun recordEnglishSelection(word: String) =
+        englishMatcher.recordSelection(word)
+
     fun flushPendingSave() {
         userLearner.flushPendingSave()
     }
@@ -395,21 +384,6 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
         return results.sortedBy { it.cost }
     }
-
-    // --- English word matching (delegated to EnglishMatcher) ---
-
-    /**
-     * Predict English words from prefix input.
-     * Returns autocomplete candidates sorted by cost (frequency).
-     */
-    override fun predictEnglish(prefix: String, limit: Int): List<ConversionCandidate> =
-        englishMatcher.predict(prefix, limit)
-
-    /**
-     * Record English word selection for bigram learning.
-     */
-    override fun recordEnglishSelection(word: String) =
-        englishMatcher.recordSelection(word)
 
     // --- Typo correction ---
 
@@ -604,7 +578,8 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         return results.sortedBy { it.cost }.take(limit)
     }
 
-    // Delegation wrappers for user dictionary / phrase features
+    // --- Delegation wrappers for user dictionary / phrase features ---
+
     fun registerUserWord(reading: String, surface: String, comment: String = "") {
         userLearner.registerUserWord(reading, surface, comment)
     }
