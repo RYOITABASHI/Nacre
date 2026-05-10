@@ -357,6 +357,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 } else if (composingFlickKana.isNotEmpty()) {
                     // Flick mode: commit kana as-is
                     ic.commitText(composingFlickKana, 1)
+                    recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
                     clearCandidates()
@@ -477,6 +478,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 if (isConverting) commitSelectedCandidate(ic)
                 if (composingFlickKana.isNotEmpty()) {
                     ic.commitText(composingFlickKana, 1)
+                    recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
                 }
@@ -567,6 +569,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 englishComposing = ""
             } else {
                 dictionary?.recordSelection(candidate)
+                recordJapanesePhrase(candidate.reading, candidate.surface)
             }
             composingText = ""
             composingKana = ""
@@ -669,9 +672,11 @@ class InputEngine(private val service: NacreInputMethodService) {
             val candidate = candidates[selectedCandidateIndex]
             ic.commitText(candidate.surface, 1)
             dictionary?.recordSelection(candidate)
+            recordJapanesePhrase(candidate.reading, candidate.surface)
         } else {
             val kana = japaneseEngine.romajiToHiragana(composingText, finalize = true)
             ic.commitText(kana, 1)
+            recordJapanesePhrase(kana, kana)
         }
         composingText = ""
         composingFlickKana = ""
@@ -791,11 +796,16 @@ class InputEngine(private val service: NacreInputMethodService) {
         ic.commitText(kana, 1)
         // Update bigram context
         (dictionary as? NacreDictionary)?.updateContext(kana)
+        recordJapanesePhrase(kana, kana)
         composingText = ""
         composingFlickKana = ""
         composingKana = ""
         japaneseEngine.reset()
         clearCandidates()
+    }
+
+    private fun recordJapanesePhrase(reading: String, surface: String) {
+        (dictionary as? NacreDictionary)?.recordPhrase(reading, surface)
     }
 
     private fun clearCandidates() {
@@ -1093,6 +1103,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 commitSelectedCandidate(ic)
             } else {
                 ic.commitText(composingFlickKana, 1)
+                recordJapanesePhrase(composingFlickKana, composingFlickKana)
                 composingFlickKana = ""
                 composingKana = ""
                 clearCandidates()

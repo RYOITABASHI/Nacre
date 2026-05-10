@@ -177,13 +177,15 @@ class LlmReranker(private val context: Context) {
             "${i + 1}. ${c.surface}"
         }.joinToString("\n")
 
-        val contextSnippet = precedingText.takeLast(50)
+        val contextSnippet = precedingText.takeLast(80)
 
         val prompt = buildString {
             append("文脈: 「${contextSnippet}」\n")
             append("読み: $kana\n")
             append("候補:\n$candidateList\n\n")
-            append("最も自然な候補の番号を1つだけ答えてください。番号だけ出力。")
+            append("最も自然で自然な日本語になる候補を1つだけ選んでください。\n")
+            append("固有名詞、技術用語、コード用語は不自然に一般語へ寄せず、文脈を優先してください。\n")
+            append("出力は番号だけ。")
         }
 
         val responseText = callLlm(prompt) ?: return null
