@@ -89,14 +89,20 @@ fun KeyboardScreen(service: NacreInputMethodService) {
         space.manus.nacre.ime.foldable.LayoutMode.StandardQwerty,
         space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
         space.manus.nacre.ime.foldable.LayoutMode.QuickInputPad ->
-            StandardKeyboardScreen(service = service)
+            StandardKeyboardScreen(
+                service = service,
+                compactBase = layoutMode == space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
+            )
     }
 }
 
 @Composable
-private fun StandardKeyboardScreen(service: NacreInputMethodService) {
+private fun StandardKeyboardScreen(
+    service: NacreInputMethodService,
+    compactBase: Boolean = false,
+) {
     val layerManager = service.layerManager
-    val layout = layerManager.currentLayout()
+    val layout = layerManager.currentLayout(compactBase = compactBase)
     val theme = service.currentTheme
     val bgColor = Color(theme.background.toInt())
     val accentColor = Color(theme.accent.toInt())
@@ -119,7 +125,13 @@ private fun StandardKeyboardScreen(service: NacreInputMethodService) {
         val rows = layout.rows
         for ((rowIndex, row) in rows.withIndex()) {
             val isModRow = rowIndex == rows.lastIndex
-            val keyHeight = if (isModRow) 26f else if (isLargeScreen) 34f else 40f
+            val keyHeight = when {
+                isModRow && compactBase -> 28f
+                isModRow -> 26f
+                compactBase -> 44f
+                isLargeScreen -> 34f
+                else -> 40f
+            }
 
             if (rowIndex == 2) {
                 KeyRowWithTrackball(

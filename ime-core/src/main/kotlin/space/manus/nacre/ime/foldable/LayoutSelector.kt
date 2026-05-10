@@ -12,7 +12,7 @@ enum class LayoutMode {
     /** Standard QWERTY layout for normal phone screens (>= 380dp). */
     StandardQwerty,
 
-    /** Compact QWERTY for smaller screens or foldable sub-displays. */
+    /** Compact Japanese-base QWERTY for smaller screens or foldable sub-displays. */
     CompactQwerty,
 
     /** Minimal macro pad for very small sub-displays (e.g. Z Flip cover). */
@@ -51,7 +51,7 @@ class LayoutSelector(private val detector: FoldableDetector) {
      *
      * Decision tree:
      *  - widthDp >= 500  -> FullVSplit (tablet / unfolded main display)
-     *  - foldable sub    -> user preference (default FlickInput12Key)
+     *  - foldable sub    -> user preference (default CompactQwerty)
      *  - widthDp >= 380  -> StandardQwerty (normal phone)
      *  - widthDp >= 200  -> QuickInputPad (very small sub-display)
      *  - else            -> QuickInputPad (fallback)
@@ -69,11 +69,11 @@ class LayoutSelector(private val detector: FoldableDetector) {
     }
 
     private fun loadSubDisplayMode(): LayoutMode {
-        val name = prefs.getString(KEY_SUB_DISPLAY_MODE, LayoutMode.FlickInput12Key.name)
+        val name = prefs.getString(KEY_SUB_DISPLAY_MODE, LayoutMode.CompactQwerty.name)
         return try {
-            LayoutMode.valueOf(name ?: LayoutMode.FlickInput12Key.name)
+            LayoutMode.valueOf(name ?: LayoutMode.CompactQwerty.name)
         } catch (_: IllegalArgumentException) {
-            LayoutMode.FlickInput12Key
+            LayoutMode.CompactQwerty
         }
     }
 }
