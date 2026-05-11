@@ -73,7 +73,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     @Volatile private var isWhisperContinuousMode = false
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
 
-    // LLM post-processing (Qwen 2.5 1.5B via in-process LlmService over AIDL)
+    // LLM post-processing (local Gemma/Qwen via isolated LlmService over AIDL)
     @Volatile private var llmService: ILlmService? = null
     @Volatile private var llmBound = false
 
@@ -147,19 +147,20 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     if (!svc.isModelLoaded) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
-                        // Users commonly sideload Qwen to /sdcard/Download/ before the in-app download flow exists.
+                        // Gemma 4 is the default; Qwen is still accepted as a legacy fallback.
                         val modelPath = downloader.getLlmModelPath()
                         if (modelPath != null) {
                             val modelFile = java.io.File(modelPath)
                             writeDiagnostic("llmConnection: loading model ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
                             svc.loadModel(modelFile.absolutePath)
                         } else {
-                            writeDiagnostic("llmConnection: LLM model not found in any known location — refinement disabled")
+                            downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
+                            writeDiagnostic("llmConnection: LLM model not found — Gemma 4 download requested, refinement disabled for this session")
                             return@Thread
                         }
                     }
-                    // Poll until the model reports ready. Qwen 1.5B Q4_K_M (~1GB) typically
-                    // mmaps in 30–90s on mid-range Android; allow 3 min before giving up.
+                    // Poll until the model reports ready. Local GGUF models typically mmap in
+                    // 30–90s on mid-range Android; allow 3 min before giving up.
                     val start = System.currentTimeMillis()
                     while (!svc.isModelLoaded && System.currentTimeMillis() - start < 180_000) {
                         Thread.sleep(500)

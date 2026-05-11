@@ -120,6 +120,11 @@ class NacreInputMethodService :
         // Check LLM server availability (non-blocking)
         inputEngine.llmReranker.checkServer()
 
+        // Personal default: keep compact KenLM and the default local LLM
+        // provisioning in the background. Actual model loading stays below and
+        // never blocks IME startup.
+        space.manus.nacre.ai.ModelDownloader(this).ensureDefaultModelsDownloaded()
+
         // Load dictionary in background at low priority, publish on Main
         serviceScope.launch(Dispatchers.IO) {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
@@ -183,7 +188,8 @@ class NacreInputMethodService :
                         android.util.Log.i("NacreIME", "KenLM loaded: ${modelToLoad.name} (${modelToLoad.length() / 1024 / 1024}MB)")
                     }
                 } else {
-                    android.util.Log.i("NacreIME", "No KenLM model available (conversion quality will be limited)")
+                    downloader.ensureDefaultModelsDownloaded(downloadGemma4 = false)
+                    android.util.Log.i("NacreIME", "No KenLM model available yet; compact KenLM download requested")
                 }
             } catch (e: Exception) {
                 android.util.Log.w("NacreIME", "KenLM load failed", e)

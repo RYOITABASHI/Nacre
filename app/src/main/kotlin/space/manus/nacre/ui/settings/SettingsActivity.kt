@@ -83,6 +83,11 @@ class SettingsActivity : ComponentActivity() {
 fun NacreSettingsScreen() {
     val context = LocalContext.current
     val config = remember { ConfigRepository(context) }
+    val defaultModelDownloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
+
+    LaunchedEffect(defaultModelDownloader) {
+        defaultModelDownloader.ensureDefaultModelsDownloaded()
+    }
 
     // Read crash log
     val crashLog = remember {
@@ -803,7 +808,7 @@ private fun FirstRunModelsBanner() {
 }
 
 /**
- * Qwen 2.5 1.5B Instruct (Q4_K_M) — ~1.1GB. Powers voice-input cleanup.
+ * Gemma 4 E2B Instruct (Q4_K_M) — default local voice-input cleanup model.
  */
 @Composable
 private fun LlmModelSection() {
@@ -849,7 +854,7 @@ private fun LlmModelSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Qwen 2.5 1.5B", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("Gemma 4 E2B", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(modifier = Modifier.width(8.dp))
                 if (modelPath != null) {
                     Text("Ready", color = Color(0xFF4CAF50), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -859,12 +864,12 @@ private fun LlmModelSection() {
             }
             Spacer(modifier = Modifier.height(4.dp))
             if (modelPath != null) {
-                Text("Voice input cleanup (${modelSize}MB)", color = NacreTextDim, fontSize = 12.sp)
+                Text("Voice input cleanup (${modelSize}MB, Qwen fallback supported)", color = NacreTextDim, fontSize = 12.sp)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
             } else {
                 Text(
-                    "音声入力のLLM整文用（~1.1GB）。ダウンロード後、キーボード再起動で有効化。",
+                    "音声入力のLLM整文用。デフォルトで自動取得し、ダウンロード後はキーボード再起動で有効化。",
                     color = NacreTextDim,
                     fontSize = 12.sp,
                 )
@@ -900,7 +905,7 @@ private fun LlmModelSection() {
                             if (found != null) {
                                 modelPath = found
                                 modelSize = java.io.File(found).length() / 1024 / 1024
-                                Toast.makeText(context, "Qwen model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "Gemma 4 model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
                             }
                         } else {
                             Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
@@ -917,7 +922,7 @@ private fun LlmModelSection() {
                 Text(
                     if (downloading) "Downloading..."
                     else if (modelPath != null) "Re-download"
-                    else "Download (~1.1GB)"
+                    else "Download Gemma 4"
                 )
             }
         }
@@ -1213,7 +1218,7 @@ private fun WhisperModelSection() {
  * Keys are stored per-device via CloudLlmConfig (SharedPreferences, not
  * backed up). When multiple keys are set, VoiceInputManager tries them in
  * priority order: Qwen Max → Gemini Pro → DeepSeek V3. None of them are
- * required — if all are blank the app falls back to the on-device Qwen 1.5B.
+ * required — if all are blank the app falls back to the on-device Gemma/Qwen model.
  */
 @Composable
 private fun CloudLlmSection() {
@@ -1225,13 +1230,13 @@ private fun CloudLlmSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルQwenにフォールバック。",
+                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルGemma/Qwenにフォールバック。",
                 color = NacreTextDim,
                 fontSize = 12.sp,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "キー未設定時はオフライン（ローカルQwen）のみで動作。キーは端末内にのみ保存されます。",
+                "キー未設定時はオフライン（ローカルGemma/Qwen）のみで動作。キーは端末内にのみ保存されます。",
                 color = NacreTextDim.copy(alpha = 0.8f),
                 fontSize = 11.sp,
             )

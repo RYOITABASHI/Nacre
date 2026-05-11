@@ -53,7 +53,7 @@ class ModelDownloader(private val context: Context) {
         return mapOf(
             "sensevoice" to (getSenseVoiceModelDir() != null),
             "vad" to (getVadModelPath() != null),
-            "llm" to File(getModelsDir(), LLM_FILENAME).exists(),
+            "llm" to (getLlmModelPath() != null),
             "kenlm" to File(getModelsDir(), KENLM_FILENAME).exists(),
             "kenlm_compact" to File(getModelsDir(), COMPACT_KENLM_FILENAME).exists(),
         )
@@ -164,22 +164,69 @@ class ModelDownloader(private val context: Context) {
 
     fun getCompactKenLmModelPath(): String? = findModelFile(COMPACT_KENLM_FILENAME)
 
-    // ---- LLM (Qwen 2.5 1.5B Q4_K_M) ----
+    // ---- LLM (Gemma 4 E2B default, Qwen legacy fallback) ----
 
     /**
-     * Download the Qwen 2.5 1.5B Instruct Q4_K_M GGUF model used for voice
-     * post-processing (dictation cleanup). ~940MB.
+     * Download the default Gemma 4 E2B Q4_K_M GGUF model used for voice
+     * post-processing (dictation cleanup).
      */
     fun downloadLlm(onComplete: (Boolean) -> Unit) {
+        downloadGemma4Llm(onComplete)
+    }
+
+    fun downloadGemma4Llm(onComplete: (Boolean) -> Unit) {
         downloadModel(
             url = LLM_URL,
-            modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+            modelName = "Gemma 4 E2B Instruct (Q4_K_M)",
             fileName = LLM_FILENAME,
             onComplete = onComplete,
         )
     }
 
-    fun getLlmModelPath(): String? = findModelFile(LLM_FILENAME)
+    fun downloadQwenLlm(onComplete: (Boolean) -> Unit) {
+        downloadModel(
+            url = QWEN_LLM_URL,
+            modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+            fileName = QWEN_LLM_FILENAME,
+            onComplete = onComplete,
+        )
+    }
+
+    fun getLlmModelPath(): String? {
+        return findModelFile(LLM_FILENAME) ?: findModelFile(QWEN_LLM_FILENAME)
+    }
+
+    /**
+     * Provision the personal default model set without blocking UI/IME startup.
+     * Compact KenLM is small enough to be the default conversion model; Gemma 4
+     * is the preferred local LLM while Qwen remains a compatibility fallback.
+     */
+    fun ensureDefaultModelsDownloaded(
+        downloadCompactKenLm: Boolean = true,
+        downloadGemma4: Boolean = true,
+    ) {
+        synchronized(ModelDownloader::class.java) {
+            if (autoProvisionStarted) return
+            autoProvisionStarted = true
+        }
+
+        scope.launch {
+            if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
+                downloadModelInternal(
+                    url = COMPACT_KENLM_URL,
+                    modelName = "KenLM 日本語3-gram (compact)",
+                    fileName = COMPACT_KENLM_FILENAME,
+                )
+            }
+            if (downloadGemma4 && findModelFile(LLM_FILENAME) == null) {
+                downloadModelInternal(
+                    url = LLM_URL,
+                    modelName = "Gemma 4 E2B Instruct (Q4_K_M)",
+                    fileName = LLM_FILENAME,
+                )
+            }
+        }
+    }
 
     /**
      * Get KenLM model file if it exists.
@@ -203,10 +250,32 @@ class ModelDownloader(private val context: Context) {
         onComplete: (Boolean) -> Unit,
     ) {
         currentJob = scope.launch {
+            val ok = downloadModelInternal(url, modelName, fileName)
+            withContext(Dispatchers.Main) {
+                onComplete(ok)
+            }
+        }
+    }
+
+    private suspend fun downloadModelInternal(
+        url: String,
+        modelName: String,
+        fileName: String,
+    ): Boolean {
+        return withContext(Dispatchers.IO) {
             val outFile = File(getModelsDir(), fileName)
             val tmpFile = File(getModelsDir(), "$fileName.tmp")
 
             try {
+                if (outFile.exists() && outFile.length() > 0) {
+                    withContext(Dispatchers.Main) {
+                        onProgress?.invoke(
+                            DownloadProgress(modelName, outFile.length(), outFile.length(), isComplete = true),
+                        )
+                    }
+                    return@withContext true
+                }
+
                 val connection = URL(url).openConnection() as HttpURLConnection
                 connection.connectTimeout = 30000
                 connection.readTimeout = 30000
@@ -227,11 +296,11 @@ class ModelDownloader(private val context: Context) {
                 var bytesRead: Int
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
-                    if (!isActive) {
+                    if (!currentCoroutineContext().isActive) {
                         input.close()
                         output.close()
                         connection.disconnect()
-                        return@launch
+                        return@withContext false
                     }
 
                     output.write(buffer, 0, bytesRead)
@@ -254,18 +323,18 @@ class ModelDownloader(private val context: Context) {
                     onProgress?.invoke(
                         DownloadProgress(modelName, totalBytes, totalBytes, isComplete = true),
                     )
-                    onComplete(true)
                 }
 
                 Log.i(TAG, "Model downloaded: $fileName (${totalBytes / 1024 / 1024}MB)")
+                true
             } catch (e: Exception) {
                 Log.e(TAG, "Download failed: $modelName", e)
                 withContext(Dispatchers.Main) {
                     onProgress?.invoke(
                         DownloadProgress(modelName, 0, 0, error = e.message),
                     )
-                    onComplete(false)
                 }
+                false
             }
         }
     }
@@ -423,9 +492,12 @@ class ModelDownloader(private val context: Context) {
         const val VAD_FILENAME = "silero_vad.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
         const val COMPACT_KENLM_FILENAME = "japanese-compact.klm"
-        const val LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val LLM_FILENAME = "gemma-4-E2B-it-Q4_K_M.gguf"
+        const val QWEN_LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
         const val KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-5gram.klm"
         const val COMPACT_KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-compact.klm"
-        const val LLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val LLM_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
+        const val QWEN_LLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        @Volatile private var autoProvisionStarted = false
     }
 }
