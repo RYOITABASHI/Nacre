@@ -148,29 +148,34 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
                         // Gemma 4 is the default; Qwen is still accepted as a legacy fallback.
-                        val modelPath = downloader.getLlmModelPath()
-                        if (modelPath != null) {
-                            val modelFile = java.io.File(modelPath)
-                            writeDiagnostic("llmConnection: loading model ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
-                            svc.loadModel(modelFile.absolutePath)
+                        val modelPaths = downloader.getPreferredLlmModelPaths()
+                        if (modelPaths.isNotEmpty()) {
+                            var loadedPath: String? = null
+                            for (modelPath in modelPaths) {
+                                if (tryLoadLlmModel(svc, modelPath)) {
+                                    loadedPath = modelPath
+                                    break
+                                }
+                                try {
+                                    svc.unloadModel()
+                                } catch (_: Exception) {
+                                }
+                            }
+                            if (loadedPath == null) {
+                                writeDiagnostic("llmConnection: no local LLM could be loaded — refinement disabled for this session")
+                                return@Thread
+                            }
+                            llmService = svc
+                            val modelFile = java.io.File(loadedPath)
+                            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
                         } else {
                             downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
                             writeDiagnostic("llmConnection: LLM model not found — Gemma 4 download requested, refinement disabled for this session")
                             return@Thread
                         }
-                    }
-                    // Poll until the model reports ready. Local GGUF models typically mmap in
-                    // 30–90s on mid-range Android; allow 3 min before giving up.
-                    val start = System.currentTimeMillis()
-                    while (!svc.isModelLoaded && System.currentTimeMillis() - start < 180_000) {
-                        Thread.sleep(500)
-                    }
-                    if (svc.isModelLoaded) {
-                        llmService = svc
-                        val elapsed = (System.currentTimeMillis() - start) / 1000
-                        writeDiagnostic("llmConnection: model ready after ${elapsed}s")
                     } else {
-                        writeDiagnostic("llmConnection: model load still pending after 180s — refinement disabled for this session")
+                        llmService = svc
+                        writeDiagnostic("llmConnection: model already loaded")
                     }
                 } catch (e: Exception) {
                     writeDiagnostic("llmConnection EXCEPTION: ${e.message}")
@@ -182,6 +187,26 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             llmService = null
             llmBound = false
         }
+    }
+
+    private fun tryLoadLlmModel(svc: ILlmService, modelPath: String): Boolean {
+        val modelFile = java.io.File(modelPath)
+        writeDiagnostic("llmConnection: loading model ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
+        svc.loadModel(modelFile.absolutePath)
+
+        // Local GGUF models typically mmap in 30–90s on mid-range Android; allow
+        // 3 min per candidate before falling back.
+        val start = System.currentTimeMillis()
+        while (!svc.isModelLoaded && System.currentTimeMillis() - start < 180_000) {
+            Thread.sleep(500)
+        }
+        val elapsed = (System.currentTimeMillis() - start) / 1000
+        if (svc.isModelLoaded) {
+            writeDiagnostic("llmConnection: ${modelFile.name} ready after ${elapsed}s")
+            return true
+        }
+        writeDiagnostic("llmConnection: ${modelFile.name} did not become ready after ${elapsed}s")
+        return false
     }
 
     private val whisperCallback = object : IWhisperCallback.Stub() {

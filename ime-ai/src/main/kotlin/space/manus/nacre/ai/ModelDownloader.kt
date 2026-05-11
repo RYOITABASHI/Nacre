@@ -196,6 +196,13 @@ class ModelDownloader(private val context: Context) {
         return findModelFile(LLM_FILENAME) ?: findModelFile(QWEN_LLM_FILENAME)
     }
 
+    fun getPreferredLlmModelPaths(): List<String> {
+        return listOfNotNull(
+            findModelFile(LLM_FILENAME),
+            findModelFile(QWEN_LLM_FILENAME),
+        ).distinct()
+    }
+
     /**
      * Provision the personal default model set without blocking UI/IME startup.
      * Compact KenLM is small enough to be the default conversion model; Gemma 4
