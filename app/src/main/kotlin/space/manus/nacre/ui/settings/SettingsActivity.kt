@@ -29,6 +29,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import space.manus.nacre.ai.KenLmJni
 import space.manus.nacre.config.ConfigRepository
 import space.manus.nacre.config.PresetProvider
@@ -44,6 +46,29 @@ private val NacreSurface = Color(0xFF16213E)
 private val NacreAccent = Color(0xFF00D4AA)
 private val NacreText = Color(0xFFE0E0E0)
 private val NacreTextDim = Color(0xFF8888AA)
+
+private data class ModelDiscovery(
+    val kenLmPath: String? = null,
+    val compactKenLmPath: String? = null,
+    val llmPath: String? = null,
+    val senseVoiceDir: String? = null,
+    val vadPath: String? = null,
+)
+
+@Composable
+private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloader): State<ModelDiscovery> {
+    return produceState(initialValue = ModelDiscovery(), downloader) {
+        value = withContext(Dispatchers.IO) {
+            ModelDiscovery(
+                kenLmPath = downloader.getKenLmModelPath(),
+                compactKenLmPath = downloader.getCompactKenLmModelPath(),
+                llmPath = downloader.getLlmModelPath(),
+                senseVoiceDir = downloader.getSenseVoiceModelDir(),
+                vadPath = downloader.getVadModelPath(),
+            )
+        }
+    }
+}
 
 class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -745,10 +770,11 @@ private fun StoragePermissionCard() {
 private fun FirstRunModelsBanner() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    val anyPresent = downloader.getKenLmModelPath() != null ||
-        downloader.getCompactKenLmModelPath() != null ||
-        downloader.getLlmModelPath() != null ||
-        downloader.getSenseVoiceModelDir() != null
+    val discovery by rememberModelDiscovery(downloader)
+    val anyPresent = discovery.kenLmPath != null ||
+        discovery.compactKenLmPath != null ||
+        discovery.llmPath != null ||
+        discovery.senseVoiceDir != null
     if (anyPresent) return
 
     Card(
@@ -783,7 +809,8 @@ private fun FirstRunModelsBanner() {
 private fun LlmModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelPath by remember { mutableStateOf(downloader.getLlmModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelPath by remember { mutableStateOf<String?>(null) }
     var modelSize by remember {
         mutableStateOf(modelPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L)
     }
@@ -796,7 +823,7 @@ private fun LlmModelSection() {
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && modelPath == null) {
-                val found = downloader.getLlmModelPath()
+                val found = discovery.llmPath
                 if (found != null) {
                     modelPath = found
                     modelSize = java.io.File(found).length() / 1024 / 1024
@@ -805,6 +832,14 @@ private fun LlmModelSection() {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.llmPath) {
+        val found = discovery.llmPath
+        if (modelPath == null && found != null) {
+            modelPath = found
+            modelSize = java.io.File(found).length() / 1024 / 1024
+        }
     }
 
     Card(
@@ -893,9 +928,10 @@ private fun LlmModelSection() {
 private fun KenLmModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelPath by remember { mutableStateOf(downloader.getKenLmModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelPath by remember { mutableStateOf<String?>(null) }
     var modelSize by remember { mutableStateOf(modelPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L) }
-    var compactPath by remember { mutableStateOf(downloader.getCompactKenLmModelPath()) }
+    var compactPath by remember { mutableStateOf<String?>(null) }
     var compactSize by remember { mutableStateOf(compactPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L) }
     var importing by remember { mutableStateOf(false) }
     var downloadingCompact by remember { mutableStateOf(false) }
@@ -906,15 +942,33 @@ private fun KenLmModelSection() {
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && modelPath == null) {
-                val found = downloader.getKenLmModelPath()
+                val found = discovery.kenLmPath
                 if (found != null) {
                     modelPath = found
                     modelSize = java.io.File(found).length() / 1024 / 1024
+                }
+                val foundCompact = discovery.compactKenLmPath
+                if (compactPath == null && foundCompact != null) {
+                    compactPath = foundCompact
+                    compactSize = java.io.File(foundCompact).length() / 1024 / 1024
                 }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.kenLmPath, discovery.compactKenLmPath) {
+        val found = discovery.kenLmPath
+        if (modelPath == null && found != null) {
+            modelPath = found
+            modelSize = java.io.File(found).length() / 1024 / 1024
+        }
+        val foundCompact = discovery.compactKenLmPath
+        if (compactPath == null && foundCompact != null) {
+            compactPath = foundCompact
+            compactSize = java.io.File(foundCompact).length() / 1024 / 1024
+        }
     }
 
     val launcher = rememberLauncherForActivityResult(
@@ -1065,8 +1119,9 @@ private fun KenLmModelSection() {
 private fun WhisperModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelDir by remember { mutableStateOf(downloader.getSenseVoiceModelDir()) }
-    var vadPath by remember { mutableStateOf(downloader.getVadModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelDir by remember { mutableStateOf<String?>(null) }
+    var vadPath by remember { mutableStateOf<String?>(null) }
     val isReady = modelDir != null && vadPath != null
     var modelSize by remember {
         mutableStateOf(
@@ -1082,8 +1137,8 @@ private fun WhisperModelSection() {
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && !isReady) {
-                val foundDir = downloader.getSenseVoiceModelDir()
-                val foundVad = downloader.getVadModelPath()
+                val foundDir = discovery.senseVoiceDir
+                val foundVad = discovery.vadPath
                 if (foundDir != null) {
                     modelDir = foundDir
                     modelSize = java.io.File(foundDir, "model.int8.onnx").let {
@@ -1095,6 +1150,20 @@ private fun WhisperModelSection() {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.senseVoiceDir, discovery.vadPath) {
+        val foundDir = discovery.senseVoiceDir
+        if (modelDir == null && foundDir != null) {
+            modelDir = foundDir
+            modelSize = java.io.File(foundDir, "model.int8.onnx").let {
+                if (it.exists()) it.length() / 1024 / 1024 else 0L
+            }
+        }
+        val foundVad = discovery.vadPath
+        if (vadPath == null && foundVad != null) {
+            vadPath = foundVad
+        }
     }
 
     Card(
