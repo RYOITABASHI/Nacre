@@ -940,7 +940,9 @@ private fun KenLmModelSection() {
     var compactSize by remember { mutableStateOf(compactPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L) }
     var importing by remember { mutableStateOf(false) }
     var downloadingCompact by remember { mutableStateOf(false) }
+    var downloadingFull by remember { mutableStateOf(false) }
     var progressPct by remember { mutableStateOf(0) }
+    var fullProgressPct by remember { mutableStateOf(0) }
 
     // Re-check model when returning from permission settings
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -1081,7 +1083,7 @@ private fun KenLmModelSection() {
             androidx.compose.material3.HorizontalDivider(color = NacreTextDim.copy(alpha = 0.2f))
             Spacer(modifier = Modifier.height(16.dp))
 
-            // --- Full 5-gram (power users, sideload via file picker) ---
+            // --- Full 5-gram (power users, direct download or sideload) ---
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("KenLM 5-gram (full)", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -1097,12 +1099,57 @@ private fun KenLmModelSection() {
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
             } else {
-                Text("/sdcard/Download/ に japanese-5gram.klm を置くか、下のボタンから選択（~561MB）", color = NacreTextDim, fontSize = 12.sp)
+                Text("最高精度の日本語変換モデル（~561MB）。compact より優先して読み込みます。", color = NacreTextDim, fontSize = 12.sp)
+            }
+            if (downloadingFull) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { fullProgressPct / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                    trackColor = NacreTextDim.copy(alpha = 0.3f),
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text("${fullProgressPct}%", color = NacreTextDim, fontSize = 11.sp)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    downloadingFull = true
+                    fullProgressPct = 0
+                    downloader.onProgress = { p -> fullProgressPct = p.percent }
+                    downloader.downloadKenLm { ok ->
+                        downloadingFull = false
+                        downloader.onProgress = null
+                        if (ok) {
+                            val found = downloader.getKenLmModelPath()
+                            if (found != null) {
+                                modelPath = found
+                                modelSize = java.io.File(found).length() / 1024 / 1024
+                                Toast.makeText(context, "KenLM 5-gram downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                            }
+                        } else {
+                            Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                enabled = !downloadingFull && !importing,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NacreAccent,
+                    contentColor = Color.Black,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (downloadingFull) "Downloading..."
+                    else if (modelPath != null) "Re-download full"
+                    else "Download full (~561MB)"
+                )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = { launcher.launch(arrayOf("*/*")) },
-                enabled = !importing,
+                enabled = !importing && !downloadingFull,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NacreSurface,
                     contentColor = NacreAccent,
