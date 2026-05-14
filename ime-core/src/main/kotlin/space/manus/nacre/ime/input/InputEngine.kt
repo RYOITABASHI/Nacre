@@ -20,6 +20,7 @@ import space.manus.nacre.config.KeyDef
 import space.manus.nacre.ime.NacreInputMethodService
 
 private val CTRL_PATTERN = Regex("^C-([a-zA-Z])$")
+private val DIRECT_TOKEN_CONTEXT = Regex("(^|[\\s\\n\\t])[@#/][A-Za-z0-9._-]*$")
 
 class InputEngine(private val service: NacreInputMethodService) {
 
@@ -256,6 +257,10 @@ class InputEngine(private val service: NacreInputMethodService) {
                     // If we're showing candidates, commit selected and start fresh
                     commitSelectedCandidate(ic)
                 }
+                if (shouldCommitDirectTokenText(action.text, ic)) {
+                    commitDirectTokenText(action.text, ic)
+                    return
+                }
                 if (service.layerManager.isJapanese) {
                     // Japanese punctuation/symbols: commit composing first, then insert directly
                     val jaText = when (action.text) {
@@ -370,31 +375,13 @@ class InputEngine(private val service: NacreInputMethodService) {
                     englishComposing = ""
                     clearCandidates()
                 } else {
-                    // Gboard-compatible Enter handling:
-                    // 1. If IME_FLAG_NO_ENTER_ACTION is set → always newline
-                    // 2. If editor declares a specific action (Send/Search/Go) → perform it
-                    // 3. IME_ACTION_DONE → perform it (closes keyboard or submits)
-                    // 4. IME_ACTION_NEXT → perform it (move to next field)
-                    // 5. IME_ACTION_NONE / UNSPECIFIED / null → newline
-                    val opts = editorInfo?.imeOptions ?: 0
-                    val imeAction = opts and EditorInfo.IME_MASK_ACTION
-                    val noEnterAction = opts and EditorInfo.IME_FLAG_NO_ENTER_ACTION != 0
-
-                    if (noEnterAction) {
-                        // Multi-line field with NO_ENTER_ACTION → always newline
-                        sendKeyEvent(KeyEvent.KEYCODE_ENTER)
-                    } else when (imeAction) {
-                        EditorInfo.IME_ACTION_SEND,
-                        EditorInfo.IME_ACTION_SEARCH,
-                        EditorInfo.IME_ACTION_GO,
-                        EditorInfo.IME_ACTION_DONE,
-                        EditorInfo.IME_ACTION_NEXT -> {
-                            ic.performEditorAction(imeAction)
-                        }
-                        else -> {
-                            // IME_ACTION_NONE, IME_ACTION_UNSPECIFIED, or unknown → newline
-                            sendKeyEvent(KeyEvent.KEYCODE_ENTER)
-                        }
+                    if (service.layerManager.currentLayer != Layer.Base) {
+                        performEditorActionOrEnter(ic)
+                        service.layerManager.resetToBase()
+                    } else {
+                        // Chat/note first behavior: avoid accidental send in Slack,
+                        // Notion, web CLIs, and similar multiline text boxes.
+                        commitNewline(ic)
                     }
                 }
             }
@@ -900,6 +887,54 @@ class InputEngine(private val service: NacreInputMethodService) {
                 service.macroEngine.executeMacro(macro, freshIc)
             }
         }
+    }
+
+    private fun commitNewline(ic: InputConnection) {
+        ic.finishComposingText()
+        ic.commitText("\n", 1)
+        if (service.layerManager.isAltActive) service.layerManager.consumeAlt()
+        if (service.layerManager.isShifted) service.layerManager.toggleShift()
+    }
+
+    private fun performEditorActionOrEnter(ic: InputConnection) {
+        val opts = editorInfo?.imeOptions ?: 0
+        val imeAction = opts and EditorInfo.IME_MASK_ACTION
+        when (imeAction) {
+            EditorInfo.IME_ACTION_SEND,
+            EditorInfo.IME_ACTION_SEARCH,
+            EditorInfo.IME_ACTION_GO,
+            EditorInfo.IME_ACTION_DONE,
+            EditorInfo.IME_ACTION_NEXT -> ic.performEditorAction(imeAction)
+            else -> sendKeyEvent(KeyEvent.KEYCODE_ENTER)
+        }
+    }
+
+    private fun shouldCommitDirectTokenText(text: String, ic: InputConnection): Boolean {
+        if (text.length != 1) return false
+        val ch = text[0]
+        if (!(ch.isLetterOrDigit() || ch == '_' || ch == '-' || ch == '.')) return false
+        val before = ic.getTextBeforeCursor(80, 0)?.toString().orEmpty()
+        return DIRECT_TOKEN_CONTEXT.containsMatchIn(before)
+    }
+
+    private fun commitDirectTokenText(text: String, ic: InputConnection) {
+        if (composingText.isNotEmpty()) {
+            composingText = ""
+            composingKana = ""
+            japaneseEngine.reset()
+        }
+        if (englishComposing.isNotEmpty()) {
+            englishComposing = ""
+        }
+        clearCandidates()
+        val out = if (service.layerManager.isShifted && text[0].isLetter()) {
+            text.uppercase()
+        } else {
+            text
+        }
+        ic.finishComposingText()
+        ic.commitText(out, 1)
+        if (service.layerManager.isShifted) service.layerManager.toggleShift()
     }
 
     private fun sendKeyEvent(keyCode: Int) {

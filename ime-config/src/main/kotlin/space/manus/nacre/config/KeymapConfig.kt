@@ -130,8 +130,7 @@ object DefaultLayouts {
                 KeyDef(" ", label = "⎵", action = KeyAction.Space, widthMultiplier = 2.2f,
                     swipeUp = "Tab", swipeLeft = "ToggleJa", swipeRight = "ToggleJa"),
                 KeyDef("Alt", action = KeyAction.Alt, widthMultiplier = 0.75f),
-                KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.15f),
-                KeyDef("あ", label = "あ", action = KeyAction.ToggleJapanese, widthMultiplier = 0.7f),
+                KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.85f),
             ),
         ),
     )
