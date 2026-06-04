@@ -52,9 +52,9 @@ class WhisperService : Service() {
                     val modelDir = parts[0]
                     val vadPath = if (parts.size > 1) parts[1] else ""
                     writeDiag("Loading SenseVoice: dir=$modelDir, vad=$vadPath")
-                    val modelFile = java.io.File(modelDir, "model.int8.onnx")
+                    val modelFile = pickSenseVoiceModelFile(modelDir)
                     val vadFile = java.io.File(vadPath)
-                    writeDiag("model.int8.onnx exists=${modelFile.exists()} size=${modelFile.length()}")
+                    writeDiag("sensevoice model=${modelFile?.name} exists=${modelFile?.exists()} size=${modelFile?.length() ?: 0}")
                     writeDiag("silero_vad.onnx exists=${vadFile.exists()} size=${vadFile.length()}")
 
                     val rec = SherpaRecognizer()
@@ -321,6 +321,12 @@ class WhisperService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "WhisperService created (process=${android.os.Process.myPid()})")
+    }
+
+    private fun pickSenseVoiceModelFile(modelDir: String): java.io.File? {
+        return listOf("model.onnx", "model.int8.onnx")
+            .map { java.io.File(modelDir, it) }
+            .firstOrNull { it.exists() && it.length() > 0 }
     }
 
     /**

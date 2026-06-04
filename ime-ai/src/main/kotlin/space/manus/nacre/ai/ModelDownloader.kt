@@ -63,12 +63,12 @@ class ModelDownloader(private val context: Context) {
 
     /**
      * Get SenseVoice model directory path if it exists.
-     * The directory must contain model.int8.onnx and tokens.txt.
+     * The directory must contain model.onnx or model.int8.onnx, plus tokens.txt.
      */
     fun getSenseVoiceModelDir(): String? {
         Log.i(TAG, "getSenseVoiceModelDir: searching for SenseVoice model")
 
-        // Search candidate directories for one containing model.int8.onnx
+        // Search candidate directories for one containing a SenseVoice model file
         val candidates = mutableListOf<File>()
 
         // Internal storage
@@ -96,15 +96,14 @@ class ModelDownloader(private val context: Context) {
             }
         }
 
-        // Recursive scan: look for model.int8.onnx
+        // Recursive scan: look for a directory that is actually SenseVoice.
+        // model.onnx is a generic filename, so keep scanning when a non-SenseVoice
+        // parent directory is encountered.
         try {
-            val found = scanForFile(sdcard, "model.int8.onnx", maxDepth = 4)
-            if (found != null) {
-                val dir = found.parentFile
-                if (dir != null && isSenseVoiceDir(dir)) {
-                    Log.i(TAG, "getSenseVoiceModelDir: FOUND via scan at ${dir.absolutePath}")
-                    return dir.absolutePath
-                }
+            val foundDir = scanForSenseVoiceDir(sdcard, maxDepth = 4)
+            if (foundDir != null) {
+                Log.i(TAG, "getSenseVoiceModelDir: FOUND via scan at ${foundDir.absolutePath}")
+                return foundDir.absolutePath
             }
         } catch (e: Exception) {
             Log.w(TAG, "getSenseVoiceModelDir: scan failed", e)
@@ -114,10 +113,20 @@ class ModelDownloader(private val context: Context) {
         return null
     }
 
+    fun getSenseVoiceModelFile(modelDir: String): File? {
+        return getSenseVoiceModelFile(File(modelDir))
+    }
+
+    private fun getSenseVoiceModelFile(dir: File): File? {
+        return listOf("model.onnx", "model.int8.onnx")
+            .map { File(dir, it) }
+            .firstOrNull { it.exists() && it.length() > 0 }
+    }
+
     private fun isSenseVoiceDir(dir: File): Boolean {
         return try {
             dir.isDirectory &&
-                File(dir, "model.int8.onnx").let { it.exists() && it.length() > 0 } &&
+                getSenseVoiceModelFile(dir) != null &&
                 File(dir, "tokens.txt").exists()
         } catch (_: Exception) { false }
     }
@@ -487,6 +496,21 @@ class ModelDownloader(private val context: Context) {
         for (f in children) {
             if (f.isDirectory && f.name !in skipDirs && !f.name.startsWith(".")) {
                 val found = scanForFile(f, filename, maxDepth - 1)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun scanForSenseVoiceDir(root: File, maxDepth: Int): File? {
+        if (maxDepth <= 0 || !root.isDirectory) return null
+        if (isSenseVoiceDir(root)) return root
+
+        val skipDirs = setOf("Android", ".thumbnails", ".cache", "cache", "DCIM", "Pictures", "Music", "Ringtones", "Alarms", "Notifications")
+        val children = root.listFiles() ?: return null
+        for (f in children) {
+            if (f.isDirectory && f.name !in skipDirs && !f.name.startsWith(".")) {
+                val found = scanForSenseVoiceDir(f, maxDepth - 1)
                 if (found != null) return found
             }
         }

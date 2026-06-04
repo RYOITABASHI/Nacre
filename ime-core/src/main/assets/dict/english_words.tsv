@@ -21,6 +21,15 @@
 すらっく	Slack	4500
 ぎっとはぶ	GitHub	4200
 ぎっとらぶ	GitLab	4500
+ぎっと	git	3200
+ぎっと	Git	3600
+ぎっとりべーす	git rebase	3000
+ぎっとりばーす	git rebase	4200
+りべーす	rebase	3600
+えぬぴーえむ	npm	3200
+えぬぴーえむいんすとーる	npm install	3000
+えぬぴーえむいんすとーるりあくと	npm install React	2800
+ぴーえぬぴーえむ	pnpm	4000
 あんどろいど	Android	4000
 あいふぉーん	iPhone	4000
 あいぱっど	iPad	4200
@@ -47,6 +56,11 @@
 じゃばすくりぷと	JavaScript	4200
 たいぷすくりぷと	TypeScript	4200
 ことりん	Kotlin	4200
+こーでっくす	Codex	4200
+しぇりー	Shelly	4500
+えむしーぴー	MCP	4500
+えーでぃーびー	ADB	4500
+ろぐきゃっと	logcat	4500
 すういふと	Swift	4500
 じゃば	Java	4500
 しーしゃーぷ	C#	4800

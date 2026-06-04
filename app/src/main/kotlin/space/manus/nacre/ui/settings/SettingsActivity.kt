@@ -1177,10 +1177,7 @@ private fun WhisperModelSection() {
     val isReady = modelDir != null && vadPath != null
     var modelSize by remember {
         mutableStateOf(
-            modelDir?.let {
-                val model = java.io.File(it, "model.int8.onnx")
-                if (model.exists()) model.length() / 1024 / 1024 else 0L
-            } ?: 0L
+            modelDir?.let { downloader.getSenseVoiceModelFile(it)?.length()?.div(1024)?.div(1024) } ?: 0L
         )
     }
 
@@ -1193,9 +1190,7 @@ private fun WhisperModelSection() {
                 val foundVad = discovery.vadPath
                 if (foundDir != null) {
                     modelDir = foundDir
-                    modelSize = java.io.File(foundDir, "model.int8.onnx").let {
-                        if (it.exists()) it.length() / 1024 / 1024 else 0L
-                    }
+                    modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
                 }
                 if (foundVad != null) vadPath = foundVad
             }
@@ -1208,9 +1203,7 @@ private fun WhisperModelSection() {
         val foundDir = discovery.senseVoiceDir
         if (modelDir == null && foundDir != null) {
             modelDir = foundDir
-            modelSize = java.io.File(foundDir, "model.int8.onnx").let {
-                if (it.exists()) it.length() / 1024 / 1024 else 0L
-            }
+            modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
         }
         val foundVad = discovery.vadPath
         if (vadPath == null && foundVad != null) {

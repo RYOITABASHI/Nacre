@@ -360,6 +360,12 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES, true)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                putStringArrayListExtra(
+                    RecognizerIntent.EXTRA_BIASING_STRINGS,
+                    ArrayList(STT_BIASING_TERMS),
+                )
+            }
             // Offline preference disabled — causes ERROR_NO_MATCH on devices
             // without offline model downloaded. Let the engine decide.
             // putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
@@ -1348,6 +1354,14 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         // the next provider in the chain.
         private const val CLOUD_REFINE_TIMEOUT_MS = 6_000
         // No deferred commit timer — Typeless model: commit only on user stop action
+        private val STT_BIASING_TERMS = listOf(
+            "git", "git rebase", "git merge", "git pull", "git push", "GitHub",
+            "npm", "npm install", "npm install React", "pnpm", "yarn",
+            "React", "TypeScript", "JavaScript", "Kotlin", "Android",
+            "Gradle", "Compose", "Jetpack Compose", "API", "JSON", "SDK",
+            "Codex", "Nacre", "Shelly", "Gemma", "Whisper", "SenseVoice",
+            "MCP", "LLM", "ADB", "logcat",
+        )
         private val RECOVERABLE_ERRORS = setOf(
             SpeechRecognizer.ERROR_NO_MATCH,
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT,

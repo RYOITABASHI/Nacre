@@ -19,18 +19,20 @@ class SherpaRecognizer {
 
     /**
      * Initialize the recognizer with model files from the given directory.
-     * @param modelDir Directory containing model.int8.onnx, tokens.txt
+     * @param modelDir Directory containing model.int8.onnx or model.onnx, plus tokens.txt
      * @param vadModelPath Path to silero_vad.onnx
      */
     fun initialize(modelDir: String, vadModelPath: String): Boolean {
         try {
             Log.i(TAG, "Initializing SherpaRecognizer from $modelDir")
+            val modelFile = pickSenseVoiceModelFile(modelDir)
+                ?: error("SenseVoice model file not found in $modelDir")
 
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
                 modelConfig = OfflineModelConfig(
                     senseVoice = OfflineSenseVoiceModelConfig(
-                        model = "$modelDir/model.int8.onnx",
+                        model = modelFile,
                         language = "auto",
                         useInverseTextNormalization = true,
                     ),
@@ -63,6 +65,14 @@ class SherpaRecognizer {
             isInitialized = false
             return false
         }
+    }
+
+    private fun pickSenseVoiceModelFile(modelDir: String): String? {
+        val candidates = listOf("model.onnx", "model.int8.onnx")
+        return candidates
+            .map { java.io.File(modelDir, it) }
+            .firstOrNull { it.exists() && it.length() > 0 }
+            ?.absolutePath
     }
 
     fun isReady(): Boolean = isInitialized

@@ -919,4 +919,28 @@ class PostProcessorTest {
         val result = processor.process("hello    world")
         assertEquals("hello world.", result.text)
     }
+
+    @Test
+    fun `quickClean normalizes coding voice command failures`() {
+        assertEquals("git rebaseして。", LlmPostProcessor.quickClean("ぎっとリバースして。"))
+        assertEquals("git rebaseして。", LlmPostProcessor.quickClean("一リバースして。"))
+        assertEquals("npm install React。", LlmPostProcessor.quickClean("エヌ？ピーエムインストールリアクト。"))
+        assertEquals("npm install React。", LlmPostProcessor.quickClean("NPM インストール React。"))
+        assertEquals("TypeScriptのエラー直して。", LlmPostProcessor.quickClean("タイプスクリプトのエラー直して。"))
+    }
+
+    @Test
+    fun `quickClean does not rewrite plain reverse command as git rebase`() {
+        assertEquals("リバースして。", LlmPostProcessor.quickClean("リバースして。"))
+        assertEquals("Gitリバースプロキシ。", LlmPostProcessor.quickClean("ぎっとリバースプロキシ。"))
+        assertEquals("Git リバースエンジニアリング。", LlmPostProcessor.quickClean("Git リバースエンジニアリング。"))
+    }
+
+    @Test
+    fun `quickClean normalizes punctuation accuracy voice failures`() {
+        assertEquals(
+            "精度、句読点、言い間違い。補正、要約について精度を上げてください。",
+            LlmPostProcessor.quickClean("制度？当点言い間違い。補正？要約について精度を上げてください。"),
+        )
+    }
 }
