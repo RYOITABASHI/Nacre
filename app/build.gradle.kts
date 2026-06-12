@@ -4,6 +4,43 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+import org.gradle.api.GradleException
+import java.util.Properties
+
+val signingPropertiesFile = rootProject.file("signing.properties")
+val signingProperties = Properties().apply {
+    if (signingPropertiesFile.isFile) {
+        signingPropertiesFile.inputStream().use(::load)
+    }
+}
+
+fun signingValue(propertyName: String, environmentName: String): String? {
+    return signingProperties.getProperty(propertyName)
+        ?: providers.gradleProperty(propertyName).orNull
+        ?: providers.environmentVariable(environmentName).orNull
+}
+
+val nacreReleaseStoreFile = signingValue("storeFile", "NACRE_RELEASE_STORE_FILE")
+val nacreReleaseStorePassword = signingValue("storePassword", "NACRE_RELEASE_STORE_PASSWORD")
+val nacreReleaseKeyAlias = signingValue("keyAlias", "NACRE_RELEASE_KEY_ALIAS")
+val nacreReleaseKeyPassword = signingValue("keyPassword", "NACRE_RELEASE_KEY_PASSWORD")
+val nacreReleaseSigningValues = listOf(
+    nacreReleaseStoreFile,
+    nacreReleaseStorePassword,
+    nacreReleaseKeyAlias,
+    nacreReleaseKeyPassword,
+)
+val hasAnyNacreReleaseSigning = nacreReleaseSigningValues.any { !it.isNullOrBlank() }
+val hasNacreReleaseSigning = nacreReleaseSigningValues.all { !it.isNullOrBlank() }
+
+if (hasAnyNacreReleaseSigning && !hasNacreReleaseSigning) {
+    throw GradleException(
+        "Incomplete Nacre release signing configuration. " +
+            "Run tools/setup_nacre_release_signing.sh or provide storeFile, " +
+            "storePassword, keyAlias, and keyPassword.",
+    )
+}
+
 android {
     namespace = "space.manus.nacre"
     compileSdk = 34
@@ -16,8 +53,22 @@ android {
         versionName = "0.2.0"
     }
 
+    signingConfigs {
+        if (hasNacreReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(nacreReleaseStoreFile!!)
+                storePassword = nacreReleaseStorePassword
+                keyAlias = nacreReleaseKeyAlias
+                keyPassword = nacreReleaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasNacreReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -64,4 +115,38 @@ dependencies {
     implementation("com.android.billingclient:billing-ktx:7.0.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+}
+
+val requireNacreReleaseSigning by tasks.registering {
+    group = "nacre"
+    description = "Fails when the recommended signed release install configuration is missing."
+
+    doLast {
+        if (!hasNacreReleaseSigning) {
+            throw GradleException(
+                "Nacre release signing is not configured. " +
+                    "Run tools/setup_nacre_release_signing.sh, then use ./gradlew installNacre.",
+            )
+        }
+    }
+}
+
+tasks.register("assembleNacre") {
+    group = "nacre"
+    description = "Build the recommended single APK: the release variant, signed when signing.properties is configured."
+    dependsOn("assembleRelease")
+}
+
+tasks.register("installNacre") {
+    group = "nacre"
+    description = "Install or update Nacre using the signed release variant."
+    if (hasNacreReleaseSigning) {
+        dependsOn("installRelease")
+    } else {
+        dependsOn(requireNacreReleaseSigning)
+    }
+}
+
+tasks.matching { it.name == "installRelease" }.configureEach {
+    dependsOn(requireNacreReleaseSigning)
 }

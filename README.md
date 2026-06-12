@@ -54,10 +54,17 @@ Nacre does not bundle large models in the APK. The settings screen can download 
 ## Build
 
 ```bash
-./gradlew :app:assembleDebug
+tools/setup_nacre_release_signing.sh
+./gradlew installNacre
 ```
 
-Requires Android SDK with compileSdk 34. The GitHub Actions build harness also clones KenLM and llama.cpp sources before building the native `ime-ai` library.
+The recommended local build is the signed release variant. `installNacre` updates the installed app in place as long as the installed app was signed with the same Nacre release key. If the device currently has an older debug-signed build installed, uninstall it once, then use `installNacre` for normal updates.
+
+`tools/setup_nacre_release_signing.sh` creates a local signing key under `~/.nacre/` and writes ignored `signing.properties` metadata in the repo. Do not commit signing keys or `signing.properties`.
+
+CI builds one release APK artifact. Configure `NACRE_RELEASE_KEYSTORE_BASE64`, `NACRE_RELEASE_STORE_PASSWORD`, `NACRE_RELEASE_KEY_ALIAS`, and `NACRE_RELEASE_KEY_PASSWORD` repository secrets when CI artifacts should be signed and update-installable.
+
+Requires Android SDK with compileSdk 34. The GitHub Actions build harness builds the release APK artifact and also clones KenLM and llama.cpp sources before building the native `ime-ai` library.
 
 ## Security
 
