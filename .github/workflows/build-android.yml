@@ -93,8 +93,20 @@ jobs:
           NACRE_RELEASE_KEY_ALIAS: ${{ secrets.NACRE_RELEASE_KEY_ALIAS }}
           NACRE_RELEASE_KEY_PASSWORD: ${{ secrets.NACRE_RELEASE_KEY_PASSWORD }}
         run: |
-          if [ -z "${NACRE_RELEASE_KEYSTORE_BASE64}" ]; then
-            echo "No Nacre release signing secret configured; building unsigned release APK."
+          missing=0
+          for name in \
+            NACRE_RELEASE_KEYSTORE_BASE64 \
+            NACRE_RELEASE_STORE_PASSWORD \
+            NACRE_RELEASE_KEY_ALIAS \
+            NACRE_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::warning::${name} is not configured; CI will build but not upload an installable APK."
+              missing=1
+            fi
+          done
+
+          if [ "${missing}" -ne 0 ]; then
+            echo "NACRE_SIGNED_APK=false" >> "${GITHUB_ENV}"
             exit 0
           fi
 
@@ -105,6 +117,7 @@ jobs:
             printf '%s\n' "keyAlias=${NACRE_RELEASE_KEY_ALIAS}"
             printf '%s\n' "keyPassword=${NACRE_RELEASE_KEY_PASSWORD}"
           } > signing.properties
+          echo "NACRE_SIGNED_APK=true" >> "${GITHUB_ENV}"
 
       - name: Build Nacre APK
         run: ./gradlew assembleNacre
@@ -116,7 +129,15 @@ jobs:
           echo "=== Checking for libnacre-ai.so ==="
           find app/build/outputs/apk/release -name "*.apk" -exec unzip -l {} \; | grep libnacre || echo "WARNING: libnacre-ai.so not found in APK"
 
+      - name: Verify release APK signature
+        if: env.NACRE_SIGNED_APK == 'true'
+        run: |
+          APK="$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)"
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -n 1)"
+          "${APKSIGNER}" verify --print-certs "${APK}"
+
       - name: Upload Nacre APK
+        if: env.NACRE_SIGNED_APK == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: nacre-apk

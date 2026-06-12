@@ -62,7 +62,7 @@ The recommended local build is the signed release variant. `installNacre` update
 
 `tools/setup_nacre_release_signing.sh` creates a local signing key under `~/.nacre/` and writes ignored `signing.properties` metadata in the repo. Do not commit signing keys or `signing.properties`.
 
-CI builds one release APK artifact. Configure `NACRE_RELEASE_KEYSTORE_BASE64`, `NACRE_RELEASE_STORE_PASSWORD`, `NACRE_RELEASE_KEY_ALIAS`, and `NACRE_RELEASE_KEY_PASSWORD` repository secrets when CI artifacts should be signed and update-installable.
+CI builds the release variant. It uploads the `nacre-apk` artifact only when `NACRE_RELEASE_KEYSTORE_BASE64`, `NACRE_RELEASE_STORE_PASSWORD`, `NACRE_RELEASE_KEY_ALIAS`, and `NACRE_RELEASE_KEY_PASSWORD` repository secrets are configured, so unsigned APKs are not published as installable builds.
 
 Requires Android SDK with compileSdk 34. The GitHub Actions build harness builds the release APK artifact and also clones KenLM and llama.cpp sources before building the native `ime-ai` library.
 
