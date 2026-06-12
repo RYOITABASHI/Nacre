@@ -36,6 +36,19 @@
                 android:resource="@xml/method" />
         </service>
 
+        <service
+            android:name="space.manus.nacre.ime.pointer.NacrePointerAccessibilityService"
+            android:exported="true"
+            android:label="@string/flex_pointer_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nacre_pointer_accessibility" />
+        </service>
+
         <!-- Transparent Activity for runtime permission requests from IME -->
         <activity
             android:name=".PermissionActivity"

@@ -1,5 +1,6 @@
 package space.manus.nacre.ui.settings
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -38,6 +39,7 @@ import space.manus.nacre.config.ThemeProvider
 import space.manus.nacre.ime.feedback.HapticManager
 import space.manus.nacre.ime.feedback.SoundManager
 import space.manus.nacre.ime.keyboard.KeyLighting
+import space.manus.nacre.ime.pointer.NacrePointerAccessibilityService
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -146,6 +148,12 @@ fun NacreSettingsScreen() {
                 imm.showInputMethodPicker()
             },
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- Flex Pointer ---
+        SectionHeader("Flex Pointer")
+        FlexPointerAccessSection(context)
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -294,6 +302,46 @@ private fun SectionHeader(text: String) {
             .fillMaxWidth()
             .padding(bottom = 8.dp),
     )
+}
+
+@Composable
+private fun FlexPointerAccessSection(context: Context) {
+    var enabled by remember { mutableStateOf(isFlexPointerAccessibilityEnabled(context)) }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                enabled = isFlexPointerAccessibilityEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    SettingsCard(
+        title = if (enabled) "Nacre Flex Pointer is enabled" else "Enable Nacre Flex Pointer",
+        description = if (enabled) {
+            "Use Ptr on the keyboard to open the Flex Mode pointer pad"
+        } else {
+            "Enable the accessibility service so Ptr can move an overlay cursor and send taps"
+        },
+        onClick = {
+            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        },
+    )
+}
+
+private fun isFlexPointerAccessibilityEnabled(context: Context): Boolean {
+    val expected = ComponentName(
+        context,
+        NacrePointerAccessibilityService::class.java,
+    ).flattenToString()
+    val enabledServices = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+    ) ?: return false
+    return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
 }
 
 @Composable

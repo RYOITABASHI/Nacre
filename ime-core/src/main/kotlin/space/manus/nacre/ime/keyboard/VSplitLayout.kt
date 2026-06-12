@@ -1,7 +1,9 @@
 package space.manus.nacre.ime.keyboard
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -10,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.trackball.TrackballView
 import kotlin.math.cos
@@ -31,6 +34,7 @@ import kotlin.math.cos
 fun VSplitKeyboardScreen(
     service: NacreInputMethodService,
     angle: Float = 4f,
+    onFlexPointer: () -> Unit = {},
 ) {
     val layerManager = service.layerManager
     val layout = layerManager.currentLayout()
@@ -47,6 +51,19 @@ fun VSplitKeyboardScreen(
     ) {
         // 1. Candidate bar (fixed 28dp, never overlapped)
         CandidateBar(service = service)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Text(
+                text = "Ptr",
+                color = Color(service.currentTheme.accent.toInt()),
+                fontSize = 10.sp,
+                modifier = Modifier.clickable { onFlexPointer() },
+            )
+        }
 
         // 2. Key area — clipToBounds prevents V-split rotation overflow into candidate bar
         Box(

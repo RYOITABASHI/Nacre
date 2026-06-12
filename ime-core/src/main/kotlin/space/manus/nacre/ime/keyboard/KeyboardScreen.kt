@@ -1,6 +1,7 @@
 package space.manus.nacre.ime.keyboard
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
@@ -35,6 +36,7 @@ fun KeyboardScreen(service: NacreInputMethodService) {
     var showCommandPalette by remember { mutableStateOf(false) }
     var showEmoji by remember { mutableStateOf(false) }
     var showSymbols by remember { mutableStateOf(false) }
+    var showFlexPointer by remember { mutableStateOf(false) }
 
     // Check if command palette should open (Fn+Space triggers it)
     val isCommandPaletteRequested = service.layerManager.isCommandPaletteRequested
@@ -80,10 +82,18 @@ fun KeyboardScreen(service: NacreInputMethodService) {
         SymbolsPanel(service = service, onDismiss = { showSymbols = false })
         return
     }
+    if (showFlexPointer) {
+        FlexPointerPad(service = service, onDismiss = { showFlexPointer = false })
+        return
+    }
 
     when (layoutMode) {
         space.manus.nacre.ime.foldable.LayoutMode.FullVSplit ->
-            VSplitKeyboardScreen(service = service, angle = 4f)
+            VSplitKeyboardScreen(
+                service = service,
+                angle = 4f,
+                onFlexPointer = { showFlexPointer = true },
+            )
         space.manus.nacre.ime.foldable.LayoutMode.FlickInput12Key ->
             FlickInputPad(service = service)
         space.manus.nacre.ime.foldable.LayoutMode.StandardQwerty,
@@ -92,6 +102,7 @@ fun KeyboardScreen(service: NacreInputMethodService) {
             StandardKeyboardScreen(
                 service = service,
                 compactBase = layoutMode == space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
+                onFlexPointer = { showFlexPointer = true },
             )
     }
 }
@@ -100,6 +111,7 @@ fun KeyboardScreen(service: NacreInputMethodService) {
 private fun StandardKeyboardScreen(
     service: NacreInputMethodService,
     compactBase: Boolean = false,
+    onFlexPointer: () -> Unit,
 ) {
     val layerManager = service.layerManager
     val layout = layerManager.currentLayout(compactBase = compactBase)
@@ -119,7 +131,12 @@ private fun StandardKeyboardScreen(
         CandidateBar(service = service)
 
         // Status bar: layer + Japanese mode + shift + voice indicators
-        StatusBar(service = service, layerManager = layerManager, accentColor = accentColor)
+        StatusBar(
+            service = service,
+            layerManager = layerManager,
+            accentColor = accentColor,
+            onFlexPointer = onFlexPointer,
+        )
 
         // Keyboard rows with trackball in the middle
         val rows = layout.rows
@@ -153,6 +170,7 @@ private fun StatusBar(
     service: NacreInputMethodService,
     layerManager: space.manus.nacre.ime.input.LayerManager,
     accentColor: Color,
+    onFlexPointer: () -> Unit,
 ) {
     val showLayer = layerManager.currentLayer != Layer.Base
     val showJa = layerManager.isJapanese
@@ -181,6 +199,12 @@ private fun StatusBar(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                text = "Ptr",
+                color = accentColor,
+                fontSize = 10.sp,
+                modifier = Modifier.clickable { onFlexPointer() },
+            )
             // Voice input indicator / partial text
             if (isListening) {
                 Text(

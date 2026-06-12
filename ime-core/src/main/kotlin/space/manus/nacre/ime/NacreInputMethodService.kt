@@ -34,6 +34,7 @@ import space.manus.nacre.ime.input.SnippetEngine
 import space.manus.nacre.ime.input.VoiceInputManager
 import space.manus.nacre.ime.keyboard.KeyLighting
 import space.manus.nacre.ime.keyboard.KeyboardScreen
+import space.manus.nacre.ime.pointer.FlexPointerBridge
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -316,6 +317,7 @@ class NacreInputMethodService :
         if (voiceInputManager.isListening) {
             voiceInputManager.cancel()
         }
+        FlexPointerBridge.setImePointerVisible(false)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_PAUSE)
     }
 

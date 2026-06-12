@@ -3,4 +3,6 @@
     <string name="app_name">Nacre</string>
     <string name="subtype_en">English</string>
     <string name="subtype_ja">Japanese</string>
+    <string name="flex_pointer_accessibility_label">Nacre Flex Pointer</string>
+    <string name="flex_pointer_accessibility_description">Lets the Nacre keyboard control an on-screen pointer and send taps from the Flex Pointer pad.</string>
 </resources>
