@@ -12,6 +12,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -119,10 +121,21 @@ jobs:
           } > signing.properties
           echo "NACRE_SIGNED_APK=true" >> "${GITHUB_ENV}"
 
+      - name: Compute version code
+        run: |
+          # Monotonic per-run versionCode so the in-app updater can compare builds.
+          # +100 keeps us clear of the legacy hand-set codes (<= 2).
+          VC=$((100 + GITHUB_RUN_NUMBER))
+          echo "NACRE_VERSION_CODE=${VC}" >> "${GITHUB_ENV}"
+          echo "NACRE_VERSION_NAME=0.2.1+${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
+          echo "versionCode=${VC}"
+
       - name: Build Nacre APK
         run: ./gradlew assembleNacre
         env:
           ENABLE_NDK: "true"
+          NACRE_VERSION_CODE: ${{ env.NACRE_VERSION_CODE }}
+          NACRE_VERSION_NAME: ${{ env.NACRE_VERSION_NAME }}
 
       - name: Verify native library included
         run: |
@@ -142,3 +155,18 @@ jobs:
         with:
           name: nacre-apk
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub Release (in-app updater channel)
+        if: env.NACRE_SIGNED_APK == 'true' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)"
+          VC="${NACRE_VERSION_CODE}"
+          ASSET="nacre-${VC}.apk"   # name parsed by UpdateChecker (nacre-<code>.apk)
+          cp "${APK}" "${ASSET}"
+          gh release create "build-${VC}" "${ASSET}" \
+            --title "Nacre build ${VC}" \
+            --notes "Automated build ${VC} from ${GITHUB_SHA::7} (${GITHUB_REF_NAME})" \
+            --target "${GITHUB_SHA}" \
+          || gh release upload "build-${VC}" "${ASSET}" --clobber

@@ -49,8 +49,10 @@ android {
         applicationId = "space.manus.nacre"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        // CI injects a monotonic NACRE_VERSION_CODE (e.g. 100 + run number) so the
+        // in-app updater can tell builds apart. Local builds fall back to 2/0.2.0.
+        versionCode = System.getenv("NACRE_VERSION_CODE")?.toIntOrNull() ?: 2
+        versionName = System.getenv("NACRE_VERSION_NAME") ?: "0.2.0"
     }
 
     signingConfigs {
@@ -89,6 +91,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     // Prevent aapt2 from re-compressing already-gzipped assets
