@@ -11,6 +11,14 @@ class SherpaRecognizer {
     companion object {
         private const val TAG = "SherpaRecognizer"
         private const val SAMPLE_RATE = 16000
+
+        // Force Japanese decoding instead of SenseVoice auto-detect.
+        // "auto" frequently misfires kanji-heavy JP speech to zh/yue (shared Han
+        // script), producing Chinese hanzi garbage — the dominant accuracy killer
+        // for a JP-primary IME. English terms still surface as katakana and are
+        // recovered downstream by TECH_TERMS / LLM refinement.
+        // Flip to "auto" to A/B the previous behavior. Valid: auto|zh|en|ja|ko|yue.
+        private const val RECOGNITION_LANGUAGE = "ja"
     }
 
     private var recognizer: OfflineRecognizer? = null
@@ -19,19 +27,21 @@ class SherpaRecognizer {
 
     /**
      * Initialize the recognizer with model files from the given directory.
-     * @param modelDir Directory containing model.int8.onnx, tokens.txt
+     * @param modelDir Directory containing model.int8.onnx or model.onnx, plus tokens.txt
      * @param vadModelPath Path to silero_vad.onnx
      */
     fun initialize(modelDir: String, vadModelPath: String): Boolean {
         try {
             Log.i(TAG, "Initializing SherpaRecognizer from $modelDir")
+            val modelFile = pickSenseVoiceModelFile(modelDir)
+                ?: error("SenseVoice model file not found in $modelDir")
 
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
                 modelConfig = OfflineModelConfig(
                     senseVoice = OfflineSenseVoiceModelConfig(
-                        model = "$modelDir/model.int8.onnx",
-                        language = "auto",
+                        model = modelFile,
+                        language = RECOGNITION_LANGUAGE,
                         useInverseTextNormalization = true,
                     ),
                     tokens = "$modelDir/tokens.txt",
@@ -63,6 +73,14 @@ class SherpaRecognizer {
             isInitialized = false
             return false
         }
+    }
+
+    private fun pickSenseVoiceModelFile(modelDir: String): String? {
+        val candidates = listOf("model.onnx", "model.int8.onnx")
+        return candidates
+            .map { java.io.File(modelDir, it) }
+            .firstOrNull { it.exists() && it.length() > 0 }
+            ?.absolutePath
     }
 
     fun isReady(): Boolean = isInitialized

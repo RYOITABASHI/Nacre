@@ -53,7 +53,7 @@ class ModelDownloader(private val context: Context) {
         return mapOf(
             "sensevoice" to (getSenseVoiceModelDir() != null),
             "vad" to (getVadModelPath() != null),
-            "llm" to File(getModelsDir(), LLM_FILENAME).exists(),
+            "llm" to (getLlmModelPath() != null),
             "kenlm" to File(getModelsDir(), KENLM_FILENAME).exists(),
             "kenlm_compact" to File(getModelsDir(), COMPACT_KENLM_FILENAME).exists(),
         )
@@ -63,12 +63,12 @@ class ModelDownloader(private val context: Context) {
 
     /**
      * Get SenseVoice model directory path if it exists.
-     * The directory must contain model.int8.onnx and tokens.txt.
+     * The directory must contain model.onnx or model.int8.onnx, plus tokens.txt.
      */
     fun getSenseVoiceModelDir(): String? {
         Log.i(TAG, "getSenseVoiceModelDir: searching for SenseVoice model")
 
-        // Search candidate directories for one containing model.int8.onnx
+        // Search candidate directories for one containing a SenseVoice model file
         val candidates = mutableListOf<File>()
 
         // Internal storage
@@ -96,15 +96,14 @@ class ModelDownloader(private val context: Context) {
             }
         }
 
-        // Recursive scan: look for model.int8.onnx
+        // Recursive scan: look for a directory that is actually SenseVoice.
+        // model.onnx is a generic filename, so keep scanning when a non-SenseVoice
+        // parent directory is encountered.
         try {
-            val found = scanForFile(sdcard, "model.int8.onnx", maxDepth = 4)
-            if (found != null) {
-                val dir = found.parentFile
-                if (dir != null && isSenseVoiceDir(dir)) {
-                    Log.i(TAG, "getSenseVoiceModelDir: FOUND via scan at ${dir.absolutePath}")
-                    return dir.absolutePath
-                }
+            val foundDir = scanForSenseVoiceDir(sdcard, maxDepth = 4)
+            if (foundDir != null) {
+                Log.i(TAG, "getSenseVoiceModelDir: FOUND via scan at ${foundDir.absolutePath}")
+                return foundDir.absolutePath
             }
         } catch (e: Exception) {
             Log.w(TAG, "getSenseVoiceModelDir: scan failed", e)
@@ -114,10 +113,20 @@ class ModelDownloader(private val context: Context) {
         return null
     }
 
+    fun getSenseVoiceModelFile(modelDir: String): File? {
+        return getSenseVoiceModelFile(File(modelDir))
+    }
+
+    private fun getSenseVoiceModelFile(dir: File): File? {
+        return listOf("model.onnx", "model.int8.onnx")
+            .map { File(dir, it) }
+            .firstOrNull { it.exists() && it.length() > 0 }
+    }
+
     private fun isSenseVoiceDir(dir: File): Boolean {
         return try {
             dir.isDirectory &&
-                File(dir, "model.int8.onnx").let { it.exists() && it.length() > 0 } &&
+                getSenseVoiceModelFile(dir) != null &&
                 File(dir, "tokens.txt").exists()
         } catch (_: Exception) { false }
     }
@@ -164,22 +173,105 @@ class ModelDownloader(private val context: Context) {
 
     fun getCompactKenLmModelPath(): String? = findModelFile(COMPACT_KENLM_FILENAME)
 
-    // ---- LLM (Qwen 2.5 1.5B Q4_K_M) ----
+    // ---- LLM (Qwen 2.5 1.5B default; Gemma 4 retired) ----
+    //
+    // The native llama.cpp is pinned to b3500 (July 2024), whose loader does NOT
+    // understand the Gemma 4 / Gemma 3n "E2B" architecture — on device it just
+    // times out ("did not become ready after 180s") and dictation refinement
+    // stays disabled. Gemma 4 is also ~3GB, which does not fit the ~1.6GB free on
+    // a busy device. Qwen 2.5 1.5B is Qwen2-arch (loads fine on b3500), ~1.0GB
+    // (fits memory), and strong at Japanese — so it is now the default.
 
     /**
-     * Download the Qwen 2.5 1.5B Instruct Q4_K_M GGUF model used for voice
-     * post-processing (dictation cleanup). ~940MB.
+     * Download the default local LLM (Qwen 2.5 1.5B Q4_K_M) used for voice
+     * post-processing (dictation cleanup).
      */
     fun downloadLlm(onComplete: (Boolean) -> Unit) {
+        downloadQwenLlm(onComplete)
+    }
+
+    fun downloadGemma4Llm(onComplete: (Boolean) -> Unit) {
         downloadModel(
             url = LLM_URL,
-            modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+            modelName = "Gemma 4 E2B Instruct (Q4_K_M)",
             fileName = LLM_FILENAME,
             onComplete = onComplete,
         )
     }
 
-    fun getLlmModelPath(): String? = findModelFile(LLM_FILENAME)
+    fun downloadQwenLlm(onComplete: (Boolean) -> Unit) {
+        downloadModel(
+            url = QWEN_LLM_URL,
+            modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+            fileName = QWEN_LLM_FILENAME,
+            onComplete = onComplete,
+        )
+    }
+
+    fun getLlmModelPath(): String? {
+        return findModelFile(QWEN_LLM_FILENAME) ?: findModelFile(LLM_FILENAME)
+    }
+
+    fun getPreferredLlmModelPaths(): List<String> {
+        // Qwen first (loads on the pinned llama.cpp b3500); a stray legacy Gemma
+        // file is only tried as a last resort and will simply fail to load.
+        return listOfNotNull(
+            findModelFile(QWEN_LLM_FILENAME),
+            findModelFile(LLM_FILENAME),
+        ).distinct()
+    }
+
+    /**
+     * Remove the obsolete Gemma 4 GGUF (~3GB). It cannot load on the pinned
+     * llama.cpp b3500 and only wastes internal storage. Nacre-private file —
+     * not shared with Shelly or any other app.
+     */
+    fun deleteObsoleteLlmModels() {
+        val obsolete = findModelFile(LLM_FILENAME) ?: return
+        try {
+            val file = File(obsolete)
+            val mb = file.length() / 1024 / 1024
+            if (file.delete()) {
+                Log.i(TAG, "Deleted obsolete Gemma 4 model ($obsolete, ${mb}MB)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to delete obsolete Gemma 4 model: ${e.message}")
+        }
+    }
+
+    /**
+     * Provision the personal default model set without blocking UI/IME startup.
+     * Compact KenLM is the default conversion model; Qwen 2.5 1.5B is the default
+     * local LLM (b3500-compatible, fits memory). Any obsolete Gemma 4 GGUF is
+     * deleted to reclaim ~3GB.
+     */
+    fun ensureDefaultModelsDownloaded(
+        downloadCompactKenLm: Boolean = true,
+        downloadLlm: Boolean = true,
+    ) {
+        synchronized(ModelDownloader::class.java) {
+            if (autoProvisionStarted) return
+            autoProvisionStarted = true
+        }
+
+        scope.launch {
+            deleteObsoleteLlmModels()
+            if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
+                downloadModelInternal(
+                    url = COMPACT_KENLM_URL,
+                    modelName = "KenLM 日本語3-gram (compact)",
+                    fileName = COMPACT_KENLM_FILENAME,
+                )
+            }
+            if (downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
+                downloadModelInternal(
+                    url = QWEN_LLM_URL,
+                    modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+                    fileName = QWEN_LLM_FILENAME,
+                )
+            }
+        }
+    }
 
     /**
      * Get KenLM model file if it exists.
@@ -203,10 +295,32 @@ class ModelDownloader(private val context: Context) {
         onComplete: (Boolean) -> Unit,
     ) {
         currentJob = scope.launch {
+            val ok = downloadModelInternal(url, modelName, fileName)
+            withContext(Dispatchers.Main) {
+                onComplete(ok)
+            }
+        }
+    }
+
+    private suspend fun downloadModelInternal(
+        url: String,
+        modelName: String,
+        fileName: String,
+    ): Boolean {
+        return withContext(Dispatchers.IO) {
             val outFile = File(getModelsDir(), fileName)
             val tmpFile = File(getModelsDir(), "$fileName.tmp")
 
             try {
+                if (outFile.exists() && outFile.length() > 0) {
+                    withContext(Dispatchers.Main) {
+                        onProgress?.invoke(
+                            DownloadProgress(modelName, outFile.length(), outFile.length(), isComplete = true),
+                        )
+                    }
+                    return@withContext true
+                }
+
                 val connection = URL(url).openConnection() as HttpURLConnection
                 connection.connectTimeout = 30000
                 connection.readTimeout = 30000
@@ -227,11 +341,11 @@ class ModelDownloader(private val context: Context) {
                 var bytesRead: Int
 
                 while (input.read(buffer).also { bytesRead = it } != -1) {
-                    if (!isActive) {
+                    if (!currentCoroutineContext().isActive) {
                         input.close()
                         output.close()
                         connection.disconnect()
-                        return@launch
+                        return@withContext false
                     }
 
                     output.write(buffer, 0, bytesRead)
@@ -254,18 +368,18 @@ class ModelDownloader(private val context: Context) {
                     onProgress?.invoke(
                         DownloadProgress(modelName, totalBytes, totalBytes, isComplete = true),
                     )
-                    onComplete(true)
                 }
 
                 Log.i(TAG, "Model downloaded: $fileName (${totalBytes / 1024 / 1024}MB)")
+                true
             } catch (e: Exception) {
                 Log.e(TAG, "Download failed: $modelName", e)
                 withContext(Dispatchers.Main) {
                     onProgress?.invoke(
                         DownloadProgress(modelName, 0, 0, error = e.message),
                     )
-                    onComplete(false)
                 }
+                false
             }
         }
     }
@@ -417,15 +531,33 @@ class ModelDownloader(private val context: Context) {
         return null
     }
 
+    private fun scanForSenseVoiceDir(root: File, maxDepth: Int): File? {
+        if (maxDepth <= 0 || !root.isDirectory) return null
+        if (isSenseVoiceDir(root)) return root
+
+        val skipDirs = setOf("Android", ".thumbnails", ".cache", "cache", "DCIM", "Pictures", "Music", "Ringtones", "Alarms", "Notifications")
+        val children = root.listFiles() ?: return null
+        for (f in children) {
+            if (f.isDirectory && f.name !in skipDirs && !f.name.startsWith(".")) {
+                val found = scanForSenseVoiceDir(f, maxDepth - 1)
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
     companion object {
         private const val TAG = "ModelDownloader"
         const val SENSEVOICE_DIR = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
         const val VAD_FILENAME = "silero_vad.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
         const val COMPACT_KENLM_FILENAME = "japanese-compact.klm"
-        const val LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val LLM_FILENAME = "gemma-4-E2B-it-Q4_K_M.gguf"
+        const val QWEN_LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
         const val KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-5gram.klm"
         const val COMPACT_KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-compact.klm"
-        const val LLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val LLM_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
+        const val QWEN_LLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        @Volatile private var autoProvisionStarted = false
     }
 }

@@ -73,7 +73,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     @Volatile private var isWhisperContinuousMode = false
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
 
-    // LLM post-processing (Qwen 2.5 1.5B via in-process LlmService over AIDL)
+    // LLM post-processing (local Gemma/Qwen via isolated LlmService over AIDL)
     @Volatile private var llmService: ILlmService? = null
     @Volatile private var llmBound = false
 
@@ -147,29 +147,35 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     if (!svc.isModelLoaded) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
-                        // Users commonly sideload Qwen to /sdcard/Download/ before the in-app download flow exists.
-                        val modelPath = downloader.getLlmModelPath()
-                        if (modelPath != null) {
-                            val modelFile = java.io.File(modelPath)
-                            writeDiagnostic("llmConnection: loading model ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
-                            svc.loadModel(modelFile.absolutePath)
+                        // Gemma 4 is the default; Qwen is still accepted as a legacy fallback.
+                        val modelPaths = downloader.getPreferredLlmModelPaths()
+                        if (modelPaths.isNotEmpty()) {
+                            var loadedPath: String? = null
+                            for (modelPath in modelPaths) {
+                                if (tryLoadLlmModel(svc, modelPath)) {
+                                    loadedPath = modelPath
+                                    break
+                                }
+                                try {
+                                    svc.unloadModel()
+                                } catch (_: Exception) {
+                                }
+                            }
+                            if (loadedPath == null) {
+                                writeDiagnostic("llmConnection: no local LLM could be loaded — refinement disabled for this session")
+                                return@Thread
+                            }
+                            llmService = svc
+                            val modelFile = java.io.File(loadedPath)
+                            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
                         } else {
-                            writeDiagnostic("llmConnection: LLM model not found in any known location — refinement disabled")
+                            downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
+                            writeDiagnostic("llmConnection: LLM model not found — Gemma 4 download requested, refinement disabled for this session")
                             return@Thread
                         }
-                    }
-                    // Poll until the model reports ready. Qwen 1.5B Q4_K_M (~1GB) typically
-                    // mmaps in 30–90s on mid-range Android; allow 3 min before giving up.
-                    val start = System.currentTimeMillis()
-                    while (!svc.isModelLoaded && System.currentTimeMillis() - start < 180_000) {
-                        Thread.sleep(500)
-                    }
-                    if (svc.isModelLoaded) {
-                        llmService = svc
-                        val elapsed = (System.currentTimeMillis() - start) / 1000
-                        writeDiagnostic("llmConnection: model ready after ${elapsed}s")
                     } else {
-                        writeDiagnostic("llmConnection: model load still pending after 180s — refinement disabled for this session")
+                        llmService = svc
+                        writeDiagnostic("llmConnection: model already loaded")
                     }
                 } catch (e: Exception) {
                     writeDiagnostic("llmConnection EXCEPTION: ${e.message}")
@@ -181,6 +187,26 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             llmService = null
             llmBound = false
         }
+    }
+
+    private fun tryLoadLlmModel(svc: ILlmService, modelPath: String): Boolean {
+        val modelFile = java.io.File(modelPath)
+        writeDiagnostic("llmConnection: loading model ${modelFile.absolutePath} (${modelFile.length() / 1024 / 1024}MB)")
+        svc.loadModel(modelFile.absolutePath)
+
+        // Local GGUF models typically mmap in 30–90s on mid-range Android; allow
+        // 3 min per candidate before falling back.
+        val start = System.currentTimeMillis()
+        while (!svc.isModelLoaded && System.currentTimeMillis() - start < 180_000) {
+            Thread.sleep(500)
+        }
+        val elapsed = (System.currentTimeMillis() - start) / 1000
+        if (svc.isModelLoaded) {
+            writeDiagnostic("llmConnection: ${modelFile.name} ready after ${elapsed}s")
+            return true
+        }
+        writeDiagnostic("llmConnection: ${modelFile.name} did not become ready after ${elapsed}s")
+        return false
     }
 
     private val whisperCallback = object : IWhisperCallback.Stub() {
@@ -305,7 +331,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 Log.i(TAG, "startListening: Whisper modelLoaded=$modelLoaded")
                 if (modelLoaded) {
                     requestAudioFocus()
-                    whisperService!!.startContinuousRecognition("auto", whisperCallback)
+                    // Language is fixed to ja at SenseVoice init (see SherpaRecognizer);
+                    // pass the session locale rather than a misleading "auto".
+                    whisperService!!.startContinuousRecognition(currentLanguage, whisperCallback)
                     isWhisperContinuousMode = true  // Set AFTER successful IPC
                     Log.i(TAG, "startListening: Whisper continuous mode STARTED")
                     writeDiagnostic("WHISPER STARTED: continuous mode active")
@@ -334,6 +362,12 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
             putExtra(RecognizerIntent.EXTRA_CONFIDENCE_SCORES, true)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                putStringArrayListExtra(
+                    RecognizerIntent.EXTRA_BIASING_STRINGS,
+                    ArrayList(STT_BIASING_TERMS),
+                )
+            }
             // Offline preference disabled — causes ERROR_NO_MATCH on devices
             // without offline model downloaded. Let the engine decide.
             // putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
@@ -517,6 +551,11 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         val hasJapanese = text.any { it.code in 0x3000..0x9FFF || it.code in 0xFF00..0xFFEF }
 
         if (hasJapanese) {
+            val punctuationIdx = text.indexOfLast { it in "。、！？!?,、" }
+            if (punctuationIdx >= 0 && punctuationIdx >= (text.length * 0.4f).toInt()) {
+                return punctuationIdx + 1
+            }
+
             // Collect candidate break points (particle/punctuation boundaries)
             val target = (text.length * 0.8).toInt()
             val candidates = mutableListOf<Int>()
@@ -932,12 +971,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         if (alternatives.size == 1) return alternatives[0]
 
         val confidences = results.getFloatArray(SpeechRecognizer.CONFIDENCE_SCORES)
+        val normalizedAlternatives = alternatives.map { space.manus.nacre.ai.LlmPostProcessor.quickClean(it).trim() }
 
         // Try KenLM re-ranking if available
         val scorer = (service.inputEngine.dictionary as? NacreDictionary)?.kenLmScorer
         if (scorer != null && scorer.isReady()) {
-            val precedingContext = committedInSession.toString().takeLast(30)
-            val sentences = alternatives.map { listOf(it) }
+            val precedingContext = committedInSession.toString().takeLast(80)
+            val sentences = normalizedAlternatives.mapIndexed { index, cleaned ->
+                listOf(cleaned.ifEmpty { alternatives[index] })
+            }
             val lmScores = scorer.scoreBatch(sentences, precedingContext)
 
             // Combined score: confidence × weight + LM score × weight
@@ -946,15 +988,16 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             var bestScore = Float.MIN_VALUE
             for (i in alternatives.indices) {
                 val conf = if (confidences != null && i < confidences.size) confidences[i] else 0.5f
+                val candidateText = normalizedAlternatives[i].ifEmpty { alternatives[i] }
                 // Normalize confidence (0-1) to similar scale as LM scores
                 // LM scores are typically -10 to -2 range
-                val combined = conf * 5f + lmScores[i] * 0.3f
+                val combined = conf * 5f + lmScores[i] * 0.3f + if (candidateText.length < alternatives[i].length) 0.15f else 0f
                 if (combined > bestScore) {
                     bestScore = combined
                     bestIdx = i
                 }
             }
-            return alternatives[bestIdx]
+            return normalizedAlternatives[bestIdx].ifEmpty { alternatives[bestIdx] }
         }
 
         // Fallback: use confidence scores only
@@ -967,9 +1010,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     bestIdx = i
                 }
             }
-            return alternatives[bestIdx]
+            return normalizedAlternatives[bestIdx].ifEmpty { alternatives[bestIdx] }
         }
-        return alternatives[0]
+        return normalizedAlternatives[0].ifEmpty { alternatives[0] }
     }
 
     // ── RecognitionListener ───────────────────────────────────────────
@@ -1102,7 +1145,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            // Typeless-style: no preview during recording.
+            val text = selectBestResult(partialResults)
+            if (text.isBlank()) return
+
+            // Keep the latest partial visible in the UI and try to commit only
+            // the stable prefix. This gives us Typeless-style segmentation
+            // without waiting for final results on every pause.
+            val converted = convertVoiceCommands(text)
+            partialText = LlmPostProcessor.quickClean(converted)
+            tryStreamingCommit(text)
         }
 
         override fun onEvent(eventType: Int, params: Bundle?) {}
@@ -1305,6 +1356,14 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         // the next provider in the chain.
         private const val CLOUD_REFINE_TIMEOUT_MS = 6_000
         // No deferred commit timer — Typeless model: commit only on user stop action
+        private val STT_BIASING_TERMS = listOf(
+            "git", "git rebase", "git merge", "git pull", "git push", "GitHub",
+            "npm", "npm install", "npm install React", "pnpm", "yarn",
+            "React", "TypeScript", "JavaScript", "Kotlin", "Android",
+            "Gradle", "Compose", "Jetpack Compose", "API", "JSON", "SDK",
+            "Codex", "Nacre", "Shelly", "Gemma", "Whisper", "SenseVoice",
+            "MCP", "LLM", "ADB", "logcat",
+        )
         private val RECOVERABLE_ERRORS = setOf(
             SpeechRecognizer.ERROR_NO_MATCH,
             SpeechRecognizer.ERROR_SPEECH_TIMEOUT,

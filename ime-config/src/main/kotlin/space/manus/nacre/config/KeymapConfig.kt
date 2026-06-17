@@ -83,6 +83,58 @@ object DefaultLayouts {
         ),
     )
 
+    /**
+     * Compact cover-screen layout for Z Fold class sub-displays.
+     *
+     * Keeps the Japanese-first base behavior, but trims the bottom row down to
+     * the essentials so the cover display stays usable with a thumb.
+     */
+    val compactJapaneseQwerty: KeyboardLayout = KeyboardLayout(
+        rows = listOf(
+            // Row 1: Q-P
+            listOf(
+                key("q", swipeUp = "1", swipeLeft = "~", swipeRight = "`"),
+                key("w", swipeUp = "2"), key("e", swipeUp = "3"),
+                key("r", swipeUp = "4"), key("t", swipeUp = "5"),
+                key("y", swipeUp = "6"), key("u", swipeUp = "7"),
+                key("i", swipeUp = "8"), key("o", swipeUp = "9"),
+                key("p", swipeUp = "0", swipeLeft = "[", swipeRight = "]"),
+            ),
+            // Row 2: A-L + ー
+            listOf(
+                key("a", swipeUp = "@", swipeLeft = "{", swipeRight = "}"),
+                key("s", swipeUp = "#"), key("d", swipeUp = "$"),
+                key("f", swipeUp = "%"), key("g", swipeUp = "&"),
+                key("h", swipeUp = "*"), key("j", swipeUp = "("),
+                key("k", swipeUp = ")"), key("l", swipeUp = "-", swipeRight = "="),
+                key("ー", label = "ー", swipeUp = "〜", swipeDown = ":", swipeRight = ";"),
+            ),
+            // Row 3: Z-. + ⌫
+            listOf(
+                key("z", swipeUp = "!", swipeLeft = "\""),
+                key("x", swipeUp = "\"", swipeRight = "'"),
+                key("c", swipeUp = "'"),
+                key("v", swipeUp = "/", swipeRight = "|"),
+                key("b", swipeUp = "\\"), key("n", swipeUp = "?"),
+                key("m", swipeUp = "+", swipeRight = "="),
+                key(",", label = ",", swipeUp = "<", swipeRight = ">"),
+                key(".", swipeUp = "！", swipeDown = "。"),
+                KeyDef("⌫", action = KeyAction.Backspace, swipeLeft = "⌫w"),
+            ),
+            // Row 4: Japanese-first compact modifier row for cover screens.
+            listOf(
+                KeyDef("Shift", action = KeyAction.Shift, widthMultiplier = 0.95f),
+                KeyDef("😀", action = KeyAction.Emoji, widthMultiplier = 0.6f),
+                KeyDef("#+", label = "#+", action = KeyAction.Symbols, widthMultiplier = 0.6f),
+                KeyDef("Fn", action = KeyAction.Fn, widthMultiplier = 0.6f),
+                KeyDef(" ", label = "⎵", action = KeyAction.Space, widthMultiplier = 2.2f,
+                    swipeUp = "Tab", swipeLeft = "ToggleJa", swipeRight = "ToggleJa"),
+                KeyDef("Alt", action = KeyAction.Alt, widthMultiplier = 0.75f),
+                KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.85f),
+            ),
+        ),
+    )
+
     val fnLayer1: KeyboardLayout = KeyboardLayout(
         rows = listOf(
             listOf(

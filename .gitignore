@@ -28,5 +28,8 @@ signing.properties
 # Model staging (large files, not for repo)
 models-staging/
 
+# Voice input diagnostic runs
+voice-test-runs/
+
 # Extracted AAR artifacts
 META-INF/

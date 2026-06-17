@@ -11,7 +11,7 @@ import kotlinx.coroutines.*
  * LLM text transformation service.
  *
  * Runs in a separate process (android:process=":llm") for JNI crash isolation.
- * Uses llama.cpp via JNI for local Qwen 2.5 1.5B inference (ChatML prompt format).
+ * Uses llama.cpp via JNI for local Gemma/Qwen inference.
  *
  * Falls back to rule-based transformation if native library/model is unavailable.
  *
@@ -36,6 +36,9 @@ class LlmService : Service() {
     @Volatile
     private var isGenerating = false
 
+    @Volatile
+    private var promptFormat: PromptFormat = PromptFormat.GEMMA
+
     // NOTE: The former 30-second idle-auto-unload was removed because voice
     // post-processing binds the service, loads the model, then waits for the
     // user to speak. The idle window between load and the first transform()
@@ -57,6 +60,9 @@ class LlmService : Service() {
             scope.launch {
                 Log.i(TAG, "Loading LLM model: $modelPath")
                 val ok = LlamaJni.loadModel(modelPath)
+                if (ok) {
+                    promptFormat = PromptFormat.fromPath(modelPath)
+                }
                 Log.i(TAG, "LLM model loaded: $ok")
             }
         }
@@ -129,12 +135,17 @@ class LlmService : Service() {
     }
 
     private fun buildPrompt(text: String, instruction: String): String {
-        // Qwen 2.5 ChatML format. The `instruction` becomes the system prompt so
-        // callers with detailed multi-line instructions (e.g. dictation cleanup)
-        // get proper conditioning; the raw input goes in the user turn.
-        return "<|im_start|>system\n$instruction<|im_end|>\n" +
-            "<|im_start|>user\n$text<|im_end|>\n" +
-            "<|im_start|>assistant\n"
+        // Keep prompt templates model-specific. Gemma chat models do not use
+        // ChatML; using Qwen's markers there materially hurts generation.
+        return when (promptFormat) {
+            PromptFormat.GEMMA ->
+                "<start_of_turn>user\n$instruction\n\n$text<end_of_turn>\n" +
+                    "<start_of_turn>model\n"
+            PromptFormat.QWEN ->
+                "<|im_start|>system\n$instruction<|im_end|>\n" +
+                    "<|im_start|>user\n$text<|im_end|>\n" +
+                    "<|im_start|>assistant\n"
+        }
     }
 
     // --- Rule-based fallback (works without model) ---
@@ -267,5 +278,17 @@ class LlmService : Service() {
             "要約して" to "Summarize (LLM)",
             "コードにして" to "Convert to code (LLM)",
         )
+    }
+
+    private enum class PromptFormat {
+        GEMMA,
+        QWEN;
+
+        companion object {
+            fun fromPath(path: String): PromptFormat {
+                val lower = path.lowercase()
+                return if (lower.contains("qwen")) QWEN else GEMMA
+            }
+        }
     }
 }

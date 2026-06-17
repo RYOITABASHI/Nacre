@@ -40,20 +40,43 @@ object LlmPostProcessor {
         "エーピーアイ" to "API", "エルエルエム" to "LLM",
         "ジーピーティー" to "GPT", "チャットジーピーティー" to "ChatGPT",
         "ピーティーワイ" to "PTY", "ジェイソン" to "JSON",
-        "エイチティーティーピー" to "HTTP", "ユーアールエル" to "URL",
-        "エスキューエル" to "SQL", "ギットハブ" to "GitHub", "ギット" to "Git",
-        "タイプスクリプト" to "TypeScript", "コトリン" to "Kotlin",
-        "リアクト" to "React", "アンドロイド" to "Android",
+        "エイチティーティーピー" to "HTTP", "エイチティーティーピーエス" to "HTTPS",
+        "ユーアールエル" to "URL", "エスキューエル" to "SQL",
+        "ギットハブ" to "GitHub", "ギット" to "Git", "ぎっと" to "Git", "ジット" to "Git",
+        "タイプスクリプト" to "TypeScript", "ジャバスクリプト" to "JavaScript",
+        "コトリン" to "Kotlin", "リアクト" to "React", "アンドロイド" to "Android",
+        "グラドル" to "Gradle", "グレードル" to "Gradle", "コンポーズ" to "Compose",
         "エーピーケー" to "APK", "えーあい" to "AI",
         "ウィスパー" to "Whisper", "シェルパ" to "sherpa",
         "センスボイス" to "SenseVoice", "タイプレス" to "Typeless",
+        "コーデックス" to "Codex", "シェリー" to "Shelly", "エムシーピー" to "MCP",
+        "エーディービー" to "ADB", "ログキャット" to "logcat",
         "ターミナル" to "ターミナル", // keep as-is (prevent partial match issues)
     ).entries.sortedByDescending { it.key.length }
+
+    private data class RegexFix(val pattern: Regex, val replacement: String)
+
+    private val CODING_FIXES = listOf(
+        RegexFix(Regex("^(?:一|いち|1)リバース(して|しといて|お願いします)?([。！!]?)$"), "git rebase$1$2"),
+        RegexFix(Regex("^(?:ぎっと|ギット|ジット|Git|git|get|Get)\\s*リバース(?=(して|しといて|お願いします)?[。！!\\s]*$)"), "git rebase"),
+        RegexFix(Regex("^(?:ぎっと|ギット|ジット|Git|git|get|Get)\\s*リベース(?=(して|しといて|お願いします)?[。！!\\s]*$)"), "git rebase"),
+        RegexFix(Regex("(?:エヌ[？?、\\s]*)?ピーエム\\s*インストール\\s*"), "npm install "),
+        RegexFix(Regex("エヌ[？?、\\s]*ピーエム\\s*インストール\\s*"), "npm install "),
+        RegexFix(Regex("(?i)\\bNPM\\b\\s*インストール\\s*"), "npm install "),
+        RegexFix(Regex("エヌ[？?、\\s]*ピーエム"), "npm"),
+        RegexFix(Regex("(?i)\\bNPM\\b"), "npm"),
+    )
 
     // Common SenseVoice misrecognition dictionary (wrong → correct)
     private val MISRECOGNITION_FIXES = mapOf(
         "制度駆動点。" to "精度、句読点、",  // include trailing period → comma
         "制度駆動点" to "精度、句読点",
+        "制度？当点" to "精度、句読点、",
+        "制度?当点" to "精度、句読点、",
+        "制度句" to "精度、句読点、",
+        "当点" to "句読点",
+        "補正？要約" to "補正、要約",
+        "補正?要約" to "補正、要約",
         "繁映" to "反映",
         "繁栄" to "反映",  // context: テキスト繁栄→テキスト反映
         "精入力" to "音声入力",
@@ -106,6 +129,11 @@ object LlmPostProcessor {
         // B. Misrecognition dictionary (before tech terms, as some overlap)
         for ((wrong, correct) in MISRECOGNITION_FIXES) {
             text = text.replace(wrong, correct)
+        }
+
+        // B2. Coding-command normalization for common STT failures observed in logs.
+        for ((pattern, replacement) in CODING_FIXES) {
+            text = text.replace(pattern, replacement)
         }
 
         // B. Technical term dictionary

@@ -1,5 +1,6 @@
 package space.manus.nacre.ui.settings
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -29,13 +30,21 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import space.manus.nacre.BuildConfig
 import space.manus.nacre.ai.KenLmJni
+import space.manus.nacre.update.ApkInstaller
+import space.manus.nacre.update.UpdateChecker
+import space.manus.nacre.update.UpdateInfo
 import space.manus.nacre.config.ConfigRepository
 import space.manus.nacre.config.PresetProvider
 import space.manus.nacre.config.ThemeProvider
 import space.manus.nacre.ime.feedback.HapticManager
 import space.manus.nacre.ime.feedback.SoundManager
 import space.manus.nacre.ime.keyboard.KeyLighting
+import space.manus.nacre.ime.pointer.NacrePointerAccessibilityService
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -44,6 +53,29 @@ private val NacreSurface = Color(0xFF16213E)
 private val NacreAccent = Color(0xFF00D4AA)
 private val NacreText = Color(0xFFE0E0E0)
 private val NacreTextDim = Color(0xFF8888AA)
+
+private data class ModelDiscovery(
+    val kenLmPath: String? = null,
+    val compactKenLmPath: String? = null,
+    val llmPath: String? = null,
+    val senseVoiceDir: String? = null,
+    val vadPath: String? = null,
+)
+
+@Composable
+private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloader): State<ModelDiscovery> {
+    return produceState(initialValue = ModelDiscovery(), downloader) {
+        value = withContext(Dispatchers.IO) {
+            ModelDiscovery(
+                kenLmPath = downloader.getKenLmModelPath(),
+                compactKenLmPath = downloader.getCompactKenLmModelPath(),
+                llmPath = downloader.getLlmModelPath(),
+                senseVoiceDir = downloader.getSenseVoiceModelDir(),
+                vadPath = downloader.getVadModelPath(),
+            )
+        }
+    }
+}
 
 class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -58,6 +90,11 @@ class SettingsActivity : ComponentActivity() {
 fun NacreSettingsScreen() {
     val context = LocalContext.current
     val config = remember { ConfigRepository(context) }
+    val defaultModelDownloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
+
+    LaunchedEffect(defaultModelDownloader) {
+        defaultModelDownloader.ensureDefaultModelsDownloaded()
+    }
 
     // Read crash log
     val crashLog = remember {
@@ -116,6 +153,18 @@ fun NacreSettingsScreen() {
                 imm.showInputMethodPicker()
             },
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- App Update ---
+        SectionHeader("App Update")
+        AppUpdateSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- Flex Pointer ---
+        SectionHeader("Flex Pointer")
+        FlexPointerAccessSection(context)
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -264,6 +313,46 @@ private fun SectionHeader(text: String) {
             .fillMaxWidth()
             .padding(bottom = 8.dp),
     )
+}
+
+@Composable
+private fun FlexPointerAccessSection(context: Context) {
+    var enabled by remember { mutableStateOf(isFlexPointerAccessibilityEnabled(context)) }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                enabled = isFlexPointerAccessibilityEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    SettingsCard(
+        title = if (enabled) "Nacre Flex Pointer is enabled" else "Enable Nacre Flex Pointer",
+        description = if (enabled) {
+            "Use Ptr on the keyboard to open the Flex Mode pointer pad"
+        } else {
+            "Enable the accessibility service so Ptr can move an overlay cursor and send taps"
+        },
+        onClick = {
+            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        },
+    )
+}
+
+private fun isFlexPointerAccessibilityEnabled(context: Context): Boolean {
+    val expected = ComponentName(
+        context,
+        NacrePointerAccessibilityService::class.java,
+    ).flattenToString()
+    val enabledServices = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+    ) ?: return false
+    return enabledServices.split(':').any { it.equals(expected, ignoreCase = true) }
 }
 
 @Composable
@@ -745,10 +834,11 @@ private fun StoragePermissionCard() {
 private fun FirstRunModelsBanner() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    val anyPresent = downloader.getKenLmModelPath() != null ||
-        downloader.getCompactKenLmModelPath() != null ||
-        downloader.getLlmModelPath() != null ||
-        downloader.getSenseVoiceModelDir() != null
+    val discovery by rememberModelDiscovery(downloader)
+    val anyPresent = discovery.kenLmPath != null ||
+        discovery.compactKenLmPath != null ||
+        discovery.llmPath != null ||
+        discovery.senseVoiceDir != null
     if (anyPresent) return
 
     Card(
@@ -777,13 +867,15 @@ private fun FirstRunModelsBanner() {
 }
 
 /**
- * Qwen 2.5 1.5B Instruct (Q4_K_M) — ~1.1GB. Powers voice-input cleanup.
+ * Qwen 2.5 1.5B Instruct (Q4_K_M) — default local voice-input cleanup model
+ * (b3500-compatible, fits memory; replaced the unloadable Gemma 4).
  */
 @Composable
 private fun LlmModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelPath by remember { mutableStateOf(downloader.getLlmModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelPath by remember { mutableStateOf<String?>(null) }
     var modelSize by remember {
         mutableStateOf(modelPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L)
     }
@@ -796,7 +888,7 @@ private fun LlmModelSection() {
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && modelPath == null) {
-                val found = downloader.getLlmModelPath()
+                val found = discovery.llmPath
                 if (found != null) {
                     modelPath = found
                     modelSize = java.io.File(found).length() / 1024 / 1024
@@ -805,6 +897,14 @@ private fun LlmModelSection() {
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.llmPath) {
+        val found = discovery.llmPath
+        if (modelPath == null && found != null) {
+            modelPath = found
+            modelSize = java.io.File(found).length() / 1024 / 1024
+        }
     }
 
     Card(
@@ -829,7 +929,7 @@ private fun LlmModelSection() {
                 Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
             } else {
                 Text(
-                    "音声入力のLLM整文用（~1.1GB）。ダウンロード後、キーボード再起動で有効化。",
+                    "音声入力のLLM整文用。デフォルトで自動取得し、ダウンロード後はキーボード再起動で有効化。",
                     color = NacreTextDim,
                     fontSize = 12.sp,
                 )
@@ -865,7 +965,7 @@ private fun LlmModelSection() {
                             if (found != null) {
                                 modelPath = found
                                 modelSize = java.io.File(found).length() / 1024 / 1024
-                                Toast.makeText(context, "Qwen model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "Qwen 2.5 model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
                             }
                         } else {
                             Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
@@ -882,7 +982,7 @@ private fun LlmModelSection() {
                 Text(
                     if (downloading) "Downloading..."
                     else if (modelPath != null) "Re-download"
-                    else "Download (~1.1GB)"
+                    else "Download Qwen 2.5"
                 )
             }
         }
@@ -893,28 +993,49 @@ private fun LlmModelSection() {
 private fun KenLmModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelPath by remember { mutableStateOf(downloader.getKenLmModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelPath by remember { mutableStateOf<String?>(null) }
     var modelSize by remember { mutableStateOf(modelPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L) }
-    var compactPath by remember { mutableStateOf(downloader.getCompactKenLmModelPath()) }
+    var compactPath by remember { mutableStateOf<String?>(null) }
     var compactSize by remember { mutableStateOf(compactPath?.let { java.io.File(it).length() / 1024 / 1024 } ?: 0L) }
     var importing by remember { mutableStateOf(false) }
     var downloadingCompact by remember { mutableStateOf(false) }
+    var downloadingFull by remember { mutableStateOf(false) }
     var progressPct by remember { mutableStateOf(0) }
+    var fullProgressPct by remember { mutableStateOf(0) }
 
     // Re-check model when returning from permission settings
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && modelPath == null) {
-                val found = downloader.getKenLmModelPath()
+                val found = discovery.kenLmPath
                 if (found != null) {
                     modelPath = found
                     modelSize = java.io.File(found).length() / 1024 / 1024
+                }
+                val foundCompact = discovery.compactKenLmPath
+                if (compactPath == null && foundCompact != null) {
+                    compactPath = foundCompact
+                    compactSize = java.io.File(foundCompact).length() / 1024 / 1024
                 }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.kenLmPath, discovery.compactKenLmPath) {
+        val found = discovery.kenLmPath
+        if (modelPath == null && found != null) {
+            modelPath = found
+            modelSize = java.io.File(found).length() / 1024 / 1024
+        }
+        val foundCompact = discovery.compactKenLmPath
+        if (compactPath == null && foundCompact != null) {
+            compactPath = foundCompact
+            compactSize = java.io.File(foundCompact).length() / 1024 / 1024
+        }
     }
 
     val launcher = rememberLauncherForActivityResult(
@@ -1022,7 +1143,7 @@ private fun KenLmModelSection() {
             androidx.compose.material3.HorizontalDivider(color = NacreTextDim.copy(alpha = 0.2f))
             Spacer(modifier = Modifier.height(16.dp))
 
-            // --- Full 5-gram (power users, sideload via file picker) ---
+            // --- Full 5-gram (power users, direct download or sideload) ---
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("KenLM 5-gram (full)", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(modifier = Modifier.width(8.dp))
@@ -1038,12 +1159,57 @@ private fun KenLmModelSection() {
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
             } else {
-                Text("/sdcard/Download/ に japanese-5gram.klm を置くか、下のボタンから選択（~561MB）", color = NacreTextDim, fontSize = 12.sp)
+                Text("最高精度の日本語変換モデル（~561MB）。compact より優先して読み込みます。", color = NacreTextDim, fontSize = 12.sp)
+            }
+            if (downloadingFull) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { fullProgressPct / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                    trackColor = NacreTextDim.copy(alpha = 0.3f),
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text("${fullProgressPct}%", color = NacreTextDim, fontSize = 11.sp)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Button(
+                onClick = {
+                    downloadingFull = true
+                    fullProgressPct = 0
+                    downloader.onProgress = { p -> fullProgressPct = p.percent }
+                    downloader.downloadKenLm { ok ->
+                        downloadingFull = false
+                        downloader.onProgress = null
+                        if (ok) {
+                            val found = downloader.getKenLmModelPath()
+                            if (found != null) {
+                                modelPath = found
+                                modelSize = java.io.File(found).length() / 1024 / 1024
+                                Toast.makeText(context, "KenLM 5-gram downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                            }
+                        } else {
+                            Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                enabled = !downloadingFull && !importing,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NacreAccent,
+                    contentColor = Color.Black,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (downloadingFull) "Downloading..."
+                    else if (modelPath != null) "Re-download full"
+                    else "Download full (~561MB)"
+                )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Button(
                 onClick = { launcher.launch(arrayOf("*/*")) },
-                enabled = !importing,
+                enabled = !importing && !downloadingFull,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = NacreSurface,
                     contentColor = NacreAccent,
@@ -1065,15 +1231,13 @@ private fun KenLmModelSection() {
 private fun WhisperModelSection() {
     val context = LocalContext.current
     val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
-    var modelDir by remember { mutableStateOf(downloader.getSenseVoiceModelDir()) }
-    var vadPath by remember { mutableStateOf(downloader.getVadModelPath()) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelDir by remember { mutableStateOf<String?>(null) }
+    var vadPath by remember { mutableStateOf<String?>(null) }
     val isReady = modelDir != null && vadPath != null
     var modelSize by remember {
         mutableStateOf(
-            modelDir?.let {
-                val model = java.io.File(it, "model.int8.onnx")
-                if (model.exists()) model.length() / 1024 / 1024 else 0L
-            } ?: 0L
+            modelDir?.let { downloader.getSenseVoiceModelFile(it)?.length()?.div(1024)?.div(1024) } ?: 0L
         )
     }
 
@@ -1082,19 +1246,29 @@ private fun WhisperModelSection() {
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME && !isReady) {
-                val foundDir = downloader.getSenseVoiceModelDir()
-                val foundVad = downloader.getVadModelPath()
+                val foundDir = discovery.senseVoiceDir
+                val foundVad = discovery.vadPath
                 if (foundDir != null) {
                     modelDir = foundDir
-                    modelSize = java.io.File(foundDir, "model.int8.onnx").let {
-                        if (it.exists()) it.length() / 1024 / 1024 else 0L
-                    }
+                    modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
                 }
                 if (foundVad != null) vadPath = foundVad
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.senseVoiceDir, discovery.vadPath) {
+        val foundDir = discovery.senseVoiceDir
+        if (modelDir == null && foundDir != null) {
+            modelDir = foundDir
+            modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
+        }
+        val foundVad = discovery.vadPath
+        if (vadPath == null && foundVad != null) {
+            vadPath = foundVad
+        }
     }
 
     Card(
@@ -1144,7 +1318,7 @@ private fun WhisperModelSection() {
  * Keys are stored per-device via CloudLlmConfig (SharedPreferences, not
  * backed up). When multiple keys are set, VoiceInputManager tries them in
  * priority order: Qwen Max → Gemini Pro → DeepSeek V3. None of them are
- * required — if all are blank the app falls back to the on-device Qwen 1.5B.
+ * required — if all are blank the app falls back to the on-device Gemma/Qwen model.
  */
 @Composable
 private fun CloudLlmSection() {
@@ -1156,13 +1330,13 @@ private fun CloudLlmSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルQwenにフォールバック。",
+                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルGemma/Qwenにフォールバック。",
                 color = NacreTextDim,
                 fontSize = 12.sp,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "キー未設定時はオフライン（ローカルQwen）のみで動作。キーは端末内にのみ保存されます。",
+                "キー未設定時はオフライン（ローカルGemma/Qwen）のみで動作。キーは端末内にのみ保存されます。",
                 color = NacreTextDim.copy(alpha = 0.8f),
                 fontSize = 11.sp,
             )
@@ -1314,6 +1488,111 @@ fun SettingsCard(
                 fontSize = 14.sp,
                 color = NacreTextDim,
             )
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf("") }
+    var available by remember { mutableStateOf<UpdateInfo?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text(
+                text = "Current: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                fontSize = 14.sp,
+                color = NacreText,
+            )
+            if (status.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(text = status, fontSize = 13.sp, color = NacreTextDim)
+            }
+            if (busy && progress > 0f) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val update = available
+            if (update == null) {
+                Button(
+                    onClick = {
+                        busy = true
+                        status = "確認中…"
+                        scope.launch {
+                            try {
+                                val info = withContext(Dispatchers.IO) {
+                                    UpdateChecker.check(BuildConfig.VERSION_CODE)
+                                }
+                                if (info == null) {
+                                    status = "最新です"
+                                } else {
+                                    status = "新しいビルド ${info.versionCode} が利用できます"
+                                    available = info
+                                }
+                            } catch (e: Exception) {
+                                status = "確認に失敗: ${e.message}"
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.buttonColors(containerColor = NacreAccent),
+                ) { Text("更新を確認") }
+            } else {
+                Button(
+                    onClick = {
+                        if (!ApkInstaller.canInstall(context)) {
+                            status = "設定で「不明なアプリのインストール」を許可してください"
+                            context.startActivity(ApkInstaller.unknownSourcesSettingsIntent(context))
+                            return@Button
+                        }
+                        busy = true
+                        progress = 0f
+                        status = "ダウンロード中…"
+                        scope.launch {
+                            try {
+                                var lastPct = -1
+                                val apk = withContext(Dispatchers.IO) {
+                                    ApkInstaller.download(context, update.apkUrl, update.apkSize) { p ->
+                                        // onProgress fires on the IO thread; marshal the
+                                        // Compose state write to Main, throttled to whole %.
+                                        val pct = (p * 100).toInt()
+                                        if (pct != lastPct) {
+                                            lastPct = pct
+                                            scope.launch(Dispatchers.Main) { progress = p }
+                                        }
+                                    }
+                                }
+                                // Launch the system installer on the main thread from
+                                // this foreground activity (reliable on Android 16/Samsung).
+                                status = "インストールを開始します…"
+                                ApkInstaller.install(context, apk)
+                            } catch (e: Exception) {
+                                status = "更新に失敗: ${e.message}"
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.buttonColors(containerColor = NacreAccent),
+                ) { Text("ダウンロードして更新 (${update.versionCode})") }
+            }
         }
     }
 }

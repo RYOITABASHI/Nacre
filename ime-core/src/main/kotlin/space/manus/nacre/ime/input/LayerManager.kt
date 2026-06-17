@@ -112,8 +112,12 @@ class LayerManager {
         return false
     }
 
-    fun currentLayout(): KeyboardLayout = when (currentLayer) {
-        Layer.Base -> PresetProvider.getLayout(activePreset)
+    fun currentLayout(compactBase: Boolean = false): KeyboardLayout = when (currentLayer) {
+        Layer.Base -> if (compactBase) {
+            DefaultLayouts.compactJapaneseQwerty
+        } else {
+            PresetProvider.getLayout(activePreset)
+        }
         Layer.Fn1 -> DefaultLayouts.fnLayer1
         Layer.Fn2 -> DefaultLayouts.fnLayer2
     }

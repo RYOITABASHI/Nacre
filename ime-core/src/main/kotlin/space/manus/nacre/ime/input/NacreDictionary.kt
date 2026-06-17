@@ -127,6 +127,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         loadSupplementaryDict("dict/person_names.tsv", "person names")
         loadSupplementaryDict("dict/emoji_kaomoji.tsv", "emoji/kaomoji")
         loadSupplementaryDict("dict/symbols.tsv", "symbols")
+        loadSupplementaryDict("dict/mobile_tech.tsv", "mobile tech")
 
         // Boost person name entries: Mozc defaults are too high (median ~6500)
         // Reduce by 1500 to make names more competitive with common nouns
@@ -527,7 +528,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             addUnique(prefixMatch(kana, limit = 15 - results.size))
         }
 
-        // 4. Partial segmentation with hiragana tail preference
+        // 4. Phrase-memory completions for user-specific long phrases
+        if (results.size < 15) {
+            addUnique(findPhraseCompletions(kana, limit = minOf(5, 15 - results.size)))
+        }
+
+        // 5. Partial segmentation with hiragana tail preference
         if (results.size < 10 && kana.length >= 3) {
             for (splitAt in 2 until kana.length) {
                 val head = kana.substring(0, splitAt)
@@ -567,17 +573,17 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             }
         }
 
-        // 5. English word candidates (hiragana reading match)
+        // 6. English word candidates (hiragana reading match)
         if (results.size < 20) {
             addUnique(englishMatch(kana, limit = 5))
         }
 
-        // 6. Romaji-based English candidates (e.g. "goo" → "Google")
+        // 7. Romaji-based English candidates (e.g. "goo" → "Google")
         if (romaji.isNotEmpty() && romaji.length >= 2) {
             addUnique(romajiEnglishMatch(romaji, limit = 5))
         }
 
-        // 7. Typo correction: swap adjacent kana, common misreadings
+        // 8. Typo correction: swap adjacent kana, common misreadings
         //
         // Only runs as a last resort — if Viterbi + exact match + prefix match
         // together yielded almost nothing, the user likely DID mistype, so
@@ -588,7 +594,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             addUnique(typoCorrection(kana, limit = 3))
         }
 
-        // 8. Always ensure katakana, half-width katakana, and hiragana as-is candidates exist
+        // 9. Always ensure katakana, half-width katakana, and hiragana as-is candidates exist
         if (kana.length >= 2) {
             val katakana = hiraganaToKatakana(kana)
             if (katakana != kana && seen.add(katakana)) {
@@ -742,9 +748,9 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
         // 5. Recent history (fallback)
         if (results.size < limit) {
-            for (h in recentHistory) {
+            for ((index, h) in recentHistory.withIndex()) {
                 if (seen.add(h.surface) && h.surface != lastCommittedSurface) {
-                    results.add(h.copy(cost = 5000))
+                    results.add(h.copy(cost = 2200 + index * 140))
                     if (results.size >= limit) break
                 }
             }
@@ -900,8 +906,46 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         }
         val bigramBoostVal = minOf(bigramCount, 4) * 2500
         val trigramBoostVal = minOf(trigramCount, 3) * 3500
-        val totalBoost = minOf(unigramBoostVal + bigramBoostVal + trigramBoostVal + staticBoostVal, 22000)
+        val recentBoost = recentHistoryBoost(reading, surface)
+        val phraseBoost = phraseMemoryBoost(reading, surface)
+        val totalBoost = minOf(
+            unigramBoostVal + bigramBoostVal + trigramBoostVal + staticBoostVal + recentBoost + phraseBoost,
+            22000,
+        )
         return maxOf(100, baseCost - totalBoost)
+    }
+
+    /**
+     * Recent history boost: emphasize the most recently selected candidates.
+     * Newest items are at the front of recentHistory.
+     */
+    private fun recentHistoryBoost(reading: String, surface: String): Int {
+        if (recentHistory.isEmpty()) return 0
+        for ((index, candidate) in recentHistory.withIndex()) {
+            if (candidate.reading == reading && candidate.surface == surface) {
+                return when (index) {
+                    0 -> 3200
+                    1 -> 2600
+                    2 -> 2200
+                    3, 4 -> 1800
+                    5, 6, 7 -> 1300
+                    else -> 800
+                }
+            }
+        }
+        return 0
+    }
+
+    /**
+     * Phrase memory boost: reward repeated longer phrases with a recency bias.
+     */
+    private fun phraseMemoryBoost(reading: String, surface: String): Int {
+        val entries = phraseMemory[reading.take(2)] ?: return 0
+        val entry = entries.firstOrNull { it.reading == reading && it.surface == surface } ?: return 0
+        val age = (learningEpoch - entry.lastEpoch).coerceAtLeast(0)
+        val frequency = minOf(entry.count, 10) * 280
+        val recency = maxOf(0, 70 - age) * 25
+        return minOf(4500, frequency + recency)
     }
 
     /**
@@ -2232,9 +2276,15 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         val entries = phraseMemory[key] ?: return emptyList()
         return entries
             .filter { it.reading.startsWith(readingPrefix) && it.reading.length > readingPrefix.length }
-            .sortedByDescending { it.count }
+            .sortedWith(compareByDescending<PhraseEntry> { it.count }.thenByDescending { it.lastEpoch })
             .take(limit)
-            .map { ConversionCandidate(surface = it.surface, reading = it.reading, cost = 100) }
+            .map { entry ->
+                val age = (learningEpoch - entry.lastEpoch).coerceAtLeast(0)
+                val frequency = minOf(entry.count, 8) * 220
+                val recency = maxOf(0, 50 - age) * 15
+                val cost = maxOf(80, 2300 - frequency - recency)
+                ConversionCandidate(surface = entry.surface, reading = entry.reading, cost = cost)
+            }
     }
 
     // --- Frequency decay ---

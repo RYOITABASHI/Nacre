@@ -2,7 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - codex/**
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -10,6 +12,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -84,29 +88,85 @@ jobs:
       - name: Remove Termux aapt2 override
         run: sed -i '/android.aapt2FromMavenOverride/d' gradle.properties
 
-      - name: Build Debug APK
-        run: ./gradlew :app:assembleDebug
+      - name: Configure release signing
         env:
-          ENABLE_NDK: "true"
+          NACRE_RELEASE_KEYSTORE_BASE64: ${{ secrets.NACRE_RELEASE_KEYSTORE_BASE64 }}
+          NACRE_RELEASE_STORE_PASSWORD: ${{ secrets.NACRE_RELEASE_STORE_PASSWORD }}
+          NACRE_RELEASE_KEY_ALIAS: ${{ secrets.NACRE_RELEASE_KEY_ALIAS }}
+          NACRE_RELEASE_KEY_PASSWORD: ${{ secrets.NACRE_RELEASE_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for name in \
+            NACRE_RELEASE_KEYSTORE_BASE64 \
+            NACRE_RELEASE_STORE_PASSWORD \
+            NACRE_RELEASE_KEY_ALIAS \
+            NACRE_RELEASE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::warning::${name} is not configured; CI will build but not upload an installable APK."
+              missing=1
+            fi
+          done
 
-      - name: Build Release APK
-        run: ./gradlew :app:assembleRelease
+          if [ "${missing}" -ne 0 ]; then
+            echo "NACRE_SIGNED_APK=false" >> "${GITHUB_ENV}"
+            exit 0
+          fi
+
+          echo "${NACRE_RELEASE_KEYSTORE_BASE64}" | base64 --decode > /tmp/nacre-release.jks
+          {
+            printf '%s\n' "storeFile=/tmp/nacre-release.jks"
+            printf '%s\n' "storePassword=${NACRE_RELEASE_STORE_PASSWORD}"
+            printf '%s\n' "keyAlias=${NACRE_RELEASE_KEY_ALIAS}"
+            printf '%s\n' "keyPassword=${NACRE_RELEASE_KEY_PASSWORD}"
+          } > signing.properties
+          echo "NACRE_SIGNED_APK=true" >> "${GITHUB_ENV}"
+
+      - name: Compute version code
+        run: |
+          # Monotonic per-run versionCode so the in-app updater can compare builds.
+          # +100 keeps us clear of the legacy hand-set codes (<= 2).
+          VC=$((100 + GITHUB_RUN_NUMBER))
+          echo "NACRE_VERSION_CODE=${VC}" >> "${GITHUB_ENV}"
+          echo "NACRE_VERSION_NAME=0.3.0" >> "${GITHUB_ENV}"
+          echo "versionCode=${VC} versionName=0.3.0"
+
+      - name: Build Nacre APK
+        run: ./gradlew assembleNacre
         env:
           ENABLE_NDK: "true"
+          NACRE_VERSION_CODE: ${{ env.NACRE_VERSION_CODE }}
+          NACRE_VERSION_NAME: ${{ env.NACRE_VERSION_NAME }}
 
       - name: Verify native library included
         run: |
           echo "=== Checking for libnacre-ai.so ==="
-          find app/build/outputs -name "*.apk" -exec unzip -l {} \; | grep libnacre || echo "WARNING: libnacre-ai.so not found in APK"
+          find app/build/outputs/apk/release -name "*.apk" -exec unzip -l {} \; | grep libnacre || echo "WARNING: libnacre-ai.so not found in APK"
 
-      - name: Upload Debug APK
+      - name: Verify release APK signature
+        if: env.NACRE_SIGNED_APK == 'true'
+        run: |
+          APK="$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)"
+          APKSIGNER="$(find "${ANDROID_HOME}/build-tools" -name apksigner -type f | sort | tail -n 1)"
+          "${APKSIGNER}" verify --print-certs "${APK}"
+
+      - name: Upload Nacre APK
+        if: env.NACRE_SIGNED_APK == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: nacre-debug
-          path: app/build/outputs/apk/debug/*.apk
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: nacre-release
+          name: nacre-apk
           path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub Release (in-app updater channel)
+        if: env.NACRE_SIGNED_APK == 'true' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK="$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)"
+          VC="${NACRE_VERSION_CODE}"
+          ASSET="nacre-${VC}.apk"   # name parsed by UpdateChecker (nacre-<code>.apk)
+          cp "${APK}" "${ASSET}"
+          gh release create "build-${VC}" "${ASSET}" \
+            --title "Nacre build ${VC}" \
+            --notes "Automated build ${VC} from ${GITHUB_SHA::7} (${GITHUB_REF_NAME})" \
+            --target "${GITHUB_SHA}" \
+          || gh release upload "build-${VC}" "${ASSET}" --clobber
