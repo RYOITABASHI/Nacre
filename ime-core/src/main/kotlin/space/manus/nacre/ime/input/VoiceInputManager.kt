@@ -331,7 +331,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 Log.i(TAG, "startListening: Whisper modelLoaded=$modelLoaded")
                 if (modelLoaded) {
                     requestAudioFocus()
-                    whisperService!!.startContinuousRecognition("auto", whisperCallback)
+                    // Language is fixed to ja at SenseVoice init (see SherpaRecognizer);
+                    // pass the session locale rather than a misleading "auto".
+                    whisperService!!.startContinuousRecognition(currentLanguage, whisperCallback)
                     isWhisperContinuousMode = true  // Set AFTER successful IPC
                     Log.i(TAG, "startListening: Whisper continuous mode STARTED")
                     writeDiagnostic("WHISPER STARTED: continuous mode active")
