@@ -11,6 +11,14 @@ class SherpaRecognizer {
     companion object {
         private const val TAG = "SherpaRecognizer"
         private const val SAMPLE_RATE = 16000
+
+        // Force Japanese decoding instead of SenseVoice auto-detect.
+        // "auto" frequently misfires kanji-heavy JP speech to zh/yue (shared Han
+        // script), producing Chinese hanzi garbage — the dominant accuracy killer
+        // for a JP-primary IME. English terms still surface as katakana and are
+        // recovered downstream by TECH_TERMS / LLM refinement.
+        // Flip to "auto" to A/B the previous behavior. Valid: auto|zh|en|ja|ko|yue.
+        private const val RECOGNITION_LANGUAGE = "ja"
     }
 
     private var recognizer: OfflineRecognizer? = null
@@ -31,7 +39,7 @@ class SherpaRecognizer {
                 modelConfig = OfflineModelConfig(
                     senseVoice = OfflineSenseVoiceModelConfig(
                         model = "$modelDir/model.int8.onnx",
-                        language = "auto",
+                        language = RECOGNITION_LANGUAGE,
                         useInverseTextNormalization = true,
                     ),
                     tokens = "$modelDir/tokens.txt",
