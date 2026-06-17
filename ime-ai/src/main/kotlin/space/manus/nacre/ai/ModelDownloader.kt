@@ -173,14 +173,21 @@ class ModelDownloader(private val context: Context) {
 
     fun getCompactKenLmModelPath(): String? = findModelFile(COMPACT_KENLM_FILENAME)
 
-    // ---- LLM (Gemma 4 E2B default, Qwen legacy fallback) ----
+    // ---- LLM (Qwen 2.5 1.5B default; Gemma 4 retired) ----
+    //
+    // The native llama.cpp is pinned to b3500 (July 2024), whose loader does NOT
+    // understand the Gemma 4 / Gemma 3n "E2B" architecture — on device it just
+    // times out ("did not become ready after 180s") and dictation refinement
+    // stays disabled. Gemma 4 is also ~3GB, which does not fit the ~1.6GB free on
+    // a busy device. Qwen 2.5 1.5B is Qwen2-arch (loads fine on b3500), ~1.0GB
+    // (fits memory), and strong at Japanese — so it is now the default.
 
     /**
-     * Download the default Gemma 4 E2B Q4_K_M GGUF model used for voice
+     * Download the default local LLM (Qwen 2.5 1.5B Q4_K_M) used for voice
      * post-processing (dictation cleanup).
      */
     fun downloadLlm(onComplete: (Boolean) -> Unit) {
-        downloadGemma4Llm(onComplete)
+        downloadQwenLlm(onComplete)
     }
 
     fun downloadGemma4Llm(onComplete: (Boolean) -> Unit) {
@@ -202,24 +209,45 @@ class ModelDownloader(private val context: Context) {
     }
 
     fun getLlmModelPath(): String? {
-        return findModelFile(LLM_FILENAME) ?: findModelFile(QWEN_LLM_FILENAME)
+        return findModelFile(QWEN_LLM_FILENAME) ?: findModelFile(LLM_FILENAME)
     }
 
     fun getPreferredLlmModelPaths(): List<String> {
+        // Qwen first (loads on the pinned llama.cpp b3500); a stray legacy Gemma
+        // file is only tried as a last resort and will simply fail to load.
         return listOfNotNull(
-            findModelFile(LLM_FILENAME),
             findModelFile(QWEN_LLM_FILENAME),
+            findModelFile(LLM_FILENAME),
         ).distinct()
     }
 
     /**
+     * Remove the obsolete Gemma 4 GGUF (~3GB). It cannot load on the pinned
+     * llama.cpp b3500 and only wastes internal storage. Nacre-private file —
+     * not shared with Shelly or any other app.
+     */
+    fun deleteObsoleteLlmModels() {
+        val obsolete = findModelFile(LLM_FILENAME) ?: return
+        try {
+            val file = File(obsolete)
+            val mb = file.length() / 1024 / 1024
+            if (file.delete()) {
+                Log.i(TAG, "Deleted obsolete Gemma 4 model ($obsolete, ${mb}MB)")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to delete obsolete Gemma 4 model: ${e.message}")
+        }
+    }
+
+    /**
      * Provision the personal default model set without blocking UI/IME startup.
-     * Compact KenLM is small enough to be the default conversion model; Gemma 4
-     * is the preferred local LLM while Qwen remains a compatibility fallback.
+     * Compact KenLM is the default conversion model; Qwen 2.5 1.5B is the default
+     * local LLM (b3500-compatible, fits memory). Any obsolete Gemma 4 GGUF is
+     * deleted to reclaim ~3GB.
      */
     fun ensureDefaultModelsDownloaded(
         downloadCompactKenLm: Boolean = true,
-        downloadGemma4: Boolean = true,
+        downloadLlm: Boolean = true,
     ) {
         synchronized(ModelDownloader::class.java) {
             if (autoProvisionStarted) return
@@ -227,6 +255,7 @@ class ModelDownloader(private val context: Context) {
         }
 
         scope.launch {
+            deleteObsoleteLlmModels()
             if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
                 downloadModelInternal(
                     url = COMPACT_KENLM_URL,
@@ -234,11 +263,11 @@ class ModelDownloader(private val context: Context) {
                     fileName = COMPACT_KENLM_FILENAME,
                 )
             }
-            if (downloadGemma4 && findModelFile(LLM_FILENAME) == null) {
+            if (downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
                 downloadModelInternal(
-                    url = LLM_URL,
-                    modelName = "Gemma 4 E2B Instruct (Q4_K_M)",
-                    fileName = LLM_FILENAME,
+                    url = QWEN_LLM_URL,
+                    modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
+                    fileName = QWEN_LLM_FILENAME,
                 )
             }
         }
