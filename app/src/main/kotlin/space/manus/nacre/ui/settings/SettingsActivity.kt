@@ -1578,8 +1578,10 @@ private fun AppUpdateSection() {
                                         }
                                     }
                                 }
+                                // Launch the system installer on the main thread from
+                                // this foreground activity (reliable on Android 16/Samsung).
                                 status = "インストールを開始します…"
-                                withContext(Dispatchers.IO) { ApkInstaller.install(context, apk) }
+                                ApkInstaller.install(context, apk)
                             } catch (e: Exception) {
                                 status = "更新に失敗: ${e.message}"
                             } finally {

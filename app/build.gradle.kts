@@ -105,6 +105,9 @@ dependencies {
     implementation(project(":ime-config"))
     implementation(project(":ime-ai"))
 
+    // FileProvider for the in-app updater (serving the downloaded APK)
+    implementation("androidx.core:core-ktx:1.13.1")
+
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")

@@ -1,27 +1,30 @@
 package space.manus.nacre.update
 
-import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageInstaller
 import android.net.Uri
-import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import androidx.core.content.FileProvider
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * Downloads a release APK and installs it as a self-update via PackageInstaller.
- * The new APK must be signed with the same key as the running app (it is — CI
- * uses the canonical NACRE_* release key), so the install is a seamless update
- * with no uninstall and no data loss. The user still taps a single system
- * confirmation, surfaced by [UpdateInstallReceiver].
+ * Downloads a release APK and hands it to the system installer as a seamless
+ * self-update. The new APK is signed with the same key as the running app (CI
+ * uses the canonical NACRE_* release key), so it updates in place — no
+ * uninstall, no data loss; the user taps one system confirmation.
+ *
+ * The install is launched with ACTION_VIEW + a FileProvider URI from the
+ * foreground activity. The earlier PackageInstaller-session approach relied on a
+ * BroadcastReceiver to surface the confirm dialog, which Android 16 / Samsung
+ * Freecess blocks (background-activity-launch restriction) — so it never
+ * appeared. ACTION_VIEW from a visible activity is the reliable path.
  */
 object ApkInstaller {
     private const val TAG = "NacreUpdate"
-    const val ACTION_INSTALL_STATUS = "space.manus.nacre.update.INSTALL_STATUS"
+    private const val PROVIDER_SUFFIX = ".updateprovider"
 
     /** True when the OS already allows this app to install packages. */
     fun canInstall(context: Context): Boolean =
@@ -64,29 +67,18 @@ object ApkInstaller {
         return out
     }
 
-    /** Commits [apk] into a PackageInstaller session. Runs on a worker thread. */
+    /**
+     * Opens the system installer for [apk]. Call from the foreground activity
+     * (main thread) so the confirm dialog is allowed to appear.
+     */
     fun install(context: Context, apk: File) {
-        val installer = context.packageManager.packageInstaller
-        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
-        params.setAppPackageName(context.packageName)
-        val sessionId = installer.createSession(params)
-        installer.openSession(sessionId).use { session ->
-            apk.inputStream().use { input ->
-                session.openWrite("nacre.apk", 0, apk.length()).use { out ->
-                    input.copyTo(out)
-                    session.fsync(out)
-                }
-            }
-            val intent = Intent(ACTION_INSTALL_STATUS).setPackage(context.packageName)
-            // FLAG_MUTABLE is REQUIRED: PackageInstaller delivers the result by
-            // filling EXTRA_STATUS into this intent via the IntentSender fillIn.
-            // FLAG_IMMUTABLE would drop those extras and the receiver would never
-            // see STATUS_PENDING_USER_ACTION. Do not "fix" this to immutable.
-            val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
-            val pending = PendingIntent.getBroadcast(context, sessionId, intent, flags)
-            session.commit(pending.intentSender)
+        val uri = FileProvider.getUriForFile(context, context.packageName + PROVIDER_SUFFIX, apk)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        Log.i(TAG, "Install session $sessionId committed (${apk.length()} bytes)")
+        context.startActivity(intent)
+        Log.i(TAG, "Launched system installer for ${apk.name} (${apk.length()} bytes)")
     }
 }
