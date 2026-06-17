@@ -31,8 +31,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import space.manus.nacre.BuildConfig
 import space.manus.nacre.ai.KenLmJni
+import space.manus.nacre.update.ApkInstaller
+import space.manus.nacre.update.UpdateChecker
+import space.manus.nacre.update.UpdateInfo
 import space.manus.nacre.config.ConfigRepository
 import space.manus.nacre.config.PresetProvider
 import space.manus.nacre.config.ThemeProvider
@@ -148,6 +153,12 @@ fun NacreSettingsScreen() {
                 imm.showInputMethodPicker()
             },
         )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- App Update ---
+        SectionHeader("App Update")
+        AppUpdateSection()
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1476,6 +1487,109 @@ fun SettingsCard(
                 fontSize = 14.sp,
                 color = NacreTextDim,
             )
+        }
+    }
+}
+
+@Composable
+private fun AppUpdateSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf("") }
+    var available by remember { mutableStateOf<UpdateInfo?>(null) }
+    var busy by remember { mutableStateOf(false) }
+    var progress by remember { mutableFloatStateOf(0f) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Text(
+                text = "Current: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                fontSize = 14.sp,
+                color = NacreText,
+            )
+            if (status.isNotBlank()) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(text = status, fontSize = 13.sp, color = NacreTextDim)
+            }
+            if (busy && progress > 0f) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+
+            val update = available
+            if (update == null) {
+                Button(
+                    onClick = {
+                        busy = true
+                        status = "確認中…"
+                        scope.launch {
+                            try {
+                                val info = withContext(Dispatchers.IO) {
+                                    UpdateChecker.check(BuildConfig.VERSION_CODE)
+                                }
+                                if (info == null) {
+                                    status = "最新です"
+                                } else {
+                                    status = "新しいビルド ${info.versionCode} が利用できます"
+                                    available = info
+                                }
+                            } catch (e: Exception) {
+                                status = "確認に失敗: ${e.message}"
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.buttonColors(containerColor = NacreAccent),
+                ) { Text("更新を確認") }
+            } else {
+                Button(
+                    onClick = {
+                        if (!ApkInstaller.canInstall(context)) {
+                            status = "設定で「不明なアプリのインストール」を許可してください"
+                            context.startActivity(ApkInstaller.unknownSourcesSettingsIntent(context))
+                            return@Button
+                        }
+                        busy = true
+                        progress = 0f
+                        status = "ダウンロード中…"
+                        scope.launch {
+                            try {
+                                var lastPct = -1
+                                val apk = withContext(Dispatchers.IO) {
+                                    ApkInstaller.download(context, update.apkUrl, update.apkSize) { p ->
+                                        // onProgress fires on the IO thread; marshal the
+                                        // Compose state write to Main, throttled to whole %.
+                                        val pct = (p * 100).toInt()
+                                        if (pct != lastPct) {
+                                            lastPct = pct
+                                            scope.launch(Dispatchers.Main) { progress = p }
+                                        }
+                                    }
+                                }
+                                status = "インストールを開始します…"
+                                withContext(Dispatchers.IO) { ApkInstaller.install(context, apk) }
+                            } catch (e: Exception) {
+                                status = "更新に失敗: ${e.message}"
+                            } finally {
+                                busy = false
+                            }
+                        }
+                    },
+                    enabled = !busy,
+                    colors = ButtonDefaults.buttonColors(containerColor = NacreAccent),
+                ) { Text("ダウンロードして更新 (${update.versionCode})") }
+            }
         }
     }
 }
