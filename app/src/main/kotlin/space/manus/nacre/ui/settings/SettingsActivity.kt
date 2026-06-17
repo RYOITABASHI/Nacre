@@ -867,7 +867,8 @@ private fun FirstRunModelsBanner() {
 }
 
 /**
- * Gemma 4 E2B Instruct (Q4_K_M) — default local voice-input cleanup model.
+ * Qwen 2.5 1.5B Instruct (Q4_K_M) — default local voice-input cleanup model
+ * (b3500-compatible, fits memory; replaced the unloadable Gemma 4).
  */
 @Composable
 private fun LlmModelSection() {
@@ -913,7 +914,7 @@ private fun LlmModelSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Gemma 4 E2B", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text("Qwen 2.5 1.5B", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Spacer(modifier = Modifier.width(8.dp))
                 if (modelPath != null) {
                     Text("Ready", color = Color(0xFF4CAF50), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -923,7 +924,7 @@ private fun LlmModelSection() {
             }
             Spacer(modifier = Modifier.height(4.dp))
             if (modelPath != null) {
-                Text("Voice input cleanup (${modelSize}MB, Qwen fallback supported)", color = NacreTextDim, fontSize = 12.sp)
+                Text("Voice input cleanup (${modelSize}MB)", color = NacreTextDim, fontSize = 12.sp)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
             } else {
@@ -964,7 +965,7 @@ private fun LlmModelSection() {
                             if (found != null) {
                                 modelPath = found
                                 modelSize = java.io.File(found).length() / 1024 / 1024
-                                Toast.makeText(context, "Gemma 4 model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                                Toast.makeText(context, "Qwen 2.5 model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
                             }
                         } else {
                             Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
@@ -981,7 +982,7 @@ private fun LlmModelSection() {
                 Text(
                     if (downloading) "Downloading..."
                     else if (modelPath != null) "Re-download"
-                    else "Download Gemma 4"
+                    else "Download Qwen 2.5"
                 )
             }
         }
@@ -1577,8 +1578,10 @@ private fun AppUpdateSection() {
                                         }
                                     }
                                 }
+                                // Launch the system installer on the main thread from
+                                // this foreground activity (reliable on Android 16/Samsung).
                                 status = "インストールを開始します…"
-                                withContext(Dispatchers.IO) { ApkInstaller.install(context, apk) }
+                                ApkInstaller.install(context, apk)
                             } catch (e: Exception) {
                                 status = "更新に失敗: ${e.message}"
                             } finally {

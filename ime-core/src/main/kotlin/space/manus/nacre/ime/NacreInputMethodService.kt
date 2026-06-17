@@ -189,7 +189,7 @@ class NacreInputMethodService :
                         android.util.Log.i("NacreIME", "KenLM loaded: ${modelToLoad.name} (${modelToLoad.length() / 1024 / 1024}MB)")
                     }
                 } else {
-                    downloader.ensureDefaultModelsDownloaded(downloadGemma4 = false)
+                    downloader.ensureDefaultModelsDownloaded(downloadLlm = false)
                     android.util.Log.i("NacreIME", "No KenLM model available yet; compact KenLM download requested")
                 }
             } catch (e: Exception) {

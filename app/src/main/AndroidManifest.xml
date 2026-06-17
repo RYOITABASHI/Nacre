@@ -83,10 +83,16 @@
             android:exported="false"
             android:process=":llm" />
 
-        <!-- Receives PackageInstaller session callbacks for the in-app updater -->
-        <receiver
-            android:name="space.manus.nacre.update.UpdateInstallReceiver"
-            android:exported="false" />
+        <!-- Serves the downloaded update APK to the system installer (ACTION_VIEW) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updateprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 
