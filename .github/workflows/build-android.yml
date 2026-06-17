@@ -127,8 +127,8 @@ jobs:
           # +100 keeps us clear of the legacy hand-set codes (<= 2).
           VC=$((100 + GITHUB_RUN_NUMBER))
           echo "NACRE_VERSION_CODE=${VC}" >> "${GITHUB_ENV}"
-          echo "NACRE_VERSION_NAME=0.2.1+${GITHUB_RUN_NUMBER}" >> "${GITHUB_ENV}"
-          echo "versionCode=${VC}"
+          echo "NACRE_VERSION_NAME=0.3.0" >> "${GITHUB_ENV}"
+          echo "versionCode=${VC} versionName=0.3.0"
 
       - name: Build Nacre APK
         run: ./gradlew assembleNacre
