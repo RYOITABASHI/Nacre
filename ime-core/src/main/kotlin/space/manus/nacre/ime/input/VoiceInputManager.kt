@@ -86,7 +86,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 try {
                     if (!svc.isModelLoaded) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
-                        val modelDir = downloader.getSenseVoiceModelDir()
+                        // Prefer the ja-specialized ReazonSpeech transducer; fall back
+                        // to SenseVoice until ReazonSpeech finishes downloading.
+                        val modelDir = downloader.getPreferredAsrModelDir()
                         val vadPath = downloader.getVadModelPath()
                         writeDiagnostic("onServiceConnected: modelDir=$modelDir, vadPath=$vadPath")
                         if (modelDir != null && vadPath != null) {

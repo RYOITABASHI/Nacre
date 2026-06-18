@@ -131,6 +131,71 @@ class ModelDownloader(private val context: Context) {
         } catch (_: Exception) { false }
     }
 
+    // ---- ReazonSpeech ja Zipformer (preferred ASR) ----
+
+    /** True when [dir] holds a Zipformer transducer (encoder/decoder/joiner + tokens). */
+    private fun isReazonSpeechDir(dir: File): Boolean {
+        return try {
+            if (!dir.isDirectory) return false
+            fun has(prefix: String) =
+                dir.listFiles { f -> f.name.startsWith(prefix) && f.name.endsWith(".onnx") && f.length() > 0 }
+                    ?.isNotEmpty() == true
+            has("encoder") && has("decoder") && has("joiner") && File(dir, "tokens.txt").exists()
+        } catch (_: Exception) { false }
+    }
+
+    /** Path of the ReazonSpeech model directory if present, else null. */
+    fun getReazonSpeechModelDir(): String? {
+        val candidates = mutableListOf<File>()
+        candidates.add(File(getModelsDir(), REAZONSPEECH_DIR))
+        context.getExternalFilesDir(null)?.let { candidates.add(File(it, "models/$REAZONSPEECH_DIR")) }
+        val downloads = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS,
+        )
+        candidates.addAll(
+            listOf(
+                File(downloads, REAZONSPEECH_DIR),
+                File("/sdcard/Download/$REAZONSPEECH_DIR"),
+            ),
+        )
+        for (dir in candidates.distinctBy { it.absolutePath }) {
+            if (isReazonSpeechDir(dir)) {
+                Log.i(TAG, "getReazonSpeechModelDir: FOUND at ${dir.absolutePath}")
+                return dir.absolutePath
+            }
+        }
+        return null
+    }
+
+    /**
+     * Preferred ASR model dir: the Japanese-specialized ReazonSpeech transducer if
+     * present, otherwise the legacy SenseVoice dir. SherpaRecognizer auto-detects
+     * the model type from the directory contents.
+     */
+    fun getPreferredAsrModelDir(): String? = getReazonSpeechModelDir() ?: getSenseVoiceModelDir()
+
+    /** Download the ReazonSpeech ja int8 model (~160MB) into the models dir if missing. */
+    private suspend fun downloadReazonSpeechIfMissing() {
+        if (getReazonSpeechModelDir() != null) return
+        val dir = File(getModelsDir(), REAZONSPEECH_DIR)
+        dir.mkdirs()
+        val files = listOf(
+            Triple(REAZON_ENCODER_URL, "$REAZONSPEECH_DIR/$REAZON_ENCODER", "ReazonSpeech encoder"),
+            Triple(REAZON_DECODER_URL, "$REAZONSPEECH_DIR/$REAZON_DECODER", "ReazonSpeech decoder"),
+            Triple(REAZON_JOINER_URL, "$REAZONSPEECH_DIR/$REAZON_JOINER", "ReazonSpeech joiner"),
+            Triple(REAZON_TOKENS_URL, "$REAZONSPEECH_DIR/tokens.txt", "ReazonSpeech tokens"),
+        )
+        for ((url, fileName, name) in files) {
+            // Abort early if any part fails (e.g. network drop on the 147MB encoder);
+            // .tmp is preserved so the next ensureDefault call resumes via Range.
+            if (!downloadModelInternal(url = url, modelName = name, fileName = fileName)) {
+                Log.w(TAG, "ReazonSpeech download incomplete ($name failed); will retry next launch")
+                return
+            }
+        }
+        Log.i(TAG, "ReazonSpeech ja model provisioned")
+    }
+
     // ---- Silero VAD model ----
 
     /**
@@ -256,6 +321,9 @@ class ModelDownloader(private val context: Context) {
 
         scope.launch {
             deleteObsoleteLlmModels()
+            // ASR is the highest-leverage model — provision the ja-specialized
+            // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
+            downloadReazonSpeechIfMissing()
             if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
                 downloadModelInternal(
                     url = COMPACT_KENLM_URL,
@@ -549,6 +617,19 @@ class ModelDownloader(private val context: Context) {
     companion object {
         private const val TAG = "ModelDownloader"
         const val SENSEVOICE_DIR = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17"
+        // ReazonSpeech ja Zipformer transducer — Japanese-specialized ASR (35k hrs),
+        // far stronger than SenseVoice on JP. int8 ~160MB. Runs on the existing
+        // sherpa-onnx engine (offline transducer). Files mirrored into the Nacre
+        // v0.1.0-models release as reazonspeech-ja-*; saved locally with clean names.
+        const val REAZONSPEECH_DIR = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+        const val REAZON_ENCODER = "encoder.int8.onnx"
+        const val REAZON_DECODER = "decoder.onnx"
+        const val REAZON_JOINER = "joiner.int8.onnx"
+        private const val MODELS_BASE_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models"
+        const val REAZON_ENCODER_URL = "$MODELS_BASE_URL/reazonspeech-ja-encoder.int8.onnx"
+        const val REAZON_DECODER_URL = "$MODELS_BASE_URL/reazonspeech-ja-decoder.onnx"
+        const val REAZON_JOINER_URL = "$MODELS_BASE_URL/reazonspeech-ja-joiner.int8.onnx"
+        const val REAZON_TOKENS_URL = "$MODELS_BASE_URL/reazonspeech-ja-tokens.txt"
         const val VAD_FILENAME = "silero_vad.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
         const val COMPACT_KENLM_FILENAME = "japanese-compact.klm"
