@@ -70,7 +70,7 @@ private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloa
                 kenLmPath = downloader.getKenLmModelPath(),
                 compactKenLmPath = downloader.getCompactKenLmModelPath(),
                 llmPath = downloader.getLlmModelPath(),
-                senseVoiceDir = downloader.getSenseVoiceModelDir(),
+                senseVoiceDir = downloader.getPreferredAsrModelDir(),
                 vadPath = downloader.getVadModelPath(),
             )
         }
@@ -226,6 +226,12 @@ fun NacreSettingsScreen() {
         // --- Cloud LLM (voice refinement) ---
         SectionHeader("Cloud LLM (voice refinement)")
         CloudLlmSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- Cloud ASR (voice recognition) ---
+        SectionHeader("Cloud ASR (voice recognition)")
+        CloudAsrSection()
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -1320,6 +1326,38 @@ private fun WhisperModelSection() {
  * priority order: Qwen Max → Gemini Pro → DeepSeek V3. None of them are
  * required — if all are blank the app falls back to the on-device Gemma/Qwen model.
  */
+@Composable
+private fun CloudAsrSection() {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "高精度なクラウド音声認識（Groq Whisper large-v3-turbo 等）。キーを貼ると、発話の確定時に音声をクラウドへ送って文字起こしし、端末側の結果を置き換えます。Typeless 級の精度に近づきます。",
+                color = NacreTextDim,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "⚠️ 音声データがクラウドに送信されます（テキストではなく音声そのもの）。キー未設定なら完全オフライン（端末内 ReazonSpeech）のまま。失敗時は自動で端末側にフォールバック。",
+                color = NacreTextDim.copy(alpha = 0.8f),
+                fontSize = 11.sp,
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            ApiKeyField(
+                label = "Groq Whisper (large-v3-turbo, 無料枠あり)",
+                hint = "console.groq.com — OpenAI互換 /audio/transcriptions。高速・安価",
+                signupUrl = "https://console.groq.com/keys",
+                initial = { space.manus.nacre.ai.cloud.CloudAsrConfig.apiKey(context).orEmpty() },
+                onSave = { space.manus.nacre.ai.cloud.CloudAsrConfig.setApiKey(context, it) },
+            )
+        }
+    }
+}
+
 @Composable
 private fun CloudLlmSection() {
     val context = LocalContext.current
