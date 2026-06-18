@@ -70,7 +70,7 @@ private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloa
                 kenLmPath = downloader.getKenLmModelPath(),
                 compactKenLmPath = downloader.getCompactKenLmModelPath(),
                 llmPath = downloader.getLlmModelPath(),
-                senseVoiceDir = downloader.getSenseVoiceModelDir(),
+                senseVoiceDir = downloader.getPreferredAsrModelDir(),
                 vadPath = downloader.getVadModelPath(),
             )
         }

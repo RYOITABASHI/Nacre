@@ -33,21 +33,13 @@ class SherpaRecognizer {
     fun initialize(modelDir: String, vadModelPath: String): Boolean {
         try {
             Log.i(TAG, "Initializing SherpaRecognizer from $modelDir")
-            val modelFile = pickSenseVoiceModelFile(modelDir)
-                ?: error("SenseVoice model file not found in $modelDir")
+            val modelConfig = buildModelConfig(modelDir)
+                ?: error("No recognizable ASR model (transducer or SenseVoice) in $modelDir")
 
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
-                modelConfig = OfflineModelConfig(
-                    senseVoice = OfflineSenseVoiceModelConfig(
-                        model = modelFile,
-                        language = RECOGNITION_LANGUAGE,
-                        useInverseTextNormalization = true,
-                    ),
-                    tokens = "$modelDir/tokens.txt",
-                    numThreads = 2,
-                    provider = "cpu",
-                ),
+                modelConfig = modelConfig,
+                decodingMethod = "greedy_search",
             )
             recognizer = OfflineRecognizer(config = config)
 
@@ -73,6 +65,53 @@ class SherpaRecognizer {
             isInitialized = false
             return false
         }
+    }
+
+    /**
+     * Build the model config by detecting what's in [modelDir]:
+     *  - a Zipformer transducer (encoder/decoder/joiner *.onnx) → ReazonSpeech ja
+     *    (preferred, Japanese-specialized);
+     *  - otherwise a SenseVoice model.onnx/model.int8.onnx → SenseVoice (fallback).
+     * Returns null if neither is present.
+     */
+    private fun buildModelConfig(modelDir: String): OfflineModelConfig? {
+        val dir = java.io.File(modelDir)
+        fun pick(prefix: String): java.io.File? =
+            dir.listFiles { f -> f.name.startsWith(prefix) && f.name.endsWith(".onnx") && f.length() > 0 }
+                // prefer int8 quant when both exist (smaller, faster on mobile)
+                ?.sortedByDescending { it.name.contains("int8") }
+                ?.firstOrNull()
+
+        val encoder = pick("encoder")
+        val decoder = pick("decoder")
+        val joiner = pick("joiner")
+        if (encoder != null && decoder != null && joiner != null) {
+            Log.i(TAG, "Detected Zipformer transducer (ReazonSpeech): ${encoder.name}")
+            return OfflineModelConfig(
+                transducer = OfflineTransducerModelConfig(
+                    encoder = encoder.absolutePath,
+                    decoder = decoder.absolutePath,
+                    joiner = joiner.absolutePath,
+                ),
+                tokens = "$modelDir/tokens.txt",
+                numThreads = 2,
+                provider = "cpu",
+                modelType = "transducer",
+            )
+        }
+
+        val senseVoiceModel = pickSenseVoiceModelFile(modelDir) ?: return null
+        Log.i(TAG, "Detected SenseVoice model: $senseVoiceModel")
+        return OfflineModelConfig(
+            senseVoice = OfflineSenseVoiceModelConfig(
+                model = senseVoiceModel,
+                language = RECOGNITION_LANGUAGE,
+                useInverseTextNormalization = true,
+            ),
+            tokens = "$modelDir/tokens.txt",
+            numThreads = 2,
+            provider = "cpu",
+        )
     }
 
     private fun pickSenseVoiceModelFile(modelDir: String): String? {
