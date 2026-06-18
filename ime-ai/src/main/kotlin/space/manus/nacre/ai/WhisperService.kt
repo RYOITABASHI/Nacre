@@ -31,6 +31,13 @@ class WhisperService : Service() {
     @Volatile
     private var continuousCallback: IWhisperCallback? = null
 
+    // Opt-in cloud ASR: when active, the utterance audio is buffered during
+    // continuous recording and sent to the cloud on stop for a high-accuracy
+    // final result (replacing the on-device transcription). Off by default.
+    @Volatile
+    private var cloudAsrActive = false
+    private val cloudBuffer = java.util.ArrayList<FloatArray>()
+
     private var sherpaRecognizer: SherpaRecognizer? = null
 
     private val binder = object : IWhisperService.Stub() {
@@ -142,7 +149,10 @@ class WhisperService : Service() {
                         writeDiag("stopRecognition flush EXCEPTION: ${e.message}")
                     }
 
-                    val finalText = buf.toString()
+                    val localFinal = buf.toString()
+                    // Cloud final pass (opt-in): replace the on-device transcription
+                    // with a high-accuracy cloud result; fall back to local on any error.
+                    val finalText = maybeCloudFinal(localFinal)
                     writeDiag("stopRecognition: finalText='${finalText.take(100)}' (${finalText.length} chars)")
                     try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
                     try {
@@ -194,6 +204,9 @@ class WhisperService : Service() {
             this@WhisperService.isRecognizing = true
             continuousCallback = callback
             textBuffer = StringBuilder()
+            cloudAsrActive = space.manus.nacre.ai.cloud.CloudAsrConfig.isEnabled(this@WhisperService.applicationContext)
+            synchronized(cloudBuffer) { cloudBuffer.clear() }
+            if (cloudAsrActive) writeDiag("cloud ASR active for this utterance")
 
             recordingJob = scope.launch(Dispatchers.Default) {
                 val bufferSize = AudioRecord.getMinBufferSize(
@@ -228,6 +241,11 @@ class WhisperService : Service() {
                         totalReads++
 
                         val samples = if (read == VAD_WINDOW_SIZE) readBuffer else readBuffer.copyOf(read)
+                        if (cloudAsrActive) {
+                            // Keep a copy of the raw audio for the cloud final pass.
+                            val copy = readBuffer.copyOf(read)
+                            synchronized(cloudBuffer) { cloudBuffer.add(copy) }
+                        }
                         val segments = rec.processAudio(samples)
 
                         if (segments.isNotEmpty()) {
@@ -253,6 +271,36 @@ class WhisperService : Service() {
         override fun cancelContinuousRecognition() {
             stopContinuousRecordingInternal()
             textBuffer.clear()
+            cloudAsrActive = false
+            synchronized(cloudBuffer) { cloudBuffer.clear() }
+        }
+    }
+
+    /**
+     * If cloud ASR is active, transcribe the buffered utterance via the cloud and
+     * return that text; otherwise (or on any failure / empty audio) return
+     * [localFinal]. Runs on the caller's worker coroutine. Consumes the buffer.
+     */
+    private fun maybeCloudFinal(localFinal: String): String {
+        if (!cloudAsrActive) return localFinal
+        val chunks = synchronized(cloudBuffer) { ArrayList(cloudBuffer) }
+        cloudAsrActive = false
+        synchronized(cloudBuffer) { cloudBuffer.clear() }
+        if (chunks.isEmpty()) return localFinal
+        val total = chunks.sumOf { it.size }
+        val flat = FloatArray(total)
+        var off = 0
+        for (c in chunks) {
+            System.arraycopy(c, 0, flat, off, c.size)
+            off += c.size
+        }
+        val cloud = space.manus.nacre.ai.cloud.CloudAsrClient.transcribe(applicationContext, flat, SAMPLE_RATE)
+        return if (!cloud.isNullOrBlank()) {
+            writeDiag("cloud ASR final used (${flat.size / SAMPLE_RATE}s audio, ${cloud.length} chars)")
+            cloud
+        } else {
+            writeDiag("cloud ASR returned null; using local final")
+            localFinal
         }
     }
 
