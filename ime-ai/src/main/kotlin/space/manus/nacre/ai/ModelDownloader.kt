@@ -321,6 +321,13 @@ class ModelDownloader(private val context: Context) {
 
         scope.launch {
             deleteObsoleteLlmModels()
+            // Provision the Silero VAD into INTERNAL storage so ASR no longer
+            // depends on /sdcard + MANAGE_EXTERNAL_STORAGE (which is lost on
+            // reinstall — without the VAD, loadModel is skipped and ASR silently
+            // falls back to the system SpeechRecognizer).
+            if (getVadModelPath() == null) {
+                downloadModelInternal(url = VAD_URL, modelName = "Silero VAD", fileName = VAD_FILENAME)
+            }
             // ASR is the highest-leverage model — provision the ja-specialized
             // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
             downloadReazonSpeechIfMissing()
@@ -629,6 +636,7 @@ class ModelDownloader(private val context: Context) {
         const val REAZON_ENCODER_URL = "$MODELS_BASE_URL/reazonspeech-ja-encoder.int8.onnx"
         const val REAZON_DECODER_URL = "$MODELS_BASE_URL/reazonspeech-ja-decoder.onnx"
         const val REAZON_JOINER_URL = "$MODELS_BASE_URL/reazonspeech-ja-joiner.int8.onnx"
+        const val VAD_URL = "$MODELS_BASE_URL/silero_vad.onnx"
         const val REAZON_TOKENS_URL = "$MODELS_BASE_URL/reazonspeech-ja-tokens.txt"
         const val VAD_FILENAME = "silero_vad.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
