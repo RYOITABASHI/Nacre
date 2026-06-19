@@ -52,7 +52,7 @@ android {
         // CI injects a monotonic NACRE_VERSION_CODE (e.g. 100 + run number) so the
         // in-app updater can tell builds apart. Local builds fall back to 2/0.3.0.
         versionCode = System.getenv("NACRE_VERSION_CODE")?.toIntOrNull() ?: 2
-        versionName = System.getenv("NACRE_VERSION_NAME") ?: "0.4.0"
+        versionName = System.getenv("NACRE_VERSION_NAME") ?: "0.4.1"
     }
 
     signingConfigs {
