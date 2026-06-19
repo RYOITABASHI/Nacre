@@ -18,7 +18,13 @@ object CloudAsrConfig {
     const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
     const val DEFAULT_MODEL = "whisper-large-v3-turbo"
 
-    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    // MODE_MULTI_PROCESS: the key is written by the Settings UI (main process)
+    // but read by WhisperService (:whisper process). MODE_PRIVATE caches per
+    // process, so :whisper never saw the key → cloud ASR silently stayed off.
+    // This flag re-reads the file from disk on each open, which is correct for
+    // our access pattern (rare writes in main, reads at recognition start).
+    @Suppress("DEPRECATION")
+    private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_MULTI_PROCESS)
 
     fun apiKey(ctx: Context): String? = prefs(ctx).getString(KEY_API, null)
 
