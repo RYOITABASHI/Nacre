@@ -775,6 +775,38 @@ class InputEngine(private val service: NacreInputMethodService) {
                     selectedCandidateIndex = -1
                 }
             }
+
+            // Local-LLM augmentation: ask the on-device model for context-aware
+            // next-word predictions and prepend them. Additive and best-effort —
+            // any failure/timeout/busy leaves the n-gram predictions in place.
+            // On-device only (no network); guarded against stale context.
+            try {
+                // Debounce: a new commit cancels predictionJob before this fires,
+                // so rapid typing doesn't pile up local-LLM calls.
+                kotlinx.coroutines.delay(120)
+                val ctx = service.currentInputConnection
+                    ?.getTextBeforeCursor(60, 0)?.toString()?.trim().orEmpty()
+                if (ctx.length >= 4 && composingText.isEmpty()) {
+                    val llmPreds = withContext(Dispatchers.Default) {
+                        service.voiceInputManager.predictNextViaLlm(ctx, timeoutMs = 600)
+                    }
+                    val ctxNow = service.currentInputConnection
+                        ?.getTextBeforeCursor(60, 0)?.toString()?.trim().orEmpty()
+                    if (!llmPreds.isNullOrEmpty() && composingText.isEmpty() &&
+                        !isConverting && ctxNow == ctx
+                    ) {
+                        androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                            val seen = candidates.map { it.surface }.toMutableSet()
+                            val add = llmPreds
+                                .filter { it.isNotBlank() && seen.add(it) }
+                                .map { ConversionCandidate(surface = it, reading = it, cost = 100) }
+                            if (add.isNotEmpty()) candidates.addAll(0, add)
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // best-effort; keep the n-gram predictions
+            }
         }
     }
 
