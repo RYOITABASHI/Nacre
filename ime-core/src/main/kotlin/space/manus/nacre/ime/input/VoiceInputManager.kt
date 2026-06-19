@@ -1301,12 +1301,40 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
      * Blocking wrapper around ILlmService.transform() for the dictation-cleanup
      * instruction. Returns the refined string, or null on timeout/error.
      */
-    private fun refineViaAidl(svc: ILlmService, rawText: String, timeoutMs: Long): String? {
+    /**
+     * Local-LLM next-word prediction. Given recent context text, returns up to 3
+     * short continuation candidates, or null if the LLM is unavailable/busy/slow.
+     * Used by InputEngine to augment the n-gram prediction bar. Yields to voice
+     * refinement (skips when the model is generating).
+     */
+    fun predictNextViaLlm(context: String, timeoutMs: Long = 600): List<String>? {
+        val svc = llmService ?: return null
+        if (context.isBlank()) return null
+        try {
+            if (svc.isGenerating) return null
+        } catch (_: Exception) { return null }
+        val raw = try {
+            refineViaAidl(svc, context, timeoutMs, LlmPostProcessor.NEXT_WORD_PREDICTION_INSTRUCTION)
+        } catch (_: Exception) { null } ?: return null
+        return raw.split('、', '，', ',', '\n', '・', ' ', '　')
+            .map { it.trim().trim('「', '」', '『', '』', '"', '・', '-', '。') }
+            .filter { it.isNotBlank() && it.length <= 8 }
+            .distinct()
+            .take(3)
+            .ifEmpty { null }
+    }
+
+    private fun refineViaAidl(
+        svc: ILlmService,
+        rawText: String,
+        timeoutMs: Long,
+        instruction: String = LlmPostProcessor.DICTATION_CLEANUP_INSTRUCTION,
+    ): String? {
         val latch = CountDownLatch(1)
         val result = AtomicReference<String?>(null)
         svc.transform(
             rawText,
-            LlmPostProcessor.DICTATION_CLEANUP_INSTRUCTION,
+            instruction,
             object : ILlmCallback.Stub() {
                 override fun onResult(text: String) {
                     result.set(text.trim())
