@@ -37,6 +37,17 @@ object LlmPostProcessor {
         "\n" +
         "出力は整形後のテキストのみ。前置き・説明・引用符・コードブロックは付けない。"
 
+    /**
+     * Next-word prediction prompt. The input text is the recent context (text
+     * before the cursor); the model returns 3 likely continuations. Kept short
+     * so the small local model follows it reliably and responds fast.
+     */
+    const val NEXT_WORD_PREDICTION_INSTRUCTION =
+        "あなたは日本語入力の予測変換エンジンです。" +
+        "入力された文章に自然に続く語またはフレーズを3つ予測してください。" +
+        "各候補は短く（1〜8文字程度）、読点（、）区切りで3つだけ。" +
+        "語のみを出力し、説明・番号・引用符・改行は付けない。"
+
     // Fillers sorted longest-first to avoid partial matches
     // Note: single-char "ん" removed — too aggressive, breaks "なん", "んです" etc.
     private val FILLERS = listOf(
