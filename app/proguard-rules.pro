@@ -15,6 +15,14 @@
 # Keep config classes
 -keep class space.manus.nacre.config.** { *; }
 
+# Keep sherpa-onnx classes UNOBFUSCATED — the native libsherpa-onnx-jni.so
+# accesses config fields by literal name via JNI GetFieldID (e.g. decodingMethod
+# on OfflineRecognizerConfig). R8 renaming/removing those fields makes
+# OfflineRecognizer construction throw "Failed to get field ID for decodingMethod"
+# and ALL on-device ASR silently falls back to the system SpeechRecognizer.
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+-keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
+
 # Keep Lifecycle/ViewModel/SavedState owners
 -keep class * implements androidx.lifecycle.LifecycleOwner { *; }
 -keep class * implements androidx.lifecycle.ViewModelStoreOwner { *; }
