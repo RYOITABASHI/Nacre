@@ -311,7 +311,7 @@ class ModelDownloader(private val context: Context) {
      * deleted to reclaim ~3GB.
      */
     fun ensureDefaultModelsDownloaded(
-        downloadCompactKenLm: Boolean = true,
+        downloadKenLm: Boolean = true,
         downloadLlm: Boolean = true,
     ) {
         synchronized(ModelDownloader::class.java) {
@@ -331,11 +331,14 @@ class ModelDownloader(private val context: Context) {
             // ASR is the highest-leverage model — provision the ja-specialized
             // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
             downloadReazonSpeechIfMissing()
-            if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
+            // Conversion LM: the full 5-gram (order=5, Gboard+ quality). The IME
+            // prefers it over the compact 3-gram when present
+            // (NacreInputMethodService). ~561MB, one-time.
+            if (downloadKenLm && getKenLmModelPath() == null) {
                 downloadModelInternal(
-                    url = COMPACT_KENLM_URL,
-                    modelName = "KenLM 日本語3-gram (compact)",
-                    fileName = COMPACT_KENLM_FILENAME,
+                    url = KENLM_URL,
+                    modelName = "KenLM 日本語5-gram",
+                    fileName = KENLM_FILENAME,
                 )
             }
             if (downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {

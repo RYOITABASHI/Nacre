@@ -171,7 +171,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                             val modelFile = java.io.File(loadedPath)
                             writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
                         } else {
-                            downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
+                            downloader.ensureDefaultModelsDownloaded(downloadKenLm = false)
                             writeDiagnostic("llmConnection: LLM model not found — Gemma 4 download requested, refinement disabled for this session")
                             return@Thread
                         }
