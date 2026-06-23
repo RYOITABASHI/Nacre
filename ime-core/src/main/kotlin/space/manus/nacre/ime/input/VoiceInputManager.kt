@@ -146,6 +146,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             writeDiagnostic("llmConnection.onServiceConnected")
             Thread {
                 try {
+                    // Cloud-first: when a cloud refiner key is configured, do NOT load
+                    // the ~1GB local LLM. Kept resident it pressures memory enough that
+                    // the OS kills other apps (and the IME itself — observed as a
+                    // "vis BFGS" process death). The cloud handles refinement; the local
+                    // model is only an offline fallback used when no cloud key is set.
+                    if (space.manus.nacre.ai.cloud.CloudLlmConfig.anyConfigured(service)) {
+                        writeDiagnostic("llmConnection: cloud refiner configured — skipping local LLM load (frees ~1GB RAM)")
+                        return@Thread
+                    }
                     if (!svc.isModelLoaded) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
