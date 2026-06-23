@@ -1437,6 +1437,50 @@ private fun CloudAsrSection() {
                 maxLines = 4,
                 textStyle = androidx.compose.ui.text.TextStyle(color = NacreText, fontSize = 13.sp),
             )
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                "プロバイダ詳細（任意）",
+                color = NacreText,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                "OpenAI互換の /audio/transcriptions を持つ別プロバイダに切替できます。空欄で Groq の既定値。",
+                color = NacreTextDim,
+                fontSize = 11.sp,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            var model by remember {
+                mutableStateOf(space.manus.nacre.ai.cloud.CloudAsrConfig.model(context))
+            }
+            OutlinedTextField(
+                value = model,
+                onValueChange = {
+                    model = it
+                    space.manus.nacre.ai.cloud.CloudAsrConfig.setModel(context, it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("モデル", color = NacreTextDim, fontSize = 12.sp) },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = NacreText, fontSize = 13.sp),
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            var baseUrl by remember {
+                mutableStateOf(space.manus.nacre.ai.cloud.CloudAsrConfig.baseUrl(context))
+            }
+            OutlinedTextField(
+                value = baseUrl,
+                onValueChange = {
+                    baseUrl = it
+                    space.manus.nacre.ai.cloud.CloudAsrConfig.setBaseUrl(context, it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("ベースURL", color = NacreTextDim, fontSize = 12.sp) },
+                singleLine = true,
+                textStyle = androidx.compose.ui.text.TextStyle(color = NacreText, fontSize = 13.sp),
+            )
         }
     }
 }
