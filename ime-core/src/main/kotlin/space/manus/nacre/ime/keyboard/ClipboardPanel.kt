@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
+import space.manus.nacre.ime.input.ClipboardEntry
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -86,14 +87,21 @@ fun ClipboardPanel(
                 )
             }
         } else {
+            // Pinned entries first, then most-recent. Actions map back to the
+            // entry's index in the unsorted history (identity = text + timestamp).
+            val sorted = entries.toList().sortedWith(
+                compareByDescending<ClipboardEntry> { it.pinned }.thenByDescending { it.timestamp },
+            )
+            fun historyIndexOf(entry: ClipboardEntry): Int =
+                clipboardManager.history.indexOfFirst { it.text == entry.text && it.timestamp == entry.timestamp }
             LazyColumn(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 itemsIndexed(
-                    items = entries.toList(),
-                    key = { index, entry -> "${entry.timestamp}_$index" },
-                ) { index, entry ->
+                    items = sorted,
+                    key = { _, entry -> "${entry.timestamp}_${entry.text.hashCode()}" },
+                ) { _, entry ->
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -106,7 +114,8 @@ fun ClipboardPanel(
                                     onDismiss()
                                 },
                                 onLongClick = {
-                                    clipboardManager.removeEntry(index)
+                                    val hi = historyIndexOf(entry)
+                                    if (hi >= 0) clipboardManager.removeEntry(hi)
                                 },
                             )
                             .padding(horizontal = 10.dp, vertical = 8.dp),
@@ -126,6 +135,20 @@ fun ClipboardPanel(
                             text = dateFormat.format(Date(entry.timestamp)),
                             color = TimestampText,
                             fontSize = 11.sp,
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        // Pin toggle: pinned entries are kept forever and shown first.
+                        Text(
+                            text = if (entry.pinned) "★" else "☆",
+                            color = if (entry.pinned) androidx.compose.ui.graphics.Color(0xFFFFC107) else TimestampText,
+                            fontSize = 16.sp,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .combinedClickable(onClick = {
+                                    val hi = historyIndexOf(entry)
+                                    if (hi >= 0) clipboardManager.togglePin(hi)
+                                })
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
                         )
                     }
                 }
