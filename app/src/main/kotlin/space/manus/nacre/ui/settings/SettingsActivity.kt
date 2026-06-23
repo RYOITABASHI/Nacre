@@ -235,6 +235,12 @@ fun NacreSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // --- Voice rewrite mode ---
+        SectionHeader("Voice rewrite mode")
+        VoiceRewriteSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // --- Reset ---
         var showResetDialog by remember { mutableStateOf(false) }
         Button(
@@ -1326,6 +1332,53 @@ private fun WhisperModelSection() {
  * priority order: Qwen Max → Gemini Pro → DeepSeek V3. None of them are
  * required — if all are blank the app falls back to the on-device Gemma/Qwen model.
  */
+@Composable
+private fun VoiceRewriteSection() {
+    val context = LocalContext.current
+    var activeId by remember { mutableStateOf(space.manus.nacre.ai.RefinePresets.activeId(context)) }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "音声入力をこのモードで自動書き換えします。整文=通常の整形。英訳・要約・敬語・箇条書きに切替可。",
+                color = NacreTextDim,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for (preset in space.manus.nacre.ai.RefinePresets.PRESETS) {
+                    val selected = preset.id == activeId
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) NacreAccent else NacreBackground)
+                            .clickable {
+                                activeId = preset.id
+                                space.manus.nacre.ai.RefinePresets.setActiveId(context, preset.id)
+                            }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            preset.label,
+                            color = if (selected) Color.Black else NacreText,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun CloudAsrSection() {
     val context = LocalContext.current
