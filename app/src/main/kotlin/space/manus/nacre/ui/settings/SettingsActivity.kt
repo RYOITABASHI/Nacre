@@ -584,6 +584,11 @@ private fun LightingSection(config: ConfigRepository, context: Context) {
 
 @Composable
 private fun LayoutSection(config: ConfigRepository) {
+    val context = LocalContext.current
+    // "nacre_layout" / "force_flick12" \u2014 mirrors LayoutSelector.KEY_FORCE_FLICK12.
+    // Same process as the IME, so the IME picks this up on the next keyboard open.
+    val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
+    var flick12 by remember { mutableStateOf(layoutPrefs.getBoolean("force_flick12", false)) }
     var vAngle by remember { mutableStateOf(config.vAngle) }
     var keyboardHeight by remember { mutableStateOf(config.keyboardHeight.toFloat()) }
 
@@ -593,6 +598,36 @@ private fun LayoutSection(config: ConfigRepository) {
         colors = CardDefaults.cardColors(containerColor = NacreSurface),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // iOS-style 12-key (\u30D5\u30EA\u30C3\u30AF/\u9023\u6253). When on, forces the 12-key pad on every
+            // display; when off, layout follows screen size as before.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("12\u30AD\u30FC\u5165\u529B\uFF08\u30D5\u30EA\u30C3\u30AF/\u9023\u6253\uFF09", color = NacreText, fontSize = 14.sp)
+                    Text(
+                        "iOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002OFF\u3067\u753B\u9762\u30B5\u30A4\u30BA\u306B\u5FDC\u3058\u3066\u81EA\u52D5\u5207\u66FF",
+                        color = NacreTextDim,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = flick12,
+                    onCheckedChange = {
+                        flick12 = it
+                        layoutPrefs.edit().putBoolean("force_flick12", it).apply()
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = NacreAccent,
+                        checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                    ),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Text(
                 "V-Split Angle: ${vAngle.roundToInt()}\u00B0",
                 color = NacreText,

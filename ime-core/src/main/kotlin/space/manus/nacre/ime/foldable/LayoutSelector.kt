@@ -31,9 +31,22 @@ class LayoutSelector(private val detector: FoldableDetector) {
     companion object {
         private const val PREFS_NAME = "nacre_layout"
         private const val KEY_SUB_DISPLAY_MODE = "sub_display_mode"
+        /** When true, the iOS-style 12-key pad is forced on every display. */
+        const val KEY_FORCE_FLICK12 = "force_flick12"
     }
 
     private val prefs = detector.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+    /**
+     * User opted into the 12-key (フリック/連打) pad globally, regardless of screen size.
+     * Persisted to SharedPreferences; read fresh in [selectLayout] so a toggle from the
+     * Settings screen (same process) takes effect on the next keyboard open.
+     */
+    var useFlick12Key: Boolean = prefs.getBoolean(KEY_FORCE_FLICK12, false)
+        set(value) {
+            field = value
+            prefs.edit().putBoolean(KEY_FORCE_FLICK12, value).apply()
+        }
 
     /**
      * User-selected preferred layout for the sub-display.
@@ -57,6 +70,10 @@ class LayoutSelector(private val detector: FoldableDetector) {
      *  - else            -> QuickInputPad (fallback)
      */
     fun selectLayout(): LayoutMode {
+        // Global opt-in to the 12-key pad wins over size-based selection. Read fresh
+        // from prefs so a Settings toggle applies without rebuilding this instance.
+        if (prefs.getBoolean(KEY_FORCE_FLICK12, false)) return LayoutMode.FlickInput12Key
+
         val widthDp = detector.getScreenWidthDp()
 
         return when {
