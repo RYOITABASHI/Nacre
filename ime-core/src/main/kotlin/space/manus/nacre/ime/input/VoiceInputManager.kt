@@ -1253,7 +1253,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     private fun tryLlmRefinement(quickCleanText: String) {
         Thread {
             try {
-                val instruction = LlmPostProcessor.DICTATION_CLEANUP_INSTRUCTION
+                // Active rewrite preset (整文/英訳/要約/敬語/箇条書き) — applied by
+                // the refiner instead of the fixed cleanup instruction.
+                val instruction = space.manus.nacre.ai.RefinePresets.activeInstruction(service)
 
                 // Step 1: cloud chain
                 val cloudChain = space.manus.nacre.ai.cloud.RefinerFactory.build(service)
@@ -1282,7 +1284,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     return@Thread
                 }
                 val start = System.currentTimeMillis()
-                val refined = refineViaAidl(svc, quickCleanText, LLM_REFINE_TIMEOUT_MS)
+                val refined = refineViaAidl(svc, quickCleanText, LLM_REFINE_TIMEOUT_MS, instruction)
                 val elapsed = System.currentTimeMillis() - start
                 writeDiagnostic("tryLlmRefinement[local]: ${elapsed}ms, refined='${refined?.take(80)}'")
                 applyRefinedIfDifferent(quickCleanText, refined.orEmpty(), "local-qwen")
