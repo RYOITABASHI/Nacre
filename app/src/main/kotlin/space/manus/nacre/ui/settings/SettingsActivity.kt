@@ -39,6 +39,7 @@ import space.manus.nacre.update.ApkInstaller
 import space.manus.nacre.update.UpdateChecker
 import space.manus.nacre.update.UpdateInfo
 import space.manus.nacre.config.ConfigRepository
+import space.manus.nacre.ime.foldable.LayoutMode
 import space.manus.nacre.ime.foldable.LayoutSelector
 import space.manus.nacre.config.PresetProvider
 import space.manus.nacre.config.ThemeProvider
@@ -587,9 +588,13 @@ private fun LightingSection(config: ConfigRepository, context: Context) {
 private fun LayoutSection(config: ConfigRepository) {
     val context = LocalContext.current
     // Same process as the IME, so the IME picks this up on the next keyboard open.
+    // This only affects the foldable cover / sub-display — the main display is untouched.
     val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
-    var flick12 by remember {
-        mutableStateOf(layoutPrefs.getBoolean(LayoutSelector.KEY_FORCE_FLICK12, false))
+    var coverFlick12 by remember {
+        mutableStateOf(
+            layoutPrefs.getString(LayoutSelector.KEY_SUB_DISPLAY_MODE, null) ==
+                LayoutMode.FlickInput12Key.name,
+        )
     }
     var vAngle by remember { mutableStateOf(config.vAngle) }
     var keyboardHeight by remember { mutableStateOf(config.keyboardHeight.toFloat()) }
@@ -600,26 +605,27 @@ private fun LayoutSection(config: ConfigRepository) {
         colors = CardDefaults.cardColors(containerColor = NacreSurface),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            // iOS-style 12-key (\u30D5\u30EA\u30C3\u30AF/\u9023\u6253). When on, forces the 12-key pad on every
-            // display; when off, layout follows screen size as before.
+            // iOS-style 12-key for the foldable COVER display only. When off, the
+            // cover falls back to CompactQwerty; the main display is never affected.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("12\u30AD\u30FC\u5165\u529B\uFF08\u30D5\u30EA\u30C3\u30AF/\u9023\u6253\uFF09", color = NacreText, fontSize = 14.sp)
+                    Text("\u30AB\u30D0\u30FC\u753B\u9762\u306712\u30AD\u30FC\u5165\u529B\uFF08\u30D5\u30EA\u30C3\u30AF/\u9023\u6253\uFF09", color = NacreText, fontSize = 14.sp)
                     Text(
-                        "iOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002OFF\u3067\u753B\u9762\u30B5\u30A4\u30BA\u306B\u5FDC\u3058\u3066\u81EA\u52D5\u5207\u66FF",
+                        "\u6298\u308A\u305F\u305F\u307F\u6642\u306E\u30AB\u30D0\u30FC\u753B\u9762\u306E\u307FiOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002\u30E1\u30A4\u30F3\u753B\u9762\u306F\u5909\u66F4\u306A\u3057",
                         color = NacreTextDim,
                         fontSize = 12.sp,
                     )
                 }
                 Switch(
-                    checked = flick12,
+                    checked = coverFlick12,
                     onCheckedChange = {
-                        flick12 = it
-                        layoutPrefs.edit().putBoolean(LayoutSelector.KEY_FORCE_FLICK12, it).apply()
+                        coverFlick12 = it
+                        val mode = if (it) LayoutMode.FlickInput12Key.name else LayoutMode.CompactQwerty.name
+                        layoutPrefs.edit().putString(LayoutSelector.KEY_SUB_DISPLAY_MODE, mode).apply()
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = NacreAccent,
