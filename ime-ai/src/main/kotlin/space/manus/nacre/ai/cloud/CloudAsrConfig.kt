@@ -14,6 +14,7 @@ object CloudAsrConfig {
     private const val KEY_API = "api_key"
     private const val KEY_BASE = "base_url"
     private const val KEY_MODEL = "model"
+    private const val KEY_VOCAB = "vocab"
 
     const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
     const val DEFAULT_MODEL = "whisper-large-v3-turbo"
@@ -44,6 +45,18 @@ object CloudAsrConfig {
 
     fun setModel(ctx: Context, value: String) {
         prefs(ctx).edit().putString(KEY_MODEL, value.trim().ifEmpty { null }).apply()
+    }
+
+    /**
+     * Personal vocabulary (names, jargon, technical terms) the user wants the
+     * cloud ASR to recognize. Sent as the Whisper `prompt` to bias decoding
+     * toward these words. Comma/newline separated; stored as-is.
+     */
+    fun vocab(ctx: Context): String? =
+        prefs(ctx).getString(KEY_VOCAB, null)?.takeIf { it.isNotBlank() }
+
+    fun setVocab(ctx: Context, value: String) {
+        prefs(ctx).edit().putString(KEY_VOCAB, value.trim().ifEmpty { null }).apply()
     }
 
     /** Cloud ASR runs only when a key has been configured. */

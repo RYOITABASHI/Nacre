@@ -37,11 +37,18 @@ object CloudAsrClient {
                 fun field(name: String, value: String) {
                     out.writeBytes("--$BOUNDARY\r\n")
                     out.writeBytes("Content-Disposition: form-data; name=\"$name\"\r\n\r\n")
-                    out.writeBytes("$value\r\n")
+                    // Value may be non-ASCII (Japanese vocab prompt): write real
+                    // UTF-8 bytes. DataOutputStream.writeBytes would truncate each
+                    // char to one byte and corrupt multibyte text on the wire.
+                    out.write(value.toByteArray(Charsets.UTF_8))
+                    out.writeBytes("\r\n")
                 }
                 field("model", CloudAsrConfig.model(ctx))
                 field("language", "ja")
                 field("response_format", "text")
+                // Personal vocabulary biasing: Whisper accepts a `prompt` that
+                // nudges decoding toward the given names/jargon/technical terms.
+                CloudAsrConfig.vocab(ctx)?.let { field("prompt", it) }
                 out.writeBytes("--$BOUNDARY\r\n")
                 out.writeBytes("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n")
                 out.writeBytes("Content-Type: audio/wav\r\n\r\n")

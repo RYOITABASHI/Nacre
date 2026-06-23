@@ -1354,6 +1354,36 @@ private fun CloudAsrSection() {
                 initial = { space.manus.nacre.ai.cloud.CloudAsrConfig.apiKey(context).orEmpty() },
                 onSave = { space.manus.nacre.ai.cloud.CloudAsrConfig.setApiKey(context, it) },
             )
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                "パーソナル辞書（名前・専門語・社内語）",
+                color = NacreText,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                "クラウドASRがこれらの語を優先して認識します（読点・改行区切り）。",
+                color = NacreTextDim,
+                fontSize = 11.sp,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            var vocab by remember {
+                mutableStateOf(space.manus.nacre.ai.cloud.CloudAsrConfig.vocab(context).orEmpty())
+            }
+            OutlinedTextField(
+                value = vocab,
+                onValueChange = {
+                    vocab = it
+                    space.manus.nacre.ai.cloud.CloudAsrConfig.setVocab(context, it)
+                },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = { Text("例: 板橋、Nacre、Kotlin、forkpty", color = NacreTextDim, fontSize = 13.sp) },
+                minLines = 2,
+                maxLines = 4,
+                textStyle = androidx.compose.ui.text.TextStyle(color = NacreText, fontSize = 13.sp),
+            )
         }
     }
 }
