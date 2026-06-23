@@ -39,6 +39,7 @@ import space.manus.nacre.update.ApkInstaller
 import space.manus.nacre.update.UpdateChecker
 import space.manus.nacre.update.UpdateInfo
 import space.manus.nacre.config.ConfigRepository
+import space.manus.nacre.ime.foldable.LayoutSelector
 import space.manus.nacre.config.PresetProvider
 import space.manus.nacre.config.ThemeProvider
 import space.manus.nacre.ime.feedback.HapticManager
@@ -585,10 +586,11 @@ private fun LightingSection(config: ConfigRepository, context: Context) {
 @Composable
 private fun LayoutSection(config: ConfigRepository) {
     val context = LocalContext.current
-    // "nacre_layout" / "force_flick12" \u2014 mirrors LayoutSelector.KEY_FORCE_FLICK12.
     // Same process as the IME, so the IME picks this up on the next keyboard open.
     val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
-    var flick12 by remember { mutableStateOf(layoutPrefs.getBoolean("force_flick12", false)) }
+    var flick12 by remember {
+        mutableStateOf(layoutPrefs.getBoolean(LayoutSelector.KEY_FORCE_FLICK12, false))
+    }
     var vAngle by remember { mutableStateOf(config.vAngle) }
     var keyboardHeight by remember { mutableStateOf(config.keyboardHeight.toFloat()) }
 
@@ -617,7 +619,7 @@ private fun LayoutSection(config: ConfigRepository) {
                     checked = flick12,
                     onCheckedChange = {
                         flick12 = it
-                        layoutPrefs.edit().putBoolean("force_flick12", it).apply()
+                        layoutPrefs.edit().putBoolean(LayoutSelector.KEY_FORCE_FLICK12, it).apply()
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = NacreAccent,

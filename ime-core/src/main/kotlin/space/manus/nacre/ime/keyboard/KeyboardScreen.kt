@@ -18,7 +18,11 @@ import space.manus.nacre.ime.trackball.TrackballView
 
 @Composable
 fun KeyboardScreen(service: NacreInputMethodService) {
-    val layoutMode = service.layoutSelector.selectLayout()
+    // Re-pick the layout whenever the epoch bumps (keyboard show / settings change).
+    // The input view is cached and won't recompose on its own, so without this a
+    // layout toggle (e.g. "12キー入力") would not appear until fold/unfold or restart.
+    val layoutEpoch = service.layoutEpoch.value
+    val layoutMode = remember(layoutEpoch) { service.layoutSelector.selectLayout() }
 
     // Animate lighting tick (updates every frame when lighting is active)
     val lighting = service.keyLighting

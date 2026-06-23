@@ -38,17 +38,6 @@ class LayoutSelector(private val detector: FoldableDetector) {
     private val prefs = detector.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
-     * User opted into the 12-key (フリック/連打) pad globally, regardless of screen size.
-     * Persisted to SharedPreferences; read fresh in [selectLayout] so a toggle from the
-     * Settings screen (same process) takes effect on the next keyboard open.
-     */
-    var useFlick12Key: Boolean = prefs.getBoolean(KEY_FORCE_FLICK12, false)
-        set(value) {
-            field = value
-            prefs.edit().putBoolean(KEY_FORCE_FLICK12, value).apply()
-        }
-
-    /**
      * User-selected preferred layout for the sub-display.
      * When set, overrides the automatic selection for foldable sub-displays.
      * Persisted to SharedPreferences.

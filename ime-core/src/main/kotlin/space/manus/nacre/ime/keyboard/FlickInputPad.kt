@@ -99,7 +99,7 @@ fun FlickInputPad(service: NacreInputMethodService) {
             )
         }
 
-        // 5-column bottom row: ↑ / ↓ / 変換 / Paste / Alt
+        // 5-column bottom row: ◀ / ▶ / 変換 / Paste / Alt
         FlickBottomRow(service = service)
     }
 }

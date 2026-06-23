@@ -93,6 +93,14 @@ class NacreInputMethodService :
     lateinit var currentTheme: space.manus.nacre.config.NacreTheme
         private set
 
+    /**
+     * Bumped to make [KeyboardScreen] re-pick the layout. The input view is cached
+     * (onCreateInputView returns the existing view) and never recomposes on its own,
+     * so a layout/settings change — e.g. toggling "12キー入力" — stays invisible until
+     * this epoch advances. Bumped on every keyboard show (onStartInputView).
+     */
+    val layoutEpoch = androidx.compose.runtime.mutableStateOf(0)
+
     override fun onCreate() {
         super.onCreate()
         savedStateRegistryController.performRestore(null)
@@ -296,6 +304,9 @@ class NacreInputMethodService :
         }
         // Reload theme & config each time keyboard appears (picks up settings changes)
         currentTheme = space.manus.nacre.config.ThemeProvider.loadSelectedTheme(this)
+        // The input view is cached, so force KeyboardScreen to re-pick its layout — this
+        // is what makes a "12キー入力" / sub-display toggle apply on the next keyboard open.
+        layoutEpoch.value++
         inputEngine.onStartInput(info)
     }
 
