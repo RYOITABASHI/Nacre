@@ -99,7 +99,7 @@ fun KeyboardScreen(service: NacreInputMethodService) {
                 onFlexPointer = { showFlexPointer = true },
             )
         space.manus.nacre.ime.foldable.LayoutMode.FlickInput12Key ->
-            FlickInputPad(service = service)
+            FlickInputPad(service = service, onFlexPointer = { showFlexPointer = true })
         space.manus.nacre.ime.foldable.LayoutMode.StandardQwerty,
         space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
         space.manus.nacre.ime.foldable.LayoutMode.QuickInputPad ->
