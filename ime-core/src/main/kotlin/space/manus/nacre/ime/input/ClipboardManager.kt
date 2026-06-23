@@ -10,6 +10,8 @@ data class ClipboardEntry(
     val text: String,
     val timestamp: Long,
     val isPassword: Boolean = false,
+    /** Pinned entries are never evicted by the size cap and are shown first. */
+    val pinned: Boolean = false,
 )
 
 class ClipboardManager(private val context: Context) {
@@ -48,16 +50,27 @@ class ClipboardManager(private val context: Context) {
     fun addEntry(text: String, isPassword: Boolean = false) {
         if (isPassword) return
 
-        // Remove duplicate if already present
+        // Preserve pin state if this exact text was already saved.
+        val wasPinned = history.firstOrNull { it.text == text }?.pinned ?: false
         history.removeAll { it.text == text }
 
         // Add to front
-        history.add(0, ClipboardEntry(text = text, timestamp = System.currentTimeMillis()))
+        history.add(0, ClipboardEntry(text = text, timestamp = System.currentTimeMillis(), pinned = wasPinned))
 
-        // Trim to max
-        while (history.size > MAX_ENTRIES) {
-            history.removeAt(history.lastIndex)
+        // Trim to max — but never evict pinned entries.
+        while (history.count { !it.pinned } > MAX_ENTRIES) {
+            val idx = history.indexOfLast { !it.pinned }
+            if (idx < 0) break
+            history.removeAt(idx)
         }
+        saveHistory(context)
+    }
+
+    /** Toggle pin on the entry at [index]; pinned entries survive the size cap. */
+    fun togglePin(index: Int) {
+        val entry = history.getOrNull(index) ?: return
+        history[index] = entry.copy(pinned = !entry.pinned)
+        saveHistory(context)
     }
 
     fun getEntry(index: Int): ClipboardEntry? {
@@ -84,6 +97,7 @@ class ClipboardManager(private val context: Context) {
             val obj = JSONObject().apply {
                 put("text", entry.text)
                 put("timestamp", entry.timestamp)
+                put("pinned", entry.pinned)
             }
             array.put(obj)
         }
@@ -102,6 +116,7 @@ class ClipboardManager(private val context: Context) {
                     ClipboardEntry(
                         text = obj.getString("text"),
                         timestamp = obj.getLong("timestamp"),
+                        pinned = obj.optBoolean("pinned", false),
                     )
                 )
             }
