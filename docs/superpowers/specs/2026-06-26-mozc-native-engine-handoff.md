@@ -57,12 +57,19 @@ bazelisk build package --config oss_android --config release_build
 - `getDataVersion(): String`
 
 ### M3 で必要なもの
-1. `MozcJNI`（上記固定パッケージ）の Kotlin/Java クラス＋`System.loadLibrary("mozc")`。
-2. **`mozc.data`**（Bazel ビルド成果物 = `oss_data_manager` 系）を assets に同梱。
-3. **Mozc protobuf を Java 生成**: `protocol/commands.proto`（+ 依存 `config.proto` 等）を
-   protobuf-java で生成。`Command` を組み立て（KeyEvent / SessionCommand / ConversionRequest）、
-   `Output` から候補を読む。
-4. `NacreMozcEngine.convert(かな): List<候補>` = Command 構築 → evalCommand → Output パース。
+1. `MozcJNI`（上記固定パッケージ `com.google.android.apps.inputmethod.libs.mozc.session`）の
+   Kotlin/Java クラス＋`System.loadLibrary("mozc")`。`external fun evalCommand/onPostLoad/getDataVersion`。
+2. **`mozc.data`** = `//data_manager/oss:mozc_dataset_for_oss` の出力（M1.5 artifact `mozc-native/data/mozc.data`）。
+   assets に同梱 → filesDir にコピー → `onPostLoad(profileDir, dataPath)`。
+3. **libmozc.so** = M1.5 artifact `mozc-native/arm64-v8a/libmozc.so`（strip済）→ `ime-core` の jniLibs/arm64-v8a/。
+4. **Mozc protobuf を Java 生成**（protobuf gradle plugin `com.google.protobuf`）。**5ファイルを vendor**:
+   `commands.proto` ＋ import `candidate_window.proto` / `config.proto` / `engine_builder.proto` /
+   `user_dictionary_storage.proto`（Mozc `src/protocol/`）。java package = `org.mozc.android.inputmethod.japanese.protobuf`、outer class `ProtoCommands`。
+5. `NacreMozcEngine.convert(かな): List<候補>`:
+   - 起動時: `onPostLoad(filesDir/mozc, filesDir/mozc.data)` → `Input(type=CREATE_SESSION)` で session id 取得。
+   - 変換: `Input(type=SEND_KEY, id=session, key=KeyEvent(key_string=かな), request=Request(mixed_conversion=true …))`
+     → `Command(input=…).toByteArray()` → `evalCommand` → `Output` パース → `all_candidate_words` を候補化。
+6. `NacreDictionary.convert()` を Mozc 経由に切替、**例外/未ロード時は現 Kotlin 版へフォールバック**。設定 `useMozcNative`。
 
 ## 不変条件
 - 現 Kotlin エンジンは**フォールバックとして残す**。Mozc 統合は設定/段階で切替、退行を出さない。
