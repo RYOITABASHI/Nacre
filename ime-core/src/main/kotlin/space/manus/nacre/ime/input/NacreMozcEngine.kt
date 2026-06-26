@@ -85,10 +85,13 @@ class NacreMozcEngine(private val context: Context) {
                         .setKey(KeyEvent.newBuilder().setKeyString(ch.toString())),
                 )
             }
-            val candidates = out?.allCandidateWords?.candidatesList.orEmpty()
-                .mapNotNull { it.value?.takeIf(String::isNotEmpty) }
-                .distinct()
-                .map { ConversionCandidate(surface = it, reading = reading) }
+            // During composition the live suggestions are in candidate_window;
+            // all_candidate_words is the flattened full list (often empty pre-convert).
+            val fromWindow = out?.candidateWindow?.candidateList.orEmpty().map { it.value }
+            val fromAll = out?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
+            val values = (fromWindow + fromAll).filter { it.isNotEmpty() }.distinct()
+            Log.i(TAG, "convert('$reading'): window=${fromWindow.size} all=${fromAll.size} → ${values.take(3)}")
+            val candidates = values.map { ConversionCandidate(surface = it, reading = reading) }
             sendCommand(SessionCommand.CommandType.REVERT) // leave session clean
             candidates
         } catch (e: Throwable) {
