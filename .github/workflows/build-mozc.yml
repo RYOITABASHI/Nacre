@@ -63,8 +63,10 @@ jobs:
           cp "mozc/src/bazel-out/x86_64-opt-ST-"*/bin/android/jni/libmozc.so "$OUT/x86_64/libmozc.so" || true
           "$STRIP" "$OUT/arm64-v8a/libmozc.so" || true
           "$STRIP" "$OUT/x86_64/libmozc.so" || true
-          # engine data
-          find mozc/src/bazel-bin -name 'mozc.data' -exec cp {} "$OUT/data/mozc.data" \; || true
+          # engine data — bazel-bin is a symlink (find won't traverse it); cp follows it.
+          cp mozc/src/bazel-bin/data_manager/oss/mozc.data "$OUT/data/mozc.data" \
+            || find -L mozc/src/bazel-out -name 'mozc.data' -exec cp {} "$OUT/data/mozc.data" \; \
+            || true
           echo "=== dist ==="; find "$OUT" -type f -exec ls -la {} \;
 
       - name: Upload mozc native (libmozc.so + mozc.data)
