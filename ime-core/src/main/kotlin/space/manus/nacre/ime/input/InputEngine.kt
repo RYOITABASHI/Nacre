@@ -29,6 +29,12 @@ class InputEngine(private val service: NacreInputMethodService) {
     private val japaneseEngine = JapaneseEngine()
     private var composingText: String = ""
     private var composingFlickKana: String = ""
+    /**
+     * True while the 12-key is in ABC (alpha) mode. Routes flick prediction +
+     * history to the English engine without touching the shared
+     * layerManager.isJapanese (which drives QWERTY + voice language).
+     */
+    var flickAlphaMode: Boolean = false
     private var predictionJob: Job? = null
 
     // LLM-based candidate reranking (optional, async)
@@ -362,7 +368,8 @@ class InputEngine(private val service: NacreInputMethodService) {
                 } else if (composingFlickKana.isNotEmpty()) {
                     // Flick mode: commit kana as-is
                     ic.commitText(composingFlickKana, 1)
-                    recordJapanesePhrase(composingFlickKana, composingFlickKana)
+                    if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                    else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
                     clearCandidates()
@@ -465,7 +472,8 @@ class InputEngine(private val service: NacreInputMethodService) {
                 if (isConverting) commitSelectedCandidate(ic)
                 if (composingFlickKana.isNotEmpty()) {
                     ic.commitText(composingFlickKana, 1)
-                    recordJapanesePhrase(composingFlickKana, composingFlickKana)
+                    if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                    else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
                 }
@@ -551,9 +559,14 @@ class InputEngine(private val service: NacreInputMethodService) {
             }
             ic.finishComposingText()
             ic.commitText(candidate.surface, 1)
-            if (englishComposing.isNotEmpty()) {
+            if (englishComposing.isNotEmpty() ||
+                (flickAlphaMode && composingFlickKana.isNotEmpty())
+            ) {
+                // English word committed (QWERTY English mode or 12-key ABC mode) —
+                // learn it so it surfaces as history next time.
                 dictionary?.recordEnglishSelection(candidate.surface)
                 englishComposing = ""
+                composingFlickKana = ""
             } else {
                 dictionary?.recordSelection(candidate)
                 recordJapanesePhrase(candidate.reading, candidate.surface)
@@ -683,6 +696,16 @@ class InputEngine(private val service: NacreInputMethodService) {
         updatePredictions(kana)
     }
 
+    // --- User dictionary (単語登録) — thin UI-facing API over NacreDictionary ---
+    fun registerUserWord(reading: String, surface: String) {
+        if (reading.isBlank() || surface.isBlank()) return
+        (dictionary as? NacreDictionary)?.registerUserWord(reading.trim(), surface.trim())
+    }
+
+    fun reloadUserDictionary() {
+        (dictionary as? NacreDictionary)?.reloadUserDictionary()
+    }
+
     private fun updatePredictions(kana: String) {
         // SPEC: disable prediction in password fields
         if (isPasswordField) return
@@ -732,6 +755,16 @@ class InputEngine(private val service: NacreInputMethodService) {
     /**
      * Update English autocomplete/spellcheck predictions.
      */
+    /**
+     * 12-key prediction router: in ABC (alpha) mode the multi-tap letters live in
+     * composingFlickKana, so route them to the English completer instead of the
+     * Japanese predictor. Driven by [flickAlphaMode].
+     */
+    private fun updateFlickPredictions(text: String) {
+        if (flickAlphaMode) updateEnglishPredictions(text)
+        else updatePredictions(text)
+    }
+
     private fun updateEnglishPredictions(prefix: String) {
         if (isPasswordField) return
         val dict = dictionary ?: return
@@ -1048,7 +1081,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 composingFlickKana = composingFlickKana.dropLast(1) + nextKana
                 composingKana = composingFlickKana
                 ic.setComposingText(composingFlickKana, 1)
-                updatePredictions(composingFlickKana)
+                updateFlickPredictions(composingFlickKana)
                 lastFlickTapTime = now
                 return
             }
@@ -1065,7 +1098,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingFlickKana += kana
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
-        updatePredictions(composingFlickKana)
+        updateFlickPredictions(composingFlickKana)
 
         if (isFlickTap) {
             lastFlickKeyId = flickKeyId
@@ -1116,6 +1149,21 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
+     * iOS-style ゛小゜ tap: cycle the last kana through base → small → dakuten →
+     * handakuten (small first, dakuten next).
+     */
+    fun processFlickDakutenCycle() {
+        if (composingFlickKana.isEmpty()) return
+        val ic = service.currentInputConnection ?: return
+        val lastChar = composingFlickKana.last()
+        val replaced = FlickEngine.cycleKanaForm(lastChar) ?: return
+        composingFlickKana = composingFlickKana.dropLast(1) + replaced
+        composingKana = composingFlickKana
+        ic.setComposingText(composingFlickKana, 1)
+        updatePredictions(composingFlickKana)
+    }
+
+    /**
      * Flick-mode conversion. Uses composingFlickKana directly (no romaji).
      */
     private fun startFlickConversion(ic: android.view.inputmethod.InputConnection) {
@@ -1134,8 +1182,9 @@ class InputEngine(private val service: NacreInputMethodService) {
                 return
             }
         }
-        // No results: commit as kana
+        // No results: commit as-is (kana, or ASCII in ABC mode — learn the word then)
         ic.commitText(kana, 1)
+        if (flickAlphaMode) dictionary?.recordEnglishSelection(kana)
         composingFlickKana = ""
         composingKana = ""
         clearCandidates()
@@ -1170,7 +1219,8 @@ class InputEngine(private val service: NacreInputMethodService) {
                 commitSelectedCandidate(ic)
             } else {
                 ic.commitText(composingFlickKana, 1)
-                recordJapanesePhrase(composingFlickKana, composingFlickKana)
+                if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                 composingFlickKana = ""
                 composingKana = ""
                 clearCandidates()

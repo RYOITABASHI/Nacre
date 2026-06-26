@@ -163,7 +163,7 @@ private fun DrawScope.drawClipboardIcon(color: Color, strokeWidthPx: Float) {
 /**
  * Microphone: rounded rect capsule body + vertical stem + horizontal base line.
  */
-private fun DrawScope.drawVoiceIcon(color: Color, strokeWidthPx: Float) {
+internal fun DrawScope.drawVoiceIcon(color: Color, strokeWidthPx: Float) {
     val stroke = Stroke(width = strokeWidthPx, cap = StrokeCap.Round, join = StrokeJoin.Round)
     val w = size.width
     val h = size.height

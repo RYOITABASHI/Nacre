@@ -1,7 +1,10 @@
 package space.manus.nacre.ime.keyboard
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
@@ -61,48 +64,78 @@ fun CandidateBar(
         modifier = modifier
             .fillMaxWidth()
             .height(36.dp)
-            .background(barBg)
-            .then(
-                if (isConverting) {
-                    // During conversion: detect left/right swipe for segment boundary adjustment
-                    Modifier.pointerInput(Unit) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(requireUnconsumed = false)
-                            var totalX = 0f
-                            var totalY = 0f
-                            var handled = false
+            .background(barBg),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Fixed dictation mic (outline). Always visible; tap toggles voice input,
+        // turns red while recording. This is the single voice entry point, shared
+        // by every layout that shows the candidate bar.
+        val micColor = if (voiceListening) Color(0xFFFF4444) else accent
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(36.dp)
+                .clickable {
+                    if (service.voiceInputManager.isListening) {
+                        service.voiceInputManager.cancel()
+                    } else {
+                        val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
+                        service.voiceInputManager.startListening(lang)
+                    }
+                }
+                .semantics { contentDescription = "音声入力" },
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(modifier = Modifier.size(width = 14.dp, height = 20.dp)) {
+                drawVoiceIcon(micColor, 1.5.dp.toPx())
+            }
+        }
 
-                            while (true) {
-                                val event = awaitPointerEvent()
-                                val change = event.changes.firstOrNull() ?: break
-                                if (change.pressed) {
-                                    val delta = change.positionChange()
-                                    totalX += delta.x
-                                    totalY += delta.y
-                                    change.consume()
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .then(
+                    if (isConverting) {
+                        // During conversion: detect left/right swipe for segment boundary adjustment
+                        Modifier.pointerInput(Unit) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                var totalX = 0f
+                                var totalY = 0f
+                                var handled = false
 
-                                    // Trigger segment adjustment on sufficient horizontal swipe
-                                    if (!handled && abs(totalX) > swipeThresholdPx && abs(totalX) > abs(totalY)) {
-                                        handled = true
-                                        val dir = if (totalX > 0) SwipeDirection.Right else SwipeDirection.Left
-                                        service.inputEngine.adjustSegmentBoundary(dir)
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull() ?: break
+                                    if (change.pressed) {
+                                        val delta = change.positionChange()
+                                        totalX += delta.x
+                                        totalY += delta.y
+                                        change.consume()
+
+                                        // Trigger segment adjustment on sufficient horizontal swipe
+                                        if (!handled && abs(totalX) > swipeThresholdPx && abs(totalX) > abs(totalY)) {
+                                            handled = true
+                                            val dir = if (totalX > 0) SwipeDirection.Right else SwipeDirection.Left
+                                            service.inputEngine.adjustSegmentBoundary(dir)
+                                        }
+                                    } else {
+                                        change.consume()
+                                        break
                                     }
-                                } else {
-                                    change.consume()
-                                    break
                                 }
                             }
                         }
+                    } else {
+                        Modifier
                     }
-                } else {
-                    Modifier
-                }
-            )
-            .horizontalScroll(scrollState)
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-        horizontalArrangement = Arrangement.Start,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+                )
+                .horizontalScroll(scrollState)
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.Start,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
         if (voiceListening || voicePartial == "Thinking...") {
             Text(
                 text = when {
@@ -148,6 +181,14 @@ fun CandidateBar(
                             service.inputEngine.commitCandidate(index)
                         }
                     },
+                    onLongClick = {
+                        // Long-press a candidate → register it (読み→表記) to the user
+                        // dictionary so it converts first next time.
+                        if (candidate.reading.isNotEmpty()) {
+                            service.inputEngine.registerUserWord(candidate.reading, candidate.surface)
+                            service.feedbackManager.onLongPress()
+                        }
+                    },
                     index = index,
                     chipBg = Color(theme.keyBackground.toInt()),
                     chipText = Color(theme.keyText.toInt()),
@@ -159,14 +200,17 @@ fun CandidateBar(
                 }
             }
         }
+        }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CandidateChip(
     candidate: ConversionCandidate,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     index: Int,
     chipBg: Color,
     chipText: Color,
@@ -181,7 +225,7 @@ private fun CandidateChip(
             .height(32.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(bg)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .semantics {
                 contentDescription = "候補${index + 1}: ${candidate.surface}"
