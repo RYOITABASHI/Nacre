@@ -210,6 +210,11 @@ fun NacreSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        SectionHeader("変換エンジン")
+        MozcNativeSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // --- AI Models ---
         SectionHeader("AI Models")
         StoragePermissionCard()
@@ -724,6 +729,45 @@ private fun ThemeSection(config: ConfigRepository, context: Context) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MozcNativeSection() {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
+    var enabled by remember { mutableStateOf(prefs.getBoolean("enabled", false)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Mozcネイティブ変換（実験）", color = NacreText, fontSize = 14.sp)
+                Text(
+                    "Mozc本体エンジンで変換。OFFで従来エンジン。問題があれば自動フォールバック",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    prefs.edit().putBoolean("enabled", it).apply()
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NacreAccent,
+                    checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                ),
+            )
         }
     }
 }

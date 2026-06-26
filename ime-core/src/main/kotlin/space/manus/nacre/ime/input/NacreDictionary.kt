@@ -347,8 +347,22 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     // --- DictionaryProvider implementation ---
 
+    // #13 native Mozc engine — lazily created on first use, gated by a setting.
+    private val mozcEngine by lazy { NacreMozcEngine(context) }
+
+    private fun useMozcNative(): Boolean =
+        context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
+            .getBoolean("enabled", false)
+
     override fun convert(kana: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
+
+        // #13: native Mozc engine (experimental, default OFF). When enabled and it
+        // returns candidates, use them; otherwise fall through to the Kotlin engine.
+        if (useMozcNative()) {
+            val mozc = mozcEngine.convert(kana)
+            if (mozc.isNotEmpty()) return mozc
+        }
 
         val results = mutableListOf<ConversionCandidate>()
         val seen = mutableSetOf<String>()
