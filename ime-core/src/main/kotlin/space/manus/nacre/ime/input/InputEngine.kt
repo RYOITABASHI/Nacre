@@ -1116,6 +1116,21 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
+     * iOS-style ゛小゜ tap: cycle the last kana through base → small → dakuten →
+     * handakuten (small first, dakuten next).
+     */
+    fun processFlickDakutenCycle() {
+        if (composingFlickKana.isEmpty()) return
+        val ic = service.currentInputConnection ?: return
+        val lastChar = composingFlickKana.last()
+        val replaced = FlickEngine.cycleKanaForm(lastChar) ?: return
+        composingFlickKana = composingFlickKana.dropLast(1) + replaced
+        composingKana = composingFlickKana
+        ic.setComposingText(composingFlickKana, 1)
+        updatePredictions(composingFlickKana)
+    }
+
+    /**
      * Flick-mode conversion. Uses composingFlickKana directly (no romaji).
      */
     private fun startFlickConversion(ic: android.view.inputmethod.InputConnection) {

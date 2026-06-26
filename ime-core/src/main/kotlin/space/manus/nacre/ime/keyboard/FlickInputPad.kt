@@ -46,7 +46,11 @@ private enum class FlickMode { Kana, Alpha, Numbers }
  * Layout: candidate bar → 4×5 grid → 5-col bottom row.
  */
 @Composable
-fun FlickInputPad(service: NacreInputMethodService, onFlexPointer: () -> Unit = {}) {
+fun FlickInputPad(
+    service: NacreInputMethodService,
+    onFlexPointer: () -> Unit = {},
+    onClipboard: () -> Unit = {},
+) {
     val theme = service.currentTheme
     val bgColor = Color(theme.background.toInt())
     var flickMode by remember { mutableStateOf(FlickMode.Kana) }
@@ -83,6 +87,7 @@ fun FlickInputPad(service: NacreInputMethodService, onFlexPointer: () -> Unit = 
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
             FlickMode.Alpha -> FlickAlphaGrid(
                 service = service,
@@ -91,6 +96,7 @@ fun FlickInputPad(service: NacreInputMethodService, onFlexPointer: () -> Unit = 
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
             FlickMode.Numbers -> FlickNumberGrid(
                 service = service,
@@ -99,6 +105,7 @@ fun FlickInputPad(service: NacreInputMethodService, onFlexPointer: () -> Unit = 
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
         }
 
@@ -122,6 +129,7 @@ private fun FlickKanaGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val kanaKeys = FlickEngine.kanaKeys
     val h = FLICK_ROW_HEIGHT.dp
@@ -158,13 +166,13 @@ private fun FlickKanaGrid(
             FlickKeyView(flickKey = kanaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
             KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: 絵記 | ゛゜ | わ | 、。 | 🎤 (voice)
+        // Row 4: 絵記 | ゛゜ | わ | 、。 | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             DakutenKeyView(service = service, modifier = Modifier.weight(1f), row = 3, column = 1)
             FlickKeyView(flickKey = kanaKeys[9], service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
             FlickKeyView(flickKey = punctKey, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
-            FlickVoiceKey(service = service, modifier = Modifier.weight(sw))
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -181,6 +189,7 @@ private fun FlickAlphaGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val h = FLICK_ROW_HEIGHT.dp
     val sw = SIDE_WEIGHT
@@ -238,13 +247,13 @@ private fun FlickAlphaGrid(
             FlickKeyView(flickKey = alphaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
             KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: 絵記 | Shift | - | .,!? | 🎤 (voice)
+        // Row 4: 絵記 | Shift | - | .,!? | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             KeyView(keyDef = KeyDef("Shift", action = KeyAction.Shift), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("-", swipeUp = "/", swipeDown = "\\"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = FLICK_ROW_HEIGHT)
             FlickKeyView(flickKey = alphaPunct, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
-            FlickVoiceKey(service = service, modifier = Modifier.weight(sw))
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -261,6 +270,7 @@ private fun FlickNumberGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val h = FLICK_ROW_HEIGHT.dp
     val sw = SIDE_WEIGHT
@@ -290,13 +300,13 @@ private fun FlickNumberGrid(
             KeyView(keyDef = KeyDef("9"), service = service, modifier = Modifier.weight(1f), row = 2, column = 3, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: 絵記 | + | 0 | . | 🎤 (voice)
+        // Row 4: 絵記 | + | 0 | . | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             KeyView(keyDef = KeyDef("+", swipeUp = "-", swipeDown = "="), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("0"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef(".", swipeUp = ",", swipeDown = ":"), service = service, modifier = Modifier.weight(1f), row = 3, column = 3, heightDp = FLICK_ROW_HEIGHT)
-            FlickVoiceKey(service = service, modifier = Modifier.weight(sw))
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -452,12 +462,13 @@ private fun FlickSpaceKey(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Voice (dictation) key — iOS-style 🎤; tap to start, tap again to stop.
+// Clipboard-stock key — opens the saved clipboard history panel (pinned clips).
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
-private fun FlickVoiceKey(
+private fun FlickClipboardKey(
     service: NacreInputMethodService,
+    onClipboard: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val theme = service.currentTheme
@@ -465,8 +476,6 @@ private fun FlickVoiceKey(
     val keyText = Color(theme.keyText.toInt())
     val surfaceColor = Color(theme.surface.toInt())
     val shape = RoundedCornerShape(6.dp)
-    val listeningColor = Color(0xFFFF4444)
-    val isListening = service.voiceInputManager.isListening
     var isPressed by remember { mutableStateOf(false) }
 
     Box(
@@ -474,15 +483,11 @@ private fun FlickVoiceKey(
             .fillMaxHeight()
             .padding(horizontal = 1.dp, vertical = 1.dp)
             .clip(shape)
-            .background(surfaceColor)
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else surfaceColor)
             .padding(bottom = 1.5.dp)
             .clip(shape)
-            .background(if (isListening || isPressed) Color(theme.keyBackgroundPressed.toInt()) else keyBg)
-            .border(
-                width = if (isListening) 1.dp else 0.5.dp,
-                color = if (isListening) listeningColor else surfaceColor.copy(alpha = 0.5f),
-                shape = shape,
-            )
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else keyBg)
+            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
             .pointerInput(Unit) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -494,19 +499,14 @@ private fun FlickVoiceKey(
                         change.consume()
                     }
                     isPressed = false
-                    if (service.voiceInputManager.isListening) {
-                        service.voiceInputManager.cancel()
-                    } else {
-                        val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
-                        service.voiceInputManager.startListening(lang)
-                    }
+                    onClipboard()
                 }
             },
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "🎤",
-            color = if (isListening) listeningColor else keyText,
+            text = "📋",
+            color = keyText,
             fontSize = 16.sp,
             textAlign = TextAlign.Center,
         )
@@ -891,7 +891,14 @@ private fun DakutenKeyView(
                         showPopup = false
                     }
 
-                    service.inputEngine.processFlickDakuten(resolved)
+                    // Tap (no flick) → iOS-style cycle (small first, then dakuten);
+                    // explicit up/left flicks still force small / handakuten.
+                    val isTap = abs(totalX) < flickThresholdPx && abs(totalY) < flickThresholdPx
+                    if (isTap) {
+                        service.inputEngine.processFlickDakutenCycle()
+                    } else {
+                        service.inputEngine.processFlickDakuten(resolved)
+                    }
                     service.feedbackManager.onKeyPress(KeyAction.Text(popupLabel))
                     lighting.onKeyPress("゛", column)
                 }

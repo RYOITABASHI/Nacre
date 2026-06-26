@@ -30,7 +30,7 @@ object FlickEngine {
         FlickKey("な", "な", "な", "に", "ぬ", "ね", "の"),
         FlickKey("は", "は", "は", "ひ", "ふ", "へ", "ほ"),
         FlickKey("ま", "ま", "ま", "み", "む", "め", "も"),
-        FlickKey("や", "や", "や", "ゆ", "よ", "（", "）",
+        FlickKey("や", "や", "や", "ゆ", "よ", null, null,
             tapCycle = listOf("や", "ゆ", "よ", "ゃ", "ゅ", "ょ")),
         FlickKey("ら", "ら", "ら", "り", "る", "れ", "ろ"),
         FlickKey("わ", "わ", "わ", "を", "ん", "ー", "〜",
@@ -106,6 +106,24 @@ object FlickEngine {
 
     fun applySmall(lastKana: Char): Char? =
         smallMap[lastKana] ?: reverseSmall[lastKana]
+
+    /**
+     * iOS-style ゛小゜ tap cycle: base → small → dakuten → handakuten → base.
+     * "Small first, dakuten next" — e.g. つ→っ→づ→つ, は→ば→ぱ→は, あ→ぁ→あ, か→が→か.
+     * Returns the next form, or null if the char has no variants.
+     */
+    fun cycleKanaForm(c: Char): Char? {
+        val base = reverseSmall[c] ?: reverseDakuten[c] ?: reverseHandakuten[c] ?: c
+        val cycle = buildList {
+            add(base)
+            smallMap[base]?.let { add(it) }
+            dakutenMap[base]?.let { add(it) }
+            handakutenMap[base]?.let { add(it) }
+        }
+        if (cycle.size <= 1) return null
+        val idx = cycle.indexOf(c)
+        return if (idx >= 0) cycle[(idx + 1) % cycle.size] else cycle[1]
+    }
 }
 
 enum class DakutenType { Dakuten, Handakuten, Small }
