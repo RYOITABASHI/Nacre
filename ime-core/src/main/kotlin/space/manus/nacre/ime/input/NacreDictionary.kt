@@ -357,12 +357,9 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     override fun convert(kana: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
 
-        // #13: native Mozc engine (experimental, default OFF). When enabled and it
-        // returns candidates, use them; otherwise fall through to the Kotlin engine.
-        if (useMozcNative()) {
-            val mozc = mozcEngine.convert(kana)
-            if (mozc.isNotEmpty()) return mozc
-        }
+        // #13: Mozc is intentionally NOT called here — convert() runs on the main thread
+        // (explicit 変換), and Mozc's per-char JNI batch would risk an ANR. Mozc drives the
+        // live candidate bar via predict() (background thread) instead. (Agent review B1.)
 
         val results = mutableListOf<ConversionCandidate>()
         val seen = mutableSetOf<String>()
@@ -492,10 +489,11 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
 
-        // #13: native Mozc drives the live candidate bar too (not just explicit 変換).
-        // mixed_conversion gives prediction-quality candidates as you type.
+        // #13: native Mozc drives the live candidate bar (off the main thread — predict()
+        // is dispatched on Dispatchers.Default). Prefer the raw romaji buffer (ASCII → the
+        // romaji table composes kana); fall back to the kana reading via AS_IS.
         if (useMozcNative()) {
-            val mozc = mozcEngine.convert(kana)
+            val mozc = mozcEngine.convert(romaji.ifBlank { kana })
             if (mozc.isNotEmpty()) return mozc
         }
 
