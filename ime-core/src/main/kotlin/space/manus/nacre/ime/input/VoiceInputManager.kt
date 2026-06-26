@@ -282,6 +282,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
      * Start continuous voice input. Keeps listening until explicitly stopped.
      */
     fun startListening(language: String = "ja-JP") {
+        Log.i(TAG, "startListening ENTRY: isListening=$isListening lang=$language pw=${service.inputEngine.isPasswordField}")
         if (isListening) return
         if (service.inputEngine.isPasswordField) {
             Log.w(TAG, "Voice input disabled in password field")

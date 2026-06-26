@@ -76,6 +76,7 @@ fun CandidateBar(
                 .fillMaxHeight()
                 .width(36.dp)
                 .clickable {
+                    android.util.Log.i("NacreMic", "candidate-bar mic tapped, isListening=${service.voiceInputManager.isListening}")
                     if (service.voiceInputManager.isListening) {
                         service.voiceInputManager.cancel()
                     } else {
