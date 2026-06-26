@@ -2182,7 +2182,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
      * @param surface the kanji/text surface form
      * @param comment optional memo
      */
-    fun registerUserWord(reading: String, surface: String, comment: String = "") {
+    fun registerUserWord(readingRaw: String, surfaceRaw: String, comment: String = "") {
+        // Strip the \t / \n that delimit the flat-file format — a multi-line surface
+        // (e.g. a pasted address) would otherwise split/corrupt other entries.
+        val reading = readingRaw.replace('\t', ' ').replace('\n', ' ').trim()
+        val surface = surfaceRaw.replace('\t', ' ').replace('\n', ' ').trim()
+        if (reading.isEmpty() || surface.isEmpty()) return
         val entries = userDictionary.getOrPut(reading) { mutableListOf() }
         if (entries.none { it.surface == surface }) {
             entries.add(UserDictEntry(reading, surface, comment))
@@ -2203,6 +2208,21 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         if (userDictionary[reading]?.isEmpty() == true) userDictionary.remove(reading)
         dict[reading]?.removeAll { it.surface == surface && it.cost == 500 }
         saveUserDictionary()
+    }
+
+    /** All registered user words (sorted by reading), for the 単語登録 management UI. */
+    fun listUserWords(): List<UserDictEntry> =
+        userDictionary.values.flatten().sortedBy { it.reading }
+
+    /**
+     * Re-read the user dictionary from prefs and re-inject into the live dict.
+     * Lets edits made in the Settings screen (same prefs) take effect on the next
+     * keyboard open without an IME restart.
+     */
+    fun reloadUserDictionary() {
+        userDictionary.clear()
+        loadUserDictionary()
+        injectUserDictionary()
     }
 
     // --- Phrase memory persistence ---

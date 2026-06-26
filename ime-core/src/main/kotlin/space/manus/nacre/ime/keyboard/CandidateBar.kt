@@ -1,8 +1,10 @@
 package space.manus.nacre.ime.keyboard
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
@@ -179,6 +181,14 @@ fun CandidateBar(
                             service.inputEngine.commitCandidate(index)
                         }
                     },
+                    onLongClick = {
+                        // Long-press a candidate → register it (読み→表記) to the user
+                        // dictionary so it converts first next time.
+                        if (candidate.reading.isNotEmpty()) {
+                            service.inputEngine.registerUserWord(candidate.reading, candidate.surface)
+                            service.feedbackManager.onLongPress()
+                        }
+                    },
                     index = index,
                     chipBg = Color(theme.keyBackground.toInt()),
                     chipText = Color(theme.keyText.toInt()),
@@ -194,11 +204,13 @@ fun CandidateBar(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CandidateChip(
     candidate: ConversionCandidate,
     isSelected: Boolean,
     onClick: () -> Unit,
+    onLongClick: () -> Unit,
     index: Int,
     chipBg: Color,
     chipText: Color,
@@ -213,7 +225,7 @@ private fun CandidateChip(
             .height(32.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(bg)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 4.dp)
             .semantics {
                 contentDescription = "候補${index + 1}: ${candidate.surface}"

@@ -696,6 +696,16 @@ class InputEngine(private val service: NacreInputMethodService) {
         updatePredictions(kana)
     }
 
+    // --- User dictionary (単語登録) — thin UI-facing API over NacreDictionary ---
+    fun registerUserWord(reading: String, surface: String) {
+        if (reading.isBlank() || surface.isBlank()) return
+        (dictionary as? NacreDictionary)?.registerUserWord(reading.trim(), surface.trim())
+    }
+
+    fun reloadUserDictionary() {
+        (dictionary as? NacreDictionary)?.reloadUserDictionary()
+    }
+
     private fun updatePredictions(kana: String) {
         // SPEC: disable prediction in password fields
         if (isPasswordField) return

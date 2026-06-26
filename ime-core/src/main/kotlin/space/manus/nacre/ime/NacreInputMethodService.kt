@@ -307,6 +307,12 @@ class NacreInputMethodService :
         // The input view is cached, so force KeyboardScreen to re-pick its layout — this
         // is what makes a "12キー入力" / sub-display toggle apply on the next keyboard open.
         layoutEpoch.value++
+        // Pick up 単語登録 edits made in the Settings screen (same prefs, separate object).
+        val udPrefs = getSharedPreferences("nacre_user_dict", android.content.Context.MODE_PRIVATE)
+        if (udPrefs.getBoolean("dirty", false)) {
+            inputEngine.reloadUserDictionary()
+            udPrefs.edit().putBoolean("dirty", false).apply()
+        }
         inputEngine.onStartInput(info)
     }
 
