@@ -23,6 +23,16 @@
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 -keepclassmembers class com.k2fsa.sherpa.onnx.** { *; }
 
+# Keep protobuf-javalite generated message FIELDS unobfuscated (#13 Mozc engine).
+# javalite parses/serializes by reflecting on generated field names (type_,
+# bitField0_, …). R8 renaming them (type_ -> e) makes parseFrom throw
+# "Field type_ for X not found" → Mozc CREATE_SESSION/evalCommand fails.
+-keep class * extends com.google.protobuf.GeneratedMessageLite { *; }
+-keepclassmembers class * extends com.google.protobuf.GeneratedMessageLite { <fields>; }
+-keep class com.google.protobuf.** { *; }
+# The Mozc JNI binding class (RegisterNatives targets this exact FQN + method names).
+-keep class com.google.android.apps.inputmethod.libs.mozc.session.MozcJNI { *; }
+
 # Keep Lifecycle/ViewModel/SavedState owners
 -keep class * implements androidx.lifecycle.LifecycleOwner { *; }
 -keep class * implements androidx.lifecycle.ViewModelStoreOwner { *; }
