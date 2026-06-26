@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.google.android.apps.inputmethod.libs.mozc.session.MozcJNI
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Command
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.CompositionMode
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Input
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
@@ -61,6 +62,17 @@ class NacreMozcEngine(private val context: Context) {
                     .setId(sessionId)
                     .setRequest(Request.newBuilder().setMixedConversion(true)),
             )
+            // Leave DIRECT mode so key_string actually composes hiragana.
+            eval(
+                Input.newBuilder()
+                    .setType(Input.CommandType.SEND_COMMAND)
+                    .setId(sessionId)
+                    .setCommand(
+                        SessionCommand.newBuilder()
+                            .setType(SessionCommand.CommandType.SWITCH_COMPOSITION_MODE)
+                            .setCompositionMode(CompositionMode.HIRAGANA),
+                    ),
+            )
             ready = true
             Log.i(TAG, "Mozc ready (dataVersion=${runCatching { MozcJNI.getDataVersion() }.getOrNull()})")
             true
@@ -85,12 +97,19 @@ class NacreMozcEngine(private val context: Context) {
                         .setKey(KeyEvent.newBuilder().setKeyString(ch.toString())),
                 )
             }
-            // During composition the live suggestions are in candidate_window;
-            // all_candidate_words is the flattened full list (often empty pre-convert).
-            val fromWindow = out?.candidateWindow?.candidateList.orEmpty().map { it.value }
-            val fromAll = out?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
-            val values = (fromWindow + fromAll).filter { it.isNotEmpty() }.distinct()
-            Log.i(TAG, "convert('$reading'): window=${fromWindow.size} all=${fromAll.size} → ${values.take(3)}")
+            val preedit = out?.preedit?.segmentList.orEmpty().joinToString("") { it.value }
+            val winKeys = out?.candidateWindow?.candidateList.orEmpty().map { it.value }
+            // Trigger conversion with SPACE → fills the candidate list.
+            val outSp = eval(
+                Input.newBuilder()
+                    .setType(Input.CommandType.SEND_KEY)
+                    .setId(sessionId)
+                    .setKey(KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE)),
+            )
+            val winSp = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
+            val allSp = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
+            val values = (winKeys + winSp + allSp).filter { it.isNotEmpty() }.distinct()
+            Log.i(TAG, "convert('$reading'): preedit='$preedit' winKeys=${winKeys.size} winSp=${winSp.size} all=${allSp.size} → ${values.take(3)}")
             val candidates = values.map { ConversionCandidate(surface = it, reading = reading) }
             sendCommand(SessionCommand.CommandType.REVERT) // leave session clean
             candidates
