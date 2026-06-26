@@ -34,6 +34,12 @@ class NacreMozcEngine(private val context: Context) {
         if (ready) return true
         return try {
             System.loadLibrary("mozc")
+            // libmozc.so has no JNI_OnLoad — initialize() is the only name-mangled
+            // entry and it RegisterNatives the rest. Must run before onPostLoad.
+            if (!MozcJNI.initialize()) {
+                Log.e(TAG, "MozcJNI.initialize() failed")
+                return false
+            }
             val dir = File(context.filesDir, "mozc").apply { mkdirs() }
             val dataFile = File(dir, "mozc.data")
             if (!dataFile.exists() || dataFile.length() == 0L) {

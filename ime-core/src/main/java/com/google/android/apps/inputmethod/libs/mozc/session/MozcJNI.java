@@ -15,6 +15,14 @@ public final class MozcJNI {
     private MozcJNI() {}
 
     /**
+     * Registers the other native methods (evalCommand/onPostLoad/getDataVersion).
+     * libmozc.so has NO JNI_OnLoad — this is the only method bound by name-mangling,
+     * and calling it runs RegisterNatives. MUST be called once right after
+     * System.loadLibrary("mozc") and before any other method here.
+     */
+    public static native boolean initialize();
+
+    /**
      * Initialize the engine. Must be called once before {@link #evalCommand}.
      *
      * @param userProfileDirectoryPath writable dir for learning / user history
