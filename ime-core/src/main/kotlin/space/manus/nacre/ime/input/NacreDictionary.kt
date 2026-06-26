@@ -492,6 +492,13 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
 
+        // #13: native Mozc drives the live candidate bar too (not just explicit 変換).
+        // mixed_conversion gives prediction-quality candidates as you type.
+        if (useMozcNative()) {
+            val mozc = mozcEngine.convert(kana)
+            if (mozc.isNotEmpty()) return mozc
+        }
+
         val results = mutableListOf<ConversionCandidate>()
         val seen = mutableSetOf<String>()
 
