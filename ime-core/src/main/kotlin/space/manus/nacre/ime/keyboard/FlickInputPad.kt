@@ -55,6 +55,16 @@ fun FlickInputPad(
     val bgColor = Color(theme.background.toInt())
     var flickMode by remember { mutableStateOf(FlickMode.Kana) }
 
+    // Tell the engine when ABC mode is active so flick prediction + history route
+    // to the English completer. Uses a dedicated flag — NOT layerManager.isJapanese —
+    // so QWERTY and voice language are left untouched.
+    androidx.compose.runtime.LaunchedEffect(flickMode) {
+        service.inputEngine.flickAlphaMode = (flickMode == FlickMode.Alpha)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { service.inputEngine.flickAlphaMode = false }
+    }
+
     // Emoji overlay
     var showEmoji by remember { mutableStateOf(false) }
     if (showEmoji) {
