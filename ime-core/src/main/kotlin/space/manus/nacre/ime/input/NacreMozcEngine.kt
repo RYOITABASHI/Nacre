@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.google.android.apps.inputmethod.libs.mozc.session.MozcJNI
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Command
+import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.CompositionMode
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Input
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.KeyEvent
 import org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands.Output
@@ -74,12 +75,16 @@ class NacreMozcEngine(private val context: Context) {
                             .setLanguageAwareInput(Request.LanguageAwareInputBehavior.NO_LANGUAGE_AWARE_INPUT),
                     ),
             )
-            // Ensure the IME is on (DIRECT → PRECOMPOSITION) so keys compose.
+            // Ensure the IME is on + HIRAGANA (matches predict_and_convert.txt).
             eval(
                 Input.newBuilder()
                     .setType(Input.CommandType.SEND_KEY)
                     .setId(sessionId)
-                    .setKey(KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.ON)),
+                    .setKey(
+                        KeyEvent.newBuilder()
+                            .setSpecialKey(KeyEvent.SpecialKey.ON)
+                            .setMode(CompositionMode.HIRAGANA),
+                    ),
             )
             ready = true
             Log.i(TAG, "Mozc ready (dataVersion=${runCatching { MozcJNI.getDataVersion() }.getOrNull()})")
@@ -107,6 +112,17 @@ class NacreMozcEngine(private val context: Context) {
         if (input.isEmpty() || !ensureReady()) return emptyList()
         return try {
             sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
+            // Re-assert HIRAGANA after reset (every passing scenario does this).
+            eval(
+                Input.newBuilder()
+                    .setType(Input.CommandType.SEND_COMMAND)
+                    .setId(sessionId)
+                    .setCommand(
+                        SessionCommand.newBuilder()
+                            .setType(SessionCommand.CommandType.SWITCH_COMPOSITION_MODE)
+                            .setCompositionMode(CompositionMode.HIRAGANA),
+                    ),
+            )
             var out: Output? = null
             for (ch in input) {
                 val key = KeyEvent.newBuilder()
