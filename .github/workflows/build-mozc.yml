@@ -45,23 +45,32 @@ jobs:
       - name: Build libmozc.so (oss_android, release)
         working-directory: mozc/src
         run: |
-          bazelisk build package --config oss_android --config release_build 2>&1 | tail -200
+          bazelisk build package --config oss_android --config release_build 2>&1 | tail -100
 
-      - name: Locate outputs
-        if: always()
+      - name: Build engine data (mozc.data)
+        working-directory: mozc/src
         run: |
-          echo "=== .so outputs ==="
-          find mozc -name '*.so' 2>/dev/null | head -50
-          echo "=== native_libs / android jni outputs ==="
-          find mozc -path '*android*' -name '*.so' 2>/dev/null | head
-          find mozc/src/bazel-bin -maxdepth 4 -type f 2>/dev/null | grep -iE 'mozc|native' | head -50 || true
+          bazelisk build //data_manager/oss:mozc_dataset_for_oss --config release_build 2>&1 | tail -60
 
-      - name: Upload libmozc.so
+      - name: Collect + strip outputs
+        run: |
+          set -x
+          STRIP=$(find mozc/src/third_party/ndk -name 'llvm-strip' | head -1)
+          OUT=dist
+          mkdir -p "$OUT/arm64-v8a" "$OUT/x86_64" "$OUT/data"
+          # arch-specific libmozc.so (strip to cut size; 16MB → ~smaller)
+          cp "mozc/src/bazel-out/arm64-v8a-opt-ST-"*/bin/android/jni/libmozc.so "$OUT/arm64-v8a/libmozc.so"
+          cp "mozc/src/bazel-out/x86_64-opt-ST-"*/bin/android/jni/libmozc.so "$OUT/x86_64/libmozc.so" || true
+          "$STRIP" "$OUT/arm64-v8a/libmozc.so" || true
+          "$STRIP" "$OUT/x86_64/libmozc.so" || true
+          # engine data
+          find mozc/src/bazel-bin -name 'mozc.data' -exec cp {} "$OUT/data/mozc.data" \; || true
+          echo "=== dist ==="; find "$OUT" -type f -exec ls -la {} \;
+
+      - name: Upload mozc native (libmozc.so + mozc.data)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: libmozc-android
-          path: |
-            mozc/src/bazel-bin/**/*.so
-            mozc/**/libmozc*.so
+          name: mozc-native
+          path: dist/**
           if-no-files-found: warn
