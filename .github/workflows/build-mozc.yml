@@ -1,0 +1,67 @@
+name: Build Mozc native lib (M1)
+
+# Milestone 1 of #13 (Mozc native engine integration): prove we can build
+# libmozc.so for Android via Bazel in CI and capture it as an artifact.
+# Heavy build (Bazel + protobuf/abseil + NDK r29) — expect iteration.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/mozc-native-engine]
+    paths:
+      - '.github/workflows/build-mozc.yml'
+
+jobs:
+  build-mozc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bazelisk
+        run: |
+          sudo curl -fsSL \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          bazelisk version || true
+
+      - name: Clone Mozc
+        run: git clone --depth 1 https://github.com/google/mozc.git
+
+      - name: Update deps (protobuf / abseil / NDK r29)
+        working-directory: mozc/src
+        run: python3 build_tools/update_deps.py
+
+      - name: Build libmozc.so (oss_android, release)
+        working-directory: mozc/src
+        run: |
+          bazelisk build package --config oss_android --config release_build 2>&1 | tail -200
+
+      - name: Locate outputs
+        if: always()
+        run: |
+          echo "=== .so outputs ==="
+          find mozc -name '*.so' 2>/dev/null | head -50
+          echo "=== native_libs / android jni outputs ==="
+          find mozc -path '*android*' -name '*.so' 2>/dev/null | head
+          find mozc/src/bazel-bin -maxdepth 4 -type f 2>/dev/null | grep -iE 'mozc|native' | head -50 || true
+
+      - name: Upload libmozc.so
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmozc-android
+          path: |
+            mozc/src/bazel-bin/**/*.so
+            mozc/**/libmozc*.so
+          if-no-files-found: warn
