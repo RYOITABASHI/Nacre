@@ -37,10 +37,32 @@ bazelisk build package --config oss_android --config release_build
 ## マイルストーン
 
 - **M1（今ここ）**: `.github/workflows/build-mozc.yml` で `libmozc.so`(arm64) を Bazel ビルド → artifact。まず「ビルドが通るか」を立証する。失敗を反復して通す。
-- **M2**: `android/jni/` の JNI API を調査（クラス名・メソッド・session/converter インターフェイス）。Mozc のエンジンデータ（system dictionary 等）の取り出し方を確定。
+- **M2（調査済み）**: JNI API 確定（下記「JNI API」節）。残り = Bazel ビルドが出力する **`mozc.data`**（エンジンデータ束）の取得経路と、Mozc protobuf（`commands.proto` 他）の Java 生成。
 - **M3**: libmozc.so + データを `ime-core` の jniLibs/assets に同梱。`NacreMozcJni`（Kotlin↔native）を実装し `convert(かな)→候補` を取得。
 - **M4**: `NacreDictionary.convert()` を Mozc ネイティブ呼び出しに切替（**フォールバックで現 Kotlin 版を残す**＝退行ゼロ）。設定トグル `useMozcNative`。
 - **M5**: 学習（Mozc user history）を内部ストレージに永続化。ユーザー辞書(#単語登録)を Mozc user dictionary にブリッジ。
+
+## JNI API（`src/android/jni/mozcjni.cc` 調査済み）
+
+`libmozc.so` は以下を **固定の完全修飾クラス名**に RegisterNatives する。Nacre 側もこの
+パッケージ/クラスで宣言しないと bind されない:
+
+- **クラス**: `com.google.android.apps.inputmethod.libs.mozc.session.MozcJNI`
+- `onPostLoad(userProfileDir: String, engineDataPath: String): Boolean`
+  初期化。`engineDataPath` を `DataManager::CreateFromFile()` に渡す → **`mozc.data`** が必要。
+  `userProfileDir` = 学習/履歴の保存先（内部ストレージの dir）。
+- `evalCommand(command: ByteArray): ByteArray`
+  **本体**。`mozc::commands::Command` protobuf をシリアライズして渡し、`Output`（候補列）を
+  シリアライズして受け取る。かな入力→候補はここ。
+- `getDataVersion(): String`
+
+### M3 で必要なもの
+1. `MozcJNI`（上記固定パッケージ）の Kotlin/Java クラス＋`System.loadLibrary("mozc")`。
+2. **`mozc.data`**（Bazel ビルド成果物 = `oss_data_manager` 系）を assets に同梱。
+3. **Mozc protobuf を Java 生成**: `protocol/commands.proto`（+ 依存 `config.proto` 等）を
+   protobuf-java で生成。`Command` を組み立て（KeyEvent / SessionCommand / ConversionRequest）、
+   `Output` から候補を読む。
+4. `NacreMozcEngine.convert(かな): List<候補>` = Command 構築 → evalCommand → Output パース。
 
 ## 不変条件
 - 現 Kotlin エンジンは**フォールバックとして残す**。Mozc 統合は設定/段階で切替、退行を出さない。
