@@ -60,6 +60,9 @@ fun CandidateBar(
         scrollState.scrollTo(0)
     }
 
+    androidx.compose.runtime.SideEffect {
+        android.util.Log.i("NacreMic", "CandidateBar composed (mic rendered), listening=$voiceListening")
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -74,20 +77,22 @@ fun CandidateBar(
         Box(
             modifier = Modifier
                 .fillMaxHeight()
-                .width(36.dp)
-                .clickable {
-                    android.util.Log.i("NacreMic", "candidate-bar mic tapped, isListening=${service.voiceInputManager.isListening}")
-                    if (service.voiceInputManager.isListening) {
-                        service.voiceInputManager.cancel()
-                    } else {
-                        val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
-                        service.voiceInputManager.startListening(lang)
+                .width(44.dp)
+                .pointerInput(Unit) {
+                    androidx.compose.foundation.gestures.detectTapGestures {
+                        android.util.Log.i("NacreMic", "mic TAP detected, isListening=${service.voiceInputManager.isListening}")
+                        if (service.voiceInputManager.isListening) {
+                            service.voiceInputManager.cancel()
+                        } else {
+                            val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
+                            service.voiceInputManager.startListening(lang)
+                        }
                     }
                 }
                 .semantics { contentDescription = "音声入力" },
             contentAlignment = Alignment.Center,
         ) {
-            Canvas(modifier = Modifier.size(width = 14.dp, height = 20.dp)) {
+            Canvas(modifier = Modifier.size(width = 16.dp, height = 22.dp)) {
                 drawVoiceIcon(micColor, 1.5.dp.toPx())
             }
         }
