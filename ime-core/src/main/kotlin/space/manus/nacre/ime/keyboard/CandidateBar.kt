@@ -61,9 +61,6 @@ fun CandidateBar(
         scrollState.scrollTo(0)
     }
 
-    androidx.compose.runtime.SideEffect {
-        android.util.Log.i("NacreMic", "CandidateBar composed (mic rendered), listening=$voiceListening")
-    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -81,7 +78,6 @@ fun CandidateBar(
                 .width(44.dp)
                 .pointerInput(Unit) {
                     detectTapGestures {
-                        android.util.Log.i("NacreMic", "mic TAP detected, isListening=${service.voiceInputManager.isListening}")
                         if (service.voiceInputManager.isListening) {
                             // Second tap = finalize & commit the transcription (NOT cancel/discard).
                             service.voiceInputManager.stopListening()
