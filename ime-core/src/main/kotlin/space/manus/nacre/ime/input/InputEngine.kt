@@ -732,8 +732,12 @@ class InputEngine(private val service: NacreInputMethodService) {
                 selectedCandidateIndex = -1
             }
 
-            // Async LLM reranking (non-blocking — updates candidates in-place when done)
-            if (predictions.size > 1) {
+            // Async LLM reranking (non-blocking — updates candidates in-place when done).
+            // Skip entirely when native Mozc produced these candidates: Mozc's own ranking
+            // is authoritative, and running the local-LLM reranker on every keystroke would
+            // just reorder good candidates and wake the LLM process for nothing.
+            val mozcActive = (dict as? NacreDictionary)?.useMozcNative() == true
+            if (!mozcActive && predictions.size > 1) {
                 val precedingText = service.currentInputConnection
                     ?.getTextBeforeCursor(50, 0)?.toString() ?: ""
                 llmReranker.rerankAsync(kana, predictions, precedingText) { reranked ->

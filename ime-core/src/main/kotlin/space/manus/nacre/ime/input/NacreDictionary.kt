@@ -350,7 +350,11 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // #13 native Mozc engine — lazily created on first use, gated by a setting.
     private val mozcEngine by lazy { NacreMozcEngine(context) }
 
-    private fun useMozcNative(): Boolean =
+    // Public so the input engine + service can skip the now-redundant Kotlin-engine
+    // helpers (KenLM 5-gram rescoring, the local-LLM reranker) when native Mozc is the
+    // active conversion path — Mozc never consults them, so loading/running them just
+    // wastes ~560MB (KenLM) + per-keystroke LLM calls.
+    fun useMozcNative(): Boolean =
         context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
             .getBoolean("enabled", false)
 

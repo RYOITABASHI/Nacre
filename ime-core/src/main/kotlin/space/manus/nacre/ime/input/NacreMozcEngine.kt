@@ -125,7 +125,6 @@ class NacreMozcEngine(private val context: Context) {
                             .setCompositionMode(CompositionMode.HIRAGANA),
                     ),
             )
-            var out: Output? = null
             for (ch in input) {
                 val key = KeyEvent.newBuilder()
                 if (ch.code < 0x80) {
@@ -135,14 +134,13 @@ class NacreMozcEngine(private val context: Context) {
                     // Literal kana → insert as-is (bypasses the romaji table).
                     key.setKeyString(ch.toString()).setInputStyle(KeyEvent.InputStyle.AS_IS)
                 }
-                out = eval(
+                eval(
                     Input.newBuilder()
                         .setType(Input.CommandType.SEND_KEY)
                         .setId(sessionId)
                         .setKey(key),
                 )
             }
-            val preedit = out?.preedit?.segmentList.orEmpty().joinToString("") { it.value }
             // SPACE converts → full candidate list lands in all_candidate_words.
             val outSp = eval(
                 Input.newBuilder()
@@ -153,7 +151,6 @@ class NacreMozcEngine(private val context: Context) {
             val all = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
             val win = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
             val values = (all + win).filter { it.isNotEmpty() }.distinct()
-            Log.i(TAG, "convert('$input'): sid=$sessionId preedit='$preedit' all=${all.size} win=${win.size} spErr=${outSp?.errorCode} spId=${outSp?.id} → ${values.take(3)}")
             sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
             values.map { ConversionCandidate(surface = it, reading = input) }
         } catch (e: Throwable) {

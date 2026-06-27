@@ -126,8 +126,14 @@ class NacreInputMethodService :
         clipboardManager.startListening()
         foldableDetector.startHingeAngleListening()
 
+        // When native Mozc is the active conversion engine it owns ranking outright, so the
+        // Kotlin-engine helpers are dead weight: the local-LLM reranker (skip its server probe)
+        // and the KenLM 5-gram rescorer (skip the ~560MB load below). Frees ~1GB+ of resident
+        // memory on Mozc-enabled devices; the Kotlin path (Mozc OFF) is unchanged.
+        val mozcEnabled = getSharedPreferences("nacre_mozc", MODE_PRIVATE).getBoolean("enabled", false)
+
         // Check LLM server availability (non-blocking)
-        inputEngine.llmReranker.checkServer()
+        if (!mozcEnabled) inputEngine.llmReranker.checkServer()
 
         // Personal default: keep compact KenLM and the default local LLM
         // provisioning in the background. Actual model loading stays below and
@@ -153,8 +159,12 @@ class NacreInputMethodService :
                 inputEngine.refreshPredictionsIfNeeded()
             }
 
-            // Load KenLM model: prefer full 5-gram (sideloaded), fall back to bundled compact model
-            try {
+            // Load KenLM model: prefer full 5-gram (sideloaded), fall back to bundled compact model.
+            // Skipped when native Mozc is active — Mozc does its own scoring, so loading the
+            // 560MB 5-gram into the IME process would just sit there wasting RAM.
+            if (mozcEnabled) {
+                android.util.Log.i("NacreIME", "Mozc native active — skipping KenLM load (saves ~560MB)")
+            } else try {
                 val modelsDir = java.io.File(filesDir, "models")
                 modelsDir.mkdirs()
                 val fullModel = java.io.File(modelsDir, "japanese-5gram.klm")
