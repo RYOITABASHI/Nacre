@@ -56,8 +56,10 @@ class NacreMozcEngine(private val context: Context) {
                 Log.e(TAG, "onPostLoad returned false")
                 return false
             }
-            sessionId = eval(Input.newBuilder().setType(Input.CommandType.CREATE_SESSION))?.id
+            val created = eval(Input.newBuilder().setType(Input.CommandType.CREATE_SESSION))
                 ?: return false
+            sessionId = created.id
+            Log.i(TAG, "CREATE_SESSION: id=$sessionId err=${created.errorCode}")
             // Full mobile request — mixed_conversion alone is NOT enough to get candidates;
             // the romaji table (special_romanji_table) + the bundle are required.
             eval(
@@ -151,7 +153,7 @@ class NacreMozcEngine(private val context: Context) {
             val all = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
             val win = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
             val values = (all + win).filter { it.isNotEmpty() }.distinct()
-            Log.i(TAG, "convert('$input'): preedit='$preedit' all=${all.size} win=${win.size} → ${values.take(3)}")
+            Log.i(TAG, "convert('$input'): sid=$sessionId preedit='$preedit' all=${all.size} win=${win.size} spErr=${outSp?.errorCode} spId=${outSp?.id} → ${values.take(3)}")
             sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
             values.map { ConversionCandidate(surface = it, reading = input) }
         } catch (e: Throwable) {
