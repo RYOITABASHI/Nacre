@@ -30,21 +30,11 @@ class LayoutSelector(private val detector: FoldableDetector) {
 
     companion object {
         private const val PREFS_NAME = "nacre_layout"
-        private const val KEY_SUB_DISPLAY_MODE = "sub_display_mode"
+        /** Layout preference for the foldable cover / sub-display only. */
+        const val KEY_SUB_DISPLAY_MODE = "sub_display_mode"
     }
 
     private val prefs = detector.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-
-    /**
-     * User-selected preferred layout for the sub-display.
-     * When set, overrides the automatic selection for foldable sub-displays.
-     * Persisted to SharedPreferences.
-     */
-    var userSubDisplayMode: LayoutMode = loadSubDisplayMode()
-        set(value) {
-            field = value
-            prefs.edit().putString(KEY_SUB_DISPLAY_MODE, value.name).apply()
-        }
 
     /**
      * Determines the best layout mode for the current screen configuration.
@@ -60,8 +50,11 @@ class LayoutSelector(private val detector: FoldableDetector) {
         val widthDp = detector.getScreenWidthDp()
 
         return when {
+            // Main / unfolded display — unchanged.
             widthDp >= 500f -> LayoutMode.FullVSplit
-            detector.isSubDisplay() -> userSubDisplayMode
+            // Foldable cover / sub-display: user preference, read fresh so a Settings
+            // toggle applies on the next keyboard open. The main display is unaffected.
+            detector.isSubDisplay() -> loadSubDisplayMode()
             widthDp >= 380f -> LayoutMode.StandardQwerty
             widthDp >= 200f -> LayoutMode.QuickInputPad
             else -> LayoutMode.QuickInputPad

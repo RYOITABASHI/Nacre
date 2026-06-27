@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,6 +40,8 @@ import space.manus.nacre.update.ApkInstaller
 import space.manus.nacre.update.UpdateChecker
 import space.manus.nacre.update.UpdateInfo
 import space.manus.nacre.config.ConfigRepository
+import space.manus.nacre.ime.foldable.LayoutMode
+import space.manus.nacre.ime.foldable.LayoutSelector
 import space.manus.nacre.config.PresetProvider
 import space.manus.nacre.config.ThemeProvider
 import space.manus.nacre.ime.feedback.HapticManager
@@ -207,6 +210,18 @@ fun NacreSettingsScreen() {
         // --- Auto Convert ---
         SectionHeader("Auto Convert")
         AutoConvertSection(config)
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- Conversion engine (#13 Mozc native) ---
+        SectionHeader("変換エンジン")
+        MozcNativeSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        // --- User dictionary (単語登録) ---
+        SectionHeader("単語登録")
+        WordRegistrationSection()
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -584,6 +599,16 @@ private fun LightingSection(config: ConfigRepository, context: Context) {
 
 @Composable
 private fun LayoutSection(config: ConfigRepository) {
+    val context = LocalContext.current
+    // Same process as the IME, so the IME picks this up on the next keyboard open.
+    // This only affects the foldable cover / sub-display — the main display is untouched.
+    val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
+    var coverFlick12 by remember {
+        mutableStateOf(
+            layoutPrefs.getString(LayoutSelector.KEY_SUB_DISPLAY_MODE, null) ==
+                LayoutMode.FlickInput12Key.name,
+        )
+    }
     var vAngle by remember { mutableStateOf(config.vAngle) }
     var keyboardHeight by remember { mutableStateOf(config.keyboardHeight.toFloat()) }
 
@@ -593,6 +618,37 @@ private fun LayoutSection(config: ConfigRepository) {
         colors = CardDefaults.cardColors(containerColor = NacreSurface),
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
+            // iOS-style 12-key for the foldable COVER display only. When off, the
+            // cover falls back to CompactQwerty; the main display is never affected.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("\u30AB\u30D0\u30FC\u753B\u9762\u306712\u30AD\u30FC\u5165\u529B\uFF08\u30D5\u30EA\u30C3\u30AF/\u9023\u6253\uFF09", color = NacreText, fontSize = 14.sp)
+                    Text(
+                        "\u6298\u308A\u305F\u305F\u307F\u6642\u306E\u30AB\u30D0\u30FC\u753B\u9762\u306E\u307FiOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002\u30E1\u30A4\u30F3\u753B\u9762\u306F\u5909\u66F4\u306A\u3057",
+                        color = NacreTextDim,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = coverFlick12,
+                    onCheckedChange = {
+                        coverFlick12 = it
+                        val mode = if (it) LayoutMode.FlickInput12Key.name else LayoutMode.CompactQwerty.name
+                        layoutPrefs.edit().putString(LayoutSelector.KEY_SUB_DISPLAY_MODE, mode).apply()
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = NacreAccent,
+                        checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                    ),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Text(
                 "V-Split Angle: ${vAngle.roundToInt()}\u00B0",
                 color = NacreText,
@@ -729,6 +785,45 @@ private fun ThemeSection(config: ConfigRepository, context: Context) {
 }
 
 @Composable
+private fun MozcNativeSection() {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
+    var enabled by remember { mutableStateOf(prefs.getBoolean("enabled", false)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Mozcネイティブ変換（実験）", color = NacreText, fontSize = 14.sp)
+                Text(
+                    "Mozc本体エンジンで変換。OFFで従来エンジン。問題があれば自動フォールバック",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    prefs.edit().putBoolean("enabled", it).apply()
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NacreAccent,
+                    checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                ),
+            )
+        }
+    }
+}
+
+@Composable
 private fun AutoConvertSection(config: ConfigRepository) {
     val context = LocalContext.current
     val acPrefs = context.getSharedPreferences("nacre_auto_convert", Context.MODE_PRIVATE)
@@ -766,6 +861,155 @@ private fun AutoConvertSection(config: ConfigRepository) {
                     checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
                 ),
             )
+        }
+    }
+}
+
+// ── User dictionary (単語登録) ──────────────────────────────────────────────
+// Reads/writes the same "nacre_user_dict" prefs the IME's NacreDictionary uses
+// (tab-separated reading\tsurface\tcomment, newline-joined). Setting "dirty" makes
+// the IME reload on the next keyboard open. IME + Settings share one process.
+
+private fun loadUserWords(prefs: android.content.SharedPreferences): List<Pair<String, String>> {
+    val data = prefs.getString("user_dictionary", null) ?: return emptyList()
+    return data.split('\n').mapNotNull { line ->
+        if (line.isBlank()) return@mapNotNull null
+        val p = line.split('\t')
+        if (p.size >= 2) p[0] to p[1] else null
+    }
+}
+
+private fun saveUserWords(prefs: android.content.SharedPreferences, list: List<Pair<String, String>>) {
+    // Strip the \t / \n delimiters so a multi-line surface (pasted address) can't
+    // split one entry into several and corrupt the flat file.
+    fun clean(s: String) = s.replace('\t', ' ').replace('\n', ' ').trim()
+    val data = list.joinToString("\n") { "${clean(it.first)}\t${clean(it.second)}\t" }
+    prefs.edit().putString("user_dictionary", data).putBoolean("dirty", true).apply()
+}
+
+private fun loadClipboardTexts(context: android.content.Context): List<String> {
+    val prefs = context.getSharedPreferences("nacre_clipboard", Context.MODE_PRIVATE)
+    val json = prefs.getString("history", null) ?: return emptyList()
+    return try {
+        val arr = org.json.JSONArray(json)
+        (0 until arr.length()).map { arr.getJSONObject(it).getString("text") }
+            .filter { it.isNotBlank() }
+            .take(8)
+    } catch (_: Exception) {
+        emptyList()
+    }
+}
+
+@Composable
+private fun WordRegistrationSection() {
+    val context = LocalContext.current
+    val udPrefs = remember { context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE) }
+    var entries by remember { mutableStateOf(loadUserWords(udPrefs)) }
+    var reading by remember { mutableStateOf("") }
+    var surface by remember { mutableStateOf("") }
+    val clips = remember { loadClipboardTexts(context) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "読み（かな）と表記を登録すると、変換候補の先頭に出ます。名前・住所・メールなどに。",
+                color = NacreTextDim,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+
+            OutlinedTextField(
+                value = reading,
+                onValueChange = { reading = it },
+                label = { Text("読み（かな）", fontSize = 12.sp) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = surface,
+                onValueChange = { surface = it },
+                label = { Text("表記（変換後）", fontSize = 12.sp) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            if (clips.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("クリップボードから表記を流用:", color = NacreTextDim, fontSize = 11.sp)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    for (clip in clips) {
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(NacreBackground)
+                                .clickable { surface = clip.replace('\n', ' ').replace('\t', ' ').trim() }
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                        ) {
+                            Text(
+                                clip.take(20).replace('\n', ' '),
+                                color = NacreText,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    val r = reading.trim()
+                    val s = surface.trim()
+                    if (r.isNotEmpty() && s.isNotEmpty()) {
+                        val next = loadUserWords(udPrefs).toMutableList()
+                        if (next.none { it.first == r && it.second == s }) next.add(r to s)
+                        saveUserWords(udPrefs, next)
+                        entries = next
+                        reading = ""
+                        surface = ""
+                    }
+                },
+                enabled = reading.isNotBlank() && surface.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = NacreAccent),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("登録", color = NacreBackground)
+            }
+
+            if (entries.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("登録済み（${entries.size}）", color = NacreTextDim, fontSize = 11.sp)
+                for ((r, s) in entries) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("$s 　(${r})", color = NacreText, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        TextButton(onClick = {
+                            val next = loadUserWords(udPrefs).filterNot { it.first == r && it.second == s }
+                            saveUserWords(udPrefs, next)
+                            entries = next
+                        }) {
+                            Text("削除", color = Color(0xFFFF6666), fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -35,19 +35,35 @@ import space.manus.nacre.ime.input.DakutenType
 import space.manus.nacre.ime.input.FlickEngine
 import kotlin.math.abs
 
-/** Input mode for the 12-key pad. Cycled by the あa1 key. */
+/** Input mode for the 12-key pad. Selected directly by the iOS-style ☆123 / ABC / あいう keys. */
 private enum class FlickMode { Kana, Alpha, Numbers }
 
 /**
- * Main 12-key flick input pad composable (Gboard-style).
- * No tab bar — input mode switching via あa1 key (かな→英字→数字→かな).
- * Layout: toolbar/candidate → 4×5 grid → 5-col bottom row.
+ * Main 12-key input pad composable (iOS テンキー-style).
+ * Left column = direct mode keys (☆123 numbers / ABC alpha / あいう kana) like iOS —
+ * one tap jumps straight to a mode, no cycling. Multi-tap (連打) on the centre keys
+ * cycles within a row (か→き→く→け→こ). Cursor lives in the bottom row + Flex Pointer.
+ * Layout: candidate bar → 4×5 grid → 5-col bottom row.
  */
 @Composable
-fun FlickInputPad(service: NacreInputMethodService) {
+fun FlickInputPad(
+    service: NacreInputMethodService,
+    onFlexPointer: () -> Unit = {},
+    onClipboard: () -> Unit = {},
+) {
     val theme = service.currentTheme
     val bgColor = Color(theme.background.toInt())
     var flickMode by remember { mutableStateOf(FlickMode.Kana) }
+
+    // Tell the engine when ABC mode is active so flick prediction + history route
+    // to the English completer. Uses a dedicated flag — NOT layerManager.isJapanese —
+    // so QWERTY and voice language are left untouched.
+    androidx.compose.runtime.LaunchedEffect(flickMode) {
+        service.inputEngine.flickAlphaMode = (flickMode == FlickMode.Alpha)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { service.inputEngine.flickAlphaMode = false }
+    }
 
     // Emoji overlay
     var showEmoji by remember { mutableStateOf(false) }
@@ -70,32 +86,40 @@ fun FlickInputPad(service: NacreInputMethodService) {
         // Candidate bar only (no toolbar — functions covered by grid keys)
         CandidateBar(service = service)
 
-        // Grid: switches based on flickMode
+        // Grid: switches based on flickMode. Mode is set directly (iOS-style),
+        // not cycled — ☆123 / ABC / あいう jump straight to a mode.
+        val onSetMode: (FlickMode) -> Unit = { flickMode = it }
         when (flickMode) {
             FlickMode.Kana -> FlickKanaGrid(
                 service = service,
-                onModeSwitch = { flickMode = FlickMode.Alpha },
+                flickMode = flickMode,
+                onSetMode = onSetMode,
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
-                modeLabel = "あa1",
+                onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
             FlickMode.Alpha -> FlickAlphaGrid(
                 service = service,
-                onModeSwitch = { flickMode = FlickMode.Numbers },
+                flickMode = flickMode,
+                onSetMode = onSetMode,
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
-                modeLabel = "Aa1",
+                onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
             FlickMode.Numbers -> FlickNumberGrid(
                 service = service,
-                onModeSwitch = { flickMode = FlickMode.Kana },
+                flickMode = flickMode,
+                onSetMode = onSetMode,
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
-                modeLabel = "1あa",
+                onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
             )
         }
 
-        // 5-column bottom row: ↑ / ↓ / 変換 / Paste / Alt
+        // 5-column bottom row: ◀ / ▶ / 変換 / Paste / Alt
         FlickBottomRow(service = service)
     }
 }
@@ -110,10 +134,12 @@ private const val SIDE_WEIGHT = 0.8f
 @Composable
 private fun FlickKanaGrid(
     service: NacreInputMethodService,
-    onModeSwitch: () -> Unit,
+    flickMode: FlickMode,
+    onSetMode: (FlickMode) -> Unit,
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
-    modeLabel: String,
+    onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val kanaKeys = FlickEngine.kanaKeys
     val h = FLICK_ROW_HEIGHT.dp
@@ -126,37 +152,37 @@ private fun FlickKanaGrid(
     )
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Row 1: ↩ | あ | か | さ | ⌫
+        // Row 1: ☆123 | あ | か | さ | ⌫
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("↩", action = KeyAction.Escape), service = service, modifier = Modifier.weight(sw), row = 0, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
             FlickKeyView(flickKey = kanaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
             FlickKeyView(flickKey = kanaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
             FlickKeyView(flickKey = kanaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
             KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.weight(sw), row = 0, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 2: ◀ | た | な | は | ▶
+        // Row 2: ABC | た | な | は | 空白
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("◀", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_LEFT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
             FlickKeyView(flickKey = kanaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
             FlickKeyView(flickKey = kanaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
             FlickKeyView(flickKey = kanaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
-            KeyView(keyDef = KeyDef("▶", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_RIGHT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
         }
-        // Row 3: 記号 | ま | や | ら | ␣  (tap=symbols, long-press=emoji)
+        // Row 3: あいう | ま | や | ら | 改行
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
+            ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
             FlickKeyView(flickKey = kanaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
             FlickKeyView(flickKey = kanaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
             FlickKeyView(flickKey = kanaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
-            KeyView(keyDef = KeyDef("␣", action = KeyAction.Space), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: あa1 | ゛゜ | わ | 、。 | ↵
+        // Row 4: 絵記 | ゛゜ | わ | 、。 | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            ModeSwitchKey(label = modeLabel, modifier = Modifier.weight(sw), service = service, onClick = onModeSwitch)
+            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             DakutenKeyView(service = service, modifier = Modifier.weight(1f), row = 3, column = 1)
             FlickKeyView(flickKey = kanaKeys[9], service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
             FlickKeyView(flickKey = punctKey, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
-            KeyView(keyDef = KeyDef("↵", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 3, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -168,10 +194,12 @@ private fun FlickKanaGrid(
 @Composable
 private fun FlickAlphaGrid(
     service: NacreInputMethodService,
-    onModeSwitch: () -> Unit,
+    flickMode: FlickMode,
+    onSetMode: (FlickMode) -> Unit,
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
-    modeLabel: String,
+    onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val h = FLICK_ROW_HEIGHT.dp
     val sw = SIDE_WEIGHT
@@ -205,37 +233,37 @@ private fun FlickAlphaGrid(
     )
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Row 1: ↩ | @#& | abc | def | ⌫
+        // Row 1: ☆123 | @#& | abc | def | ⌫
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("↩", action = KeyAction.Escape), service = service, modifier = Modifier.weight(sw), row = 0, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
             FlickKeyView(flickKey = alphaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
             FlickKeyView(flickKey = alphaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
             FlickKeyView(flickKey = alphaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
             KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.weight(sw), row = 0, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 2: ◀ | ghi | jkl | mno | ▶
+        // Row 2: ABC | ghi | jkl | mno | 空白
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("◀", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_LEFT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
             FlickKeyView(flickKey = alphaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
             FlickKeyView(flickKey = alphaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
             FlickKeyView(flickKey = alphaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
-            KeyView(keyDef = KeyDef("▶", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_RIGHT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
         }
-        // Row 3: 記号 | pqrs | tuv | wxyz | ␣  (tap=symbols, long-press=emoji)
+        // Row 3: あいう | pqrs | tuv | wxyz | 改行
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
+            ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
             FlickKeyView(flickKey = alphaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
             FlickKeyView(flickKey = alphaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
             FlickKeyView(flickKey = alphaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
-            KeyView(keyDef = KeyDef("␣", action = KeyAction.Space), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: Aa1 | Shift | - | .,!? | ↵
+        // Row 4: 絵記 | Shift | - | .,!? | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            ModeSwitchKey(label = modeLabel, modifier = Modifier.weight(sw), service = service, onClick = onModeSwitch)
+            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             KeyView(keyDef = KeyDef("Shift", action = KeyAction.Shift), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("-", swipeUp = "/", swipeDown = "\\"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = FLICK_ROW_HEIGHT)
             FlickKeyView(flickKey = alphaPunct, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
-            KeyView(keyDef = KeyDef("↵", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 3, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -247,46 +275,48 @@ private fun FlickAlphaGrid(
 @Composable
 private fun FlickNumberGrid(
     service: NacreInputMethodService,
-    onModeSwitch: () -> Unit,
+    flickMode: FlickMode,
+    onSetMode: (FlickMode) -> Unit,
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
-    modeLabel: String,
+    onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
 ) {
     val h = FLICK_ROW_HEIGHT.dp
     val sw = SIDE_WEIGHT
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        // Row 1: ↩ | 1 | 2 | 3 | ⌫
+        // Row 1: ☆123 | 1 | 2 | 3 | ⌫
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("↩", action = KeyAction.Escape), service = service, modifier = Modifier.weight(sw), row = 0, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
             KeyView(keyDef = KeyDef("1"), service = service, modifier = Modifier.weight(1f), row = 0, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("2"), service = service, modifier = Modifier.weight(1f), row = 0, column = 2, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("3"), service = service, modifier = Modifier.weight(1f), row = 0, column = 3, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.weight(sw), row = 0, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 2: ◀ | 4 | 5 | 6 | ▶
+        // Row 2: ABC | 4 | 5 | 6 | 空白
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            KeyView(keyDef = KeyDef("◀", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_LEFT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 0, heightDp = FLICK_ROW_HEIGHT)
+            ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
             KeyView(keyDef = KeyDef("4"), service = service, modifier = Modifier.weight(1f), row = 1, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("5"), service = service, modifier = Modifier.weight(1f), row = 1, column = 2, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("6"), service = service, modifier = Modifier.weight(1f), row = 1, column = 3, heightDp = FLICK_ROW_HEIGHT)
-            KeyView(keyDef = KeyDef("▶", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_RIGHT)), service = service, modifier = Modifier.weight(sw), row = 1, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
         }
-        // Row 3: 記号 | 7 | 8 | 9 | ␣  (tap=symbols, long-press=emoji)
+        // Row 3: あいう | 7 | 8 | 9 | 改行
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
+            ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
             KeyView(keyDef = KeyDef("7"), service = service, modifier = Modifier.weight(1f), row = 2, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("8"), service = service, modifier = Modifier.weight(1f), row = 2, column = 2, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("9"), service = service, modifier = Modifier.weight(1f), row = 2, column = 3, heightDp = FLICK_ROW_HEIGHT)
-            KeyView(keyDef = KeyDef("␣", action = KeyAction.Space), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = FLICK_ROW_HEIGHT)
         }
-        // Row 4: 1あa | + | 0 | . | ↵
+        // Row 4: 絵記 | + | 0 | . | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
-            ModeSwitchKey(label = modeLabel, modifier = Modifier.weight(sw), service = service, onClick = onModeSwitch)
+            SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             KeyView(keyDef = KeyDef("+", swipeUp = "-", swipeDown = "="), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef("0"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = FLICK_ROW_HEIGHT)
             KeyView(keyDef = KeyDef(".", swipeUp = ",", swipeDown = ":"), service = service, modifier = Modifier.weight(1f), row = 3, column = 3, heightDp = FLICK_ROW_HEIGHT)
-            KeyView(keyDef = KeyDef("↵", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 3, column = 4, heightDp = FLICK_ROW_HEIGHT)
+            FlickClipboardKey(service = service, onClipboard = onClipboard, modifier = Modifier.weight(sw))
         }
     }
 }
@@ -369,7 +399,132 @@ private fun SymbolEmojiKey(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Mode switch key (あa1 / Aa1 / 1あa)
+// Space key — tap inserts a space; long-press opens the Flex Pointer
+// trackpad (matches iOS's "long-press space = cursor trackpad" UX).
+// ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun FlickSpaceKey(
+    service: NacreInputMethodService,
+    onFlexPointer: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val theme = service.currentTheme
+    val keyBg = Color(theme.keyBackground.toInt())
+    val keyText = Color(theme.keyText.toInt())
+    val accentColor = Color(theme.accent.toInt())
+    val surfaceColor = Color(theme.surface.toInt())
+    val shape = RoundedCornerShape(6.dp)
+    var isPressed by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(horizontal = 1.dp, vertical = 1.dp)
+            .clip(shape)
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else surfaceColor)
+            .padding(bottom = 1.5.dp)
+            .clip(shape)
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else keyBg)
+            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val downTime = System.currentTimeMillis()
+                    awaitFirstDown(requireUnconsumed = false)
+                    isPressed = true
+                    var longPressHandled = false
+                    try {
+                        while (true) {
+                            val elapsed = System.currentTimeMillis() - downTime
+                            val timeout = maxOf(1L, 350L - elapsed)
+                            val event = withTimeoutOrNull(timeout) { awaitPointerEvent() }
+                            if (event == null && !longPressHandled) {
+                                longPressHandled = true
+                                service.feedbackManager.onLongPress()
+                                continue
+                            }
+                            val change = event?.changes?.firstOrNull() ?: break
+                            if (!change.pressed) { change.consume(); break }
+                            change.consume()
+                        }
+                    } finally {
+                        isPressed = false
+                    }
+                    if (longPressHandled) {
+                        onFlexPointer()
+                    } else {
+                        service.inputEngine.processAction(KeyAction.Space)
+                        service.feedbackManager.onKeyPress(KeyAction.Space)
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "空白",
+            color = if (isPressed) accentColor else keyText,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Clipboard-stock key — opens the saved clipboard history panel (pinned clips).
+// ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun FlickClipboardKey(
+    service: NacreInputMethodService,
+    onClipboard: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val theme = service.currentTheme
+    val keyBg = Color(theme.keyBackground.toInt())
+    val keyText = Color(theme.keyText.toInt())
+    val surfaceColor = Color(theme.surface.toInt())
+    val shape = RoundedCornerShape(6.dp)
+    var isPressed by remember { mutableStateOf(false) }
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(horizontal = 1.dp, vertical = 1.dp)
+            .clip(shape)
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else surfaceColor)
+            .padding(bottom = 1.5.dp)
+            .clip(shape)
+            .background(if (isPressed) Color(theme.keyBackgroundPressed.toInt()) else keyBg)
+            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    isPressed = true
+                    while (true) {
+                        val event = withTimeoutOrNull(Long.MAX_VALUE) { awaitPointerEvent() } ?: break
+                        val change = event.changes.firstOrNull() ?: break
+                        if (!change.pressed) { change.consume(); break }
+                        change.consume()
+                    }
+                    isPressed = false
+                    onClipboard()
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "📋",
+            color = keyText,
+            fontSize = 16.sp,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// iOS-style direct mode key (☆123 / ABC / あいう); highlighted when active
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -377,10 +532,12 @@ private fun ModeSwitchKey(
     label: String,
     service: NacreInputMethodService,
     modifier: Modifier = Modifier,
+    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     val theme = service.currentTheme
     val keyBg = Color(theme.keyBackground.toInt())
+    val keyBgPressed = Color(theme.keyBackgroundPressed.toInt())
     val keyText = Color(theme.keyText.toInt())
     val accentColor = Color(theme.accent.toInt())
     val surfaceColor = Color(theme.surface.toInt())
@@ -394,8 +551,12 @@ private fun ModeSwitchKey(
             .background(surfaceColor)
             .padding(bottom = 1.5.dp)
             .clip(shape)
-            .background(keyBg)
-            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
+            .background(if (active) keyBgPressed else keyBg)
+            .border(
+                width = if (active) 1.dp else 0.5.dp,
+                color = if (active) accentColor else surfaceColor.copy(alpha = 0.5f),
+                shape = shape,
+            )
             .pointerInput(label) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
@@ -412,7 +573,7 @@ private fun ModeSwitchKey(
     ) {
         Text(
             text = label,
-            color = keyText,
+            color = if (active) accentColor else keyText,
             fontSize = if (label.length > 2) 10.sp else 12.sp,
             fontWeight = FontWeight.Medium,
             fontFamily = FontFamily.Monospace,
@@ -740,7 +901,14 @@ private fun DakutenKeyView(
                         showPopup = false
                     }
 
-                    service.inputEngine.processFlickDakuten(resolved)
+                    // Tap (no flick) → iOS-style cycle (small first, then dakuten);
+                    // explicit up/left flicks still force small / handakuten.
+                    val isTap = abs(totalX) < flickThresholdPx && abs(totalY) < flickThresholdPx
+                    if (isTap) {
+                        service.inputEngine.processFlickDakutenCycle()
+                    } else {
+                        service.inputEngine.processFlickDakuten(resolved)
+                    }
                     service.feedbackManager.onKeyPress(KeyAction.Text(popupLabel))
                     lighting.onKeyPress("゛", column)
                 }
@@ -952,8 +1120,9 @@ private fun FlickModKeyView(
 
 /**
  * Bottom row: 5-column aligned with kana grid.
- * [↑(0.8x)] [↓(1x)] [変換(1x)] [Paste(1x)] [Alt(0.8x)]
- * Columns align: ↑=↩列, ↓=゛゜列, 変換=わ列, Paste=、。列, Alt=↵列
+ * [◀(0.8x)] [▶(1x)] [変換(1x)] [Paste(1x)] [Alt(0.8x)]
+ * ◀▶ give char-level cursor movement (the grid dropped its arrow keys for the
+ * iOS layout); finer/2-D movement lives in the Flex Pointer, which is untouched.
  */
 @Composable
 private fun FlickBottomRow(service: NacreInputMethodService) {
@@ -970,14 +1139,14 @@ private fun FlickBottomRow(service: NacreInputMethodService) {
             .height(26.dp)
             .padding(top = 2.dp),
     ) {
-        // ↑
-        BottomKey(label = "↑", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(SIDE_WEIGHT)) {
-            service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_UP))
+        // ◀
+        BottomKey(label = "◀", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(SIDE_WEIGHT)) {
+            service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_LEFT))
         }
         Spacer(modifier = Modifier.width(3.dp))
-        // ↓
-        BottomKey(label = "↓", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(1f)) {
-            service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_DOWN))
+        // ▶
+        BottomKey(label = "▶", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(1f)) {
+            service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_RIGHT))
         }
         Spacer(modifier = Modifier.width(3.dp))
         // 変換

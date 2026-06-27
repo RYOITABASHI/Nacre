@@ -1,7 +1,10 @@
+import com.google.protobuf.gradle.id
+
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.protobuf")
 }
 
 android {
@@ -26,6 +29,24 @@ android {
     }
 }
 
+// Mozc protobuf (vendored from google/mozc src/protocol/*.proto) → javalite Java.
+// Generates org.mozc.android.inputmethod.japanese.protobuf.ProtoCommands etc. for
+// the native Mozc engine bridge (MozcJNI.evalCommand exchanges serialized Command/Output).
+protobuf {
+    protoc {
+        artifact = "com.google.protobuf:protoc:3.25.5"
+    }
+    generateProtoTasks {
+        all().forEach { task ->
+            task.builtins {
+                id("java") {
+                    option("lite")
+                }
+            }
+        }
+    }
+}
+
 dependencies {
     implementation(project(":ime-config"))
     implementation(project(":ime-ai"))
@@ -40,4 +61,5 @@ dependencies {
     implementation("androidx.savedstate:savedstate:1.2.1")
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("com.google.protobuf:protobuf-javalite:3.25.5")
 }

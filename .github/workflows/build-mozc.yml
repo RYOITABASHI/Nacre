@@ -1,0 +1,78 @@
+name: Build Mozc native lib (M1)
+
+# Milestone 1 of #13 (Mozc native engine integration): prove we can build
+# libmozc.so for Android via Bazel in CI and capture it as an artifact.
+# Heavy build (Bazel + protobuf/abseil + NDK r29) — expect iteration.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/mozc-native-engine]
+    paths:
+      - '.github/workflows/build-mozc.yml'
+
+jobs:
+  build-mozc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android/sdk/ndk \
+            /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          df -h
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bazelisk
+        run: |
+          sudo curl -fsSL \
+            https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
+            -o /usr/local/bin/bazelisk
+          sudo chmod +x /usr/local/bin/bazelisk
+          bazelisk version || true
+
+      - name: Clone Mozc
+        run: git clone --depth 1 https://github.com/google/mozc.git
+
+      - name: Update deps (protobuf / abseil / NDK r29)
+        working-directory: mozc/src
+        run: python3 build_tools/update_deps.py
+
+      - name: Build libmozc.so (oss_android, release)
+        working-directory: mozc/src
+        run: |
+          bazelisk build package --config oss_android --config release_build 2>&1 | tail -100
+
+      - name: Build engine data (mozc.data)
+        working-directory: mozc/src
+        run: |
+          bazelisk build //data_manager/oss:mozc_dataset_for_oss --config release_build 2>&1 | tail -60
+
+      - name: Collect + strip outputs
+        run: |
+          set -x
+          STRIP=$(find mozc/src/third_party/ndk -name 'llvm-strip' | head -1)
+          OUT=dist
+          mkdir -p "$OUT/arm64-v8a" "$OUT/x86_64" "$OUT/data"
+          # arch-specific libmozc.so (strip to cut size; 16MB → ~smaller)
+          cp "mozc/src/bazel-out/arm64-v8a-opt-ST-"*/bin/android/jni/libmozc.so "$OUT/arm64-v8a/libmozc.so"
+          cp "mozc/src/bazel-out/x86_64-opt-ST-"*/bin/android/jni/libmozc.so "$OUT/x86_64/libmozc.so" || true
+          "$STRIP" "$OUT/arm64-v8a/libmozc.so" || true
+          "$STRIP" "$OUT/x86_64/libmozc.so" || true
+          # engine data — bazel-bin is a symlink (find won't traverse it); cp follows it.
+          cp mozc/src/bazel-bin/data_manager/oss/mozc.data "$OUT/data/mozc.data" \
+            || find -L mozc/src/bazel-out -name 'mozc.data' -exec cp {} "$OUT/data/mozc.data" \; \
+            || true
+          echo "=== dist ==="; find "$OUT" -type f -exec ls -la {} \;
+
+      - name: Upload mozc native (libmozc.so + mozc.data)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mozc-native
+          path: dist/**
+          if-no-files-found: warn

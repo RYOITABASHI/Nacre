@@ -93,6 +93,14 @@ class NacreInputMethodService :
     lateinit var currentTheme: space.manus.nacre.config.NacreTheme
         private set
 
+    /**
+     * Bumped to make [KeyboardScreen] re-pick the layout. The input view is cached
+     * (onCreateInputView returns the existing view) and never recomposes on its own,
+     * so a layout/settings change — e.g. toggling "12キー入力" — stays invisible until
+     * this epoch advances. Bumped on every keyboard show (onStartInputView).
+     */
+    val layoutEpoch = androidx.compose.runtime.mutableStateOf(0)
+
     override fun onCreate() {
         super.onCreate()
         savedStateRegistryController.performRestore(null)
@@ -118,8 +126,14 @@ class NacreInputMethodService :
         clipboardManager.startListening()
         foldableDetector.startHingeAngleListening()
 
+        // When native Mozc is the active conversion engine it owns ranking outright, so the
+        // Kotlin-engine helpers are dead weight: the local-LLM reranker (skip its server probe)
+        // and the KenLM 5-gram rescorer (skip the ~560MB load below). Frees ~1GB+ of resident
+        // memory on Mozc-enabled devices; the Kotlin path (Mozc OFF) is unchanged.
+        val mozcEnabled = getSharedPreferences("nacre_mozc", MODE_PRIVATE).getBoolean("enabled", false)
+
         // Check LLM server availability (non-blocking)
-        inputEngine.llmReranker.checkServer()
+        if (!mozcEnabled) inputEngine.llmReranker.checkServer()
 
         // Personal default: keep compact KenLM and the default local LLM
         // provisioning in the background. Actual model loading stays below and
@@ -145,8 +159,12 @@ class NacreInputMethodService :
                 inputEngine.refreshPredictionsIfNeeded()
             }
 
-            // Load KenLM model: prefer full 5-gram (sideloaded), fall back to bundled compact model
-            try {
+            // Load KenLM model: prefer full 5-gram (sideloaded), fall back to bundled compact model.
+            // Skipped when native Mozc is active — Mozc does its own scoring, so loading the
+            // 560MB 5-gram into the IME process would just sit there wasting RAM.
+            if (mozcEnabled) {
+                android.util.Log.i("NacreIME", "Mozc native active — skipping KenLM load (saves ~560MB)")
+            } else try {
                 val modelsDir = java.io.File(filesDir, "models")
                 modelsDir.mkdirs()
                 val fullModel = java.io.File(modelsDir, "japanese-5gram.klm")
@@ -296,6 +314,15 @@ class NacreInputMethodService :
         }
         // Reload theme & config each time keyboard appears (picks up settings changes)
         currentTheme = space.manus.nacre.config.ThemeProvider.loadSelectedTheme(this)
+        // The input view is cached, so force KeyboardScreen to re-pick its layout — this
+        // is what makes a "12キー入力" / sub-display toggle apply on the next keyboard open.
+        layoutEpoch.value++
+        // Pick up 単語登録 edits made in the Settings screen (same prefs, separate object).
+        val udPrefs = getSharedPreferences("nacre_user_dict", android.content.Context.MODE_PRIVATE)
+        if (udPrefs.getBoolean("dirty", false)) {
+            inputEngine.reloadUserDictionary()
+            udPrefs.edit().putBoolean("dirty", false).apply()
+        }
         inputEngine.onStartInput(info)
     }
 

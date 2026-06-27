@@ -347,8 +347,23 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     // --- DictionaryProvider implementation ---
 
+    // #13 native Mozc engine — lazily created on first use, gated by a setting.
+    private val mozcEngine by lazy { NacreMozcEngine(context) }
+
+    // Public so the input engine + service can skip the now-redundant Kotlin-engine
+    // helpers (KenLM 5-gram rescoring, the local-LLM reranker) when native Mozc is the
+    // active conversion path — Mozc never consults them, so loading/running them just
+    // wastes ~560MB (KenLM) + per-keystroke LLM calls.
+    fun useMozcNative(): Boolean =
+        context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
+            .getBoolean("enabled", false)
+
     override fun convert(kana: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
+
+        // #13: Mozc is intentionally NOT called here — convert() runs on the main thread
+        // (explicit 変換), and Mozc's per-char JNI batch would risk an ANR. Mozc drives the
+        // live candidate bar via predict() (background thread) instead. (Agent review B1.)
 
         val results = mutableListOf<ConversionCandidate>()
         val seen = mutableSetOf<String>()
@@ -477,6 +492,14 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
+
+        // #13: native Mozc drives the live candidate bar (off the main thread — predict()
+        // is dispatched on Dispatchers.Default). Prefer the raw romaji buffer (ASCII → the
+        // romaji table composes kana); fall back to the kana reading via AS_IS.
+        if (useMozcNative()) {
+            val mozc = mozcEngine.convert(romaji.ifBlank { kana })
+            if (mozc.isNotEmpty()) return mozc
+        }
 
         val results = mutableListOf<ConversionCandidate>()
         val seen = mutableSetOf<String>()
@@ -2182,7 +2205,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
      * @param surface the kanji/text surface form
      * @param comment optional memo
      */
-    fun registerUserWord(reading: String, surface: String, comment: String = "") {
+    fun registerUserWord(readingRaw: String, surfaceRaw: String, comment: String = "") {
+        // Strip the \t / \n that delimit the flat-file format — a multi-line surface
+        // (e.g. a pasted address) would otherwise split/corrupt other entries.
+        val reading = readingRaw.replace('\t', ' ').replace('\n', ' ').trim()
+        val surface = surfaceRaw.replace('\t', ' ').replace('\n', ' ').trim()
+        if (reading.isEmpty() || surface.isEmpty()) return
         val entries = userDictionary.getOrPut(reading) { mutableListOf() }
         if (entries.none { it.surface == surface }) {
             entries.add(UserDictEntry(reading, surface, comment))
@@ -2203,6 +2231,21 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         if (userDictionary[reading]?.isEmpty() == true) userDictionary.remove(reading)
         dict[reading]?.removeAll { it.surface == surface && it.cost == 500 }
         saveUserDictionary()
+    }
+
+    /** All registered user words (sorted by reading), for the 単語登録 management UI. */
+    fun listUserWords(): List<UserDictEntry> =
+        userDictionary.values.flatten().sortedBy { it.reading }
+
+    /**
+     * Re-read the user dictionary from prefs and re-inject into the live dict.
+     * Lets edits made in the Settings screen (same prefs) take effect on the next
+     * keyboard open without an IME restart.
+     */
+    fun reloadUserDictionary() {
+        userDictionary.clear()
+        loadUserDictionary()
+        injectUserDictionary()
     }
 
     // --- Phrase memory persistence ---
