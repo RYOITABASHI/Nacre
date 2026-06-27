@@ -32,8 +32,10 @@ public final class MozcJNI {
     public static native boolean onPostLoad(String userProfileDirectoryPath, String dataFilePath);
 
     /**
-     * Evaluate a serialized {@code mozc.commands.Command} protobuf and return the
-     * serialized {@code Output}. This is the conversion entry point.
+     * Evaluate a serialized {@code mozc.commands.Command} protobuf. Returns the SAME
+     * {@code Command} re-serialized with its {@code output} field filled — NOT a bare
+     * {@code Output}. Callers must parse the result as Command and read {@code .output}.
+     * This is the conversion entry point.
      */
     public static native byte[] evalCommand(byte[] command);
 

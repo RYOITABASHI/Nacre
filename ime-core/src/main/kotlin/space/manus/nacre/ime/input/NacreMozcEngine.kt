@@ -174,7 +174,11 @@ class NacreMozcEngine(private val context: Context) {
     private fun eval(input: Input.Builder): Output? {
         val command = Command.newBuilder().setInput(input.build()).build()
         val bytes = MozcJNI.evalCommand(command.toByteArray()) ?: return null
-        return Output.parseFrom(bytes)
+        // Mozc JNI returns the full Command (with `output` filled), NOT a bare Output.
+        // Parsing the bytes as Output silently drops everything (wrong wire layout) →
+        // empty preedit / 0 candidates / sessionId=0. Read Command.output instead.
+        val response = Command.parseFrom(bytes)
+        return if (response.hasOutput()) response.output else null
     }
 
     companion object {
