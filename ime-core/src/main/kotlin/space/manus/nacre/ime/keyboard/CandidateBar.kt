@@ -83,7 +83,8 @@ fun CandidateBar(
                     detectTapGestures {
                         android.util.Log.i("NacreMic", "mic TAP detected, isListening=${service.voiceInputManager.isListening}")
                         if (service.voiceInputManager.isListening) {
-                            service.voiceInputManager.cancel()
+                            // Second tap = finalize & commit the transcription (NOT cancel/discard).
+                            service.voiceInputManager.stopListening()
                         } else {
                             val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
                             service.voiceInputManager.startListening(lang)
