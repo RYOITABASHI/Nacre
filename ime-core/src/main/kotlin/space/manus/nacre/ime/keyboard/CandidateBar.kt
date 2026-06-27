@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -79,7 +80,7 @@ fun CandidateBar(
                 .fillMaxHeight()
                 .width(44.dp)
                 .pointerInput(Unit) {
-                    androidx.compose.foundation.gestures.detectTapGestures {
+                    detectTapGestures {
                         android.util.Log.i("NacreMic", "mic TAP detected, isListening=${service.voiceInputManager.isListening}")
                         if (service.voiceInputManager.isListening) {
                             service.voiceInputManager.cancel()
