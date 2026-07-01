@@ -141,16 +141,28 @@ class NacreMozcEngine(private val context: Context) {
                         .setKey(key),
                 )
             }
-            // SPACE converts → full candidate list lands in all_candidate_words.
+            // SPACE runs a full CONVERT over the whole reading.
             val outSp = eval(
                 Input.newBuilder()
                     .setType(Input.CommandType.SEND_KEY)
                     .setId(sessionId)
                     .setKey(KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE)),
             )
-            val all = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
-            val win = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
-            val values = (all + win).filter { it.isNotEmpty() }.distinct()
+            // After CONVERT, `preedit` holds EVERY bunsetsu segment (記者の｜記者が｜汽車で｜帰社した)
+            // while `all_candidate_words` holds alternatives for the FOCUSED (first) segment only.
+            // The candidate bar commits a candidate wholesale (replacing the whole reading), so a
+            // bare first-segment candidate would drop the rest of the sentence (bug: "以降の文が消える").
+            // Rebuild each candidate as (first-segment alternative + the already-converted remaining
+            // segments) → every candidate is a full-length conversion of the entire reading.
+            val segs = outSp?.preedit?.segmentList.orEmpty().map { it.value }
+            val rest = if (segs.size > 1) segs.drop(1).joinToString("") else ""
+            val fullConversion = segs.joinToString("")
+            val firstAlts = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
+                .filter { it.isNotEmpty() }
+            val values = buildList {
+                if (fullConversion.isNotEmpty()) add(fullConversion)
+                firstAlts.forEach { alt -> add(alt + rest) }
+            }.filter { it.isNotEmpty() }.distinct()
             sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
             values.map { ConversionCandidate(surface = it, reading = input) }
         } catch (e: Throwable) {
