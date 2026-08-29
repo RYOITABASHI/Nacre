@@ -28,6 +28,20 @@ data class ProcessResult(
 )
 
 /**
+ * Result of [PostProcessor.checkRetroactiveCorrection].
+ *
+ * @property correctedText The self-correction-resolved text. Callers should always
+ *   use this instead of the raw partial for downstream processing (streaming commit,
+ *   display, etc.) — even when [mustRetract] is false, this may already differ from
+ *   the raw input if a correction cue was found but nothing had been committed yet.
+ * @property mustRetract True when [correctedText] no longer starts with the text
+ *   already flushed to the input field, meaning the caller must delete that
+ *   already-committed prefix before continuing (Typeless-style retroactive fix of
+ *   an earlier partial commit).
+ */
+data class CorrectionCheck(val correctedText: String, val mustRetract: Boolean)
+
+/**
  * Production-quality post-processor for Whisper speech-to-text output.
  *
  * Handles:
@@ -483,6 +497,35 @@ class PostProcessor {
         }
 
         return result
+    }
+
+    // ════════════════════════════════════════════════════
+    //  Streaming retroactive correction
+    // ════════════════════════════════════════════════════
+
+    /**
+     * Typeless-style retroactive correction for streaming partial-commit.
+     *
+     * Continuous recognizers (SpeechRecognizer/Whisper) may commit a *stable
+     * prefix* of a partial result to the input field before the utterance is
+     * finished (see `VoiceInputManager.tryStreamingCommit`). If the speaker then
+     * self-corrects ("火曜日じゃなくて水曜日"), the already-committed prefix
+     * ("火曜日") can become stale. This resolves the correction in [rawPartial]
+     * and tells the caller whether [alreadyCommitted] — the prefix of a previous
+     * partial already flushed to the input field — needs to be retracted.
+     *
+     * Must be called on every partial result (not just once), since the
+     * correction cue may only become resolvable once the replacement word has
+     * actually been spoken.
+     *
+     * @param rawPartial The latest partial/final ASR text for the current utterance.
+     * @param alreadyCommitted The exact text already committed to the input field
+     *   for this utterance via streaming partial-commit (empty if none yet).
+     */
+    fun checkRetroactiveCorrection(rawPartial: String, alreadyCommitted: String): CorrectionCheck {
+        val corrected = resolveCorrections(rawPartial)
+        val mustRetract = alreadyCommitted.isNotEmpty() && !corrected.startsWith(alreadyCommitted)
+        return CorrectionCheck(correctedText = corrected, mustRetract = mustRetract)
     }
 
     // ════════════════════════════════════════════════════

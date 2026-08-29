@@ -73,9 +73,16 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     @Volatile private var isWhisperContinuousMode = false
     private var audioFocusRequest: android.media.AudioFocusRequest? = null
 
-    // LLM post-processing (local Gemma/Qwen via isolated LlmService over AIDL)
+    // LLM post-processing (local Qwen via isolated LlmService over AIDL)
     @Volatile private var llmService: ILlmService? = null
     @Volatile private var llmBound = false
+
+    // Deterministic, instant (no LLM round-trip) post-processing: hallucination
+    // filtering and self-correction ("じゃなくて" / "no wait") resolution. Runs
+    // before quickClean/LLM refinement on every recognition path so disfluency
+    // cleanup doesn't depend on a slow/unavailable LLM (Typeless does this
+    // client-side too). Stateless — safe to share across utterances.
+    private val postProcessor = space.manus.nacre.ai.PostProcessor()
 
     private val whisperConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: android.content.ComponentName?, binder: android.os.IBinder?) {
@@ -158,7 +165,8 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     if (!svc.isModelLoaded) {
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
-                        // Gemma 4 is the default; Qwen is still accepted as a legacy fallback.
+                        // Qwen 2.5 1.5B is the default (Gemma 4 E2B was retired: it never
+                        // loads on the pinned llama.cpp b3500 — see ModelDownloader).
                         val modelPaths = downloader.getPreferredLlmModelPaths()
                         if (modelPaths.isNotEmpty()) {
                             var loadedPath: String? = null
@@ -181,7 +189,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                             writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
                         } else {
                             downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
-                            writeDiagnostic("llmConnection: LLM model not found — Gemma 4 download requested, refinement disabled for this session")
+                            writeDiagnostic("llmConnection: LLM model not found — Qwen 2.5 1.5B download requested, refinement disabled for this session")
                             return@Thread
                         }
                     } else {
@@ -230,14 +238,21 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 rmsLevel = 0f
                 releaseAudioFocus()
 
-                if (text.isNotBlank()) {
-                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(text)
+                if (text.isBlank()) {
+                    writeDiagnostic("whisperCallback.onResult: text is BLANK, skipping")
+                } else if (postProcessor.isHallucination(text)) {
+                    // SenseVoice/whisper-style ASR can hallucinate a whole utterance
+                    // during silence (e.g. "ご視聴ありがとうございました") — never commit it.
+                    writeDiagnostic("whisperCallback.onResult: HALLUCINATION filtered, discarding: '${text.take(80)}'")
+                } else {
+                    // Deterministic self-correction resolution before quickClean/LLM —
+                    // instant, and doesn't depend on the LLM refiner being available.
+                    val corrected = postProcessor.resolveCorrections(text)
+                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(corrected)
                     writeDiagnostic("whisperCallback.onResult: quickClean='${cleaned.take(80)}'")
                     service.currentInputConnection?.commitText(cleaned, 1)
                     // Stage 2: LLM refinement in background, replace quickClean result if better
                     tryLlmRefinement(cleaned)
-                } else {
-                    writeDiagnostic("whisperCallback.onResult: text is BLANK, skipping")
                 }
             }
         }
@@ -1117,26 +1132,46 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         }
 
         override fun onResults(results: Bundle?) {
-            val text = selectBestResult(results)
-            writeDiagnostic("SpeechRecognizer.onResults: text='${text.take(80)}' (${text.length} chars)")
+            val rawText = selectBestResult(results)
+            writeDiagnostic("SpeechRecognizer.onResults: text='${rawText.take(80)}' (${rawText.length} chars)")
 
-            if (text.isNotEmpty()) {
-                val asciiRatio = text.count { it.code in 0x20..0x7E }.toFloat() / text.length
+            if (rawText.isEmpty()) {
+                writeDiagnostic("SpeechRecognizer.onResults: EMPTY text, skipping")
+            } else if (postProcessor.isHallucination(rawText)) {
+                // Known ASR hallucination (e.g. "ご視聴ありがとうございました" during
+                // silence, or a stuck repetition loop) — discard instead of committing.
+                writeDiagnostic("SpeechRecognizer.onResults: HALLUCINATION filtered, discarding: '${rawText.take(80)}'")
+            } else {
+                // Deterministic self-correction resolution ("火曜日じゃなくて水曜日"
+                // → "水曜日") before anything else — instant, no LLM round-trip needed.
+                val text = postProcessor.resolveCorrections(rawText)
+                val asciiRatio = if (text.isEmpty()) 0f else {
+                    text.count { it.code in 0x20..0x7E }.toFloat() / text.length
+                }
                 currentLanguage = if (asciiRatio > 0.7f) "en-US" else "ja-JP"
 
-                val converted = convertVoiceCommands(text)
-                val spaced = addUtteranceSpacing(converted)
-                val withCommas = insertMidSentenceCommas(spaced)
-                val processed = smartPunctuation(withCommas)
+                // Streaming partial-commit may have already flushed a stable prefix
+                // of this same utterance to the input field (tryStreamingCommit).
+                // Only commit what's left, or this final result would duplicate it.
+                val remainder = if (lastCommittedPartial.isNotEmpty() && text.startsWith(lastCommittedPartial)) {
+                    text.substring(lastCommittedPartial.length)
+                } else {
+                    text
+                }
 
-                val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(processed)
-                service.currentInputConnection?.commitText(cleaned, 1)
-                committedInSession.append(cleaned)
-                // Stage 2: LLM refinement in background
-                tryLlmRefinement(cleaned)
+                if (remainder.isNotBlank()) {
+                    val converted = convertVoiceCommands(remainder)
+                    val spaced = addUtteranceSpacing(converted)
+                    val withCommas = insertMidSentenceCommas(spaced)
+                    val processed = smartPunctuation(withCommas)
+
+                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(processed)
+                    service.currentInputConnection?.commitText(cleaned, 1)
+                    committedInSession.append(cleaned)
+                    // Stage 2: LLM refinement in background
+                    tryLlmRefinement(cleaned)
+                }
                 utteranceCount++
-            } else {
-                writeDiagnostic("SpeechRecognizer.onResults: EMPTY text, skipping")
             }
 
             rmsLevel = 0f
@@ -1156,7 +1191,26 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
-            val text = selectBestResult(partialResults)
+            val rawText = selectBestResult(partialResults)
+            if (rawText.isBlank()) return
+
+            // Typeless-style retroactive correction: resolve any self-correction
+            // cue in this partial ("火曜日じゃなくて水曜日" → "水曜日"). If the
+            // corrected text no longer starts with what streaming partial-commit
+            // already flushed to the input field, that already-committed prefix
+            // is now stale — retract it before continuing.
+            val check = postProcessor.checkRetroactiveCorrection(rawText, lastCommittedPartial)
+            if (check.mustRetract) {
+                service.currentInputConnection?.deleteSurroundingText(lastCommittedPartial.length, 0)
+                if (committedInSession.length >= lastCommittedPartial.length) {
+                    committedInSession.setLength(committedInSession.length - lastCommittedPartial.length)
+                }
+                writeDiagnostic("onPartialResults: retracted stale committed prefix (${lastCommittedPartial.length} chars) after self-correction")
+                lastCommittedPartial = ""
+                partialStableCount = 0
+                lastPartialText = ""
+            }
+            val text = check.correctedText
             if (text.isBlank()) return
 
             // Keep the latest partial visible in the UI and try to commit only

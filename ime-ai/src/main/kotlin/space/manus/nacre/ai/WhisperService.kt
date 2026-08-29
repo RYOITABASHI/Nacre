@@ -40,6 +40,12 @@ class WhisperService : Service() {
 
     private var sherpaRecognizer: SherpaRecognizer? = null
 
+    // Deterministic hallucination filtering for individual ASR segments. Cheap,
+    // stateless, and catches known SenseVoice/whisper-style artifacts (e.g. the
+    // model transcribing silence as "ご視聴ありがとうございました") before they
+    // ever reach the text buffer that gets committed via IWhisperCallback.
+    private val postProcessor = PostProcessor()
+
     private val binder = object : IWhisperService.Stub() {
 
         override fun isModelLoaded(): Boolean {
@@ -106,7 +112,9 @@ class WhisperService : Service() {
                     val results = rec.processAudio(audioData)
                     val flushed = rec.flush()
                     rec.reset()
-                    val text = (results + flushed).joinToString("")
+                    val text = (results + flushed)
+                        .filterNot { postProcessor.isHallucination(it) }
+                        .joinToString("")
                     withContext(Dispatchers.Main) {
                         try { callback?.onResult(text) } catch (_: RemoteException) {}
                     }
@@ -249,15 +257,23 @@ class WhisperService : Service() {
                         val segments = rec.processAudio(samples)
 
                         if (segments.isNotEmpty()) {
+                            var appendedAny = false
                             for (text in segments) {
+                                if (postProcessor.isHallucination(text)) {
+                                    writeDiag("Segment DISCARDED as hallucination: '${text.take(60)}'")
+                                    continue
+                                }
                                 textBuffer.append(text)
+                                appendedAny = true
                             }
-                            writeDiag("Segment detected: '${textBuffer}' (totalReads=$totalReads)")
-                            try {
-                                continuousCallback?.onPartialResult(textBuffer.toString())
-                            } catch (_: RemoteException) {
-                                Log.w(TAG, "Partial result callback failed, stopping")
-                                break
+                            if (appendedAny) {
+                                writeDiag("Segment detected: '${textBuffer}' (totalReads=$totalReads)")
+                                try {
+                                    continuousCallback?.onPartialResult(textBuffer.toString())
+                                } catch (_: RemoteException) {
+                                    Log.w(TAG, "Partial result callback failed, stopping")
+                                    break
+                                }
                             }
                         }
                     }

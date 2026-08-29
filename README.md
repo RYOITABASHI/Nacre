@@ -12,7 +12,7 @@ Current release: **0.2.0**
 - **Mozc dictionary** for Japanese conversion with Viterbi, phrase memory, mobile/developer vocabulary, and optional KenLM reranking
 - **KenLM model support** with compact 3-gram auto-provisioning and full 5-gram in-app download; full 5-gram is preferred when installed
 - **Voice input** with continuous recognition, smarter partial commit boundaries, and local/cloud post-processing fallback
-- **Local LLM cleanup** defaults to Gemma 4 E2B GGUF, with legacy Qwen 2.5 fallback if present
+- **Local LLM cleanup** defaults to Qwen 2.5 1.5B GGUF (Gemma 4 E2B was retired — it never loads on the pinned llama.cpp b3500 build)
 - **English autocomplete** with frequency-based prediction
 - **Developer shortcuts** including Ctrl+key combos, tab key, escape, and macro triggers
 - **Emoji picker** and symbol candidate bar with alternatives
@@ -29,6 +29,7 @@ Current release: **0.2.0**
 - Added automatic background provisioning for compact KenLM and the default local LLM.
 - Switched the default local LLM model path to Gemma 4 E2B, while keeping Qwen as a fallback.
 - Moved model discovery off the settings UI path to avoid black-screen startup stalls.
+- **Follow-up correction**: on-device diagnostics showed Gemma 4 E2B (~3GB) never actually loads — the pinned llama.cpp b3500 doesn't understand its architecture and it times out every session, silently disabling dictation refinement. Reverted the default back to Qwen 2.5 1.5B (Qwen2-arch, loads fine on b3500, ~1.0GB) and now actively delete any stray Gemma 4 GGUF found on disk. See `ModelDownloader.kt` (`e1f8e38`).
 
 ## Architecture
 
@@ -47,8 +48,8 @@ Nacre does not bundle large models in the APK. The settings screen can download 
 |---|---|---|
 | KenLM 3-gram compact (`japanese-compact.klm`) | Lightweight Japanese conversion reranking | Auto-provisioned in the background |
 | KenLM 5-gram full (`japanese-5gram.klm`) | Higher-quality Japanese conversion reranking | Downloadable from Settings; preferred over compact when present |
-| Gemma 4 E2B GGUF (`gemma-4-E2B-it-Q4_K_M.gguf`) | Local voice-input cleanup and text transformation | Auto-provisioned in the background |
-| Qwen 2.5 1.5B GGUF | Legacy local LLM fallback | Used only if present and Gemma is unavailable/unloadable |
+| Qwen 2.5 1.5B GGUF (`qwen2.5-1.5b-instruct-q4_k_m.gguf`) | Local voice-input cleanup and text transformation | Auto-provisioned in the background (default) |
+| Gemma 4 E2B GGUF | Retired — cannot load on the pinned llama.cpp b3500 | Not downloaded; any stray copy on disk is deleted automatically |
 | SenseVoice + Silero VAD | Offline speech recognition | Auto-discovered from app/external model locations |
 
 ## Build

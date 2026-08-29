@@ -943,4 +943,55 @@ class PostProcessorTest {
             LlmPostProcessor.quickClean("制度？当点言い間違い。補正？要約について精度を上げてください。"),
         )
     }
+
+    // ══════════════════════════════════════════════════════
+    //  17. Streaming retroactive correction
+    // ══════════════════════════════════════════════════════
+
+    @Test
+    fun `checkRetroactiveCorrection does not retract when no correction cue present`() {
+        val result = processor.checkRetroactiveCorrection("今日は天気が", "今日は")
+        assertEquals("今日は天気が", result.correctedText)
+        assertFalse(result.mustRetract)
+    }
+
+    @Test
+    fun `checkRetroactiveCorrection retracts when correction discards committed prefix`() {
+        // "火曜日" was already streamed to the input field; the speaker then
+        // corrects to "水曜日" — the committed "火曜日" is now stale.
+        val result = processor.checkRetroactiveCorrection("火曜日じゃなくて水曜日", "火曜日")
+        assertEquals("水曜日", result.correctedText)
+        assertTrue(result.mustRetract)
+    }
+
+    @Test
+    fun `checkRetroactiveCorrection resolves correction without retracting when nothing committed yet`() {
+        val result = processor.checkRetroactiveCorrection("火曜日じゃなくて水曜日", "")
+        assertEquals("水曜日", result.correctedText)
+        assertFalse(result.mustRetract)
+    }
+
+    @Test
+    fun `checkRetroactiveCorrection handles English self-correction`() {
+        val result = processor.checkRetroactiveCorrection("Tuesday no wait Wednesday", "Tuesday")
+        assertEquals("Wednesday", result.correctedText)
+        assertTrue(result.mustRetract)
+    }
+
+    @Test
+    fun `checkRetroactiveCorrection does not retract when corrected text still extends committed prefix`() {
+        val result = processor.checkRetroactiveCorrection("今日は忙しいです", "今日は")
+        assertEquals("今日は忙しいです", result.correctedText)
+        assertFalse(result.mustRetract)
+    }
+
+    @Test
+    fun `checkRetroactiveCorrection handles chained corrections against committed prefix`() {
+        val result = processor.checkRetroactiveCorrection(
+            "火曜日じゃなくて水曜日じゃなくて木曜日",
+            "火曜日",
+        )
+        assertEquals("木曜日", result.correctedText)
+        assertTrue(result.mustRetract)
+    }
 }
