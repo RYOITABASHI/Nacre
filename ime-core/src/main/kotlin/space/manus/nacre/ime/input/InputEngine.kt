@@ -22,6 +22,86 @@ import space.manus.nacre.ime.NacreInputMethodService
 private val CTRL_PATTERN = Regex("^C-([a-zA-Z])$")
 private val DIRECT_TOKEN_CONTEXT = Regex("(^|[\\s\\n\\t])[@#/][A-Za-z0-9._-]*$")
 
+/**
+ * What pressing Enter should do, decided purely from the focused field's own
+ * properties (never from which keyboard layer happens to be active).
+ */
+internal sealed class EnterOutcome {
+    /** Field requests a concrete action (send/search/go/done/next) — honor it. */
+    data class PerformEditorAction(val imeAction: Int) : EnterOutcome()
+
+    /** Single-line field with no actionable IME option — send a literal Enter keycode. */
+    object SendEnterKey : EnterOutcome()
+
+    /** Genuinely multi-line field (chat/note compose boxes) — insert "\n". */
+    object InsertNewline : EnterOutcome()
+}
+
+/**
+ * Standard Gboard-style Enter heuristic: key off [EditorInfo.inputType]'s
+ * TYPE_TEXT_FLAG_MULTI_LINE flag (and IME_FLAG_NO_ENTER_ACTION), not off the
+ * keyboard's current layer. A multi-line field (Slack/Notion/chat compose boxes
+ * are flagged this way even when they also wire a dedicated send button via
+ * IME_ACTION_SEND) defaults to inserting a newline; any other field honors its
+ * requested editor action, falling back to a raw Enter keycode only when the
+ * field has no actionable IME option.
+ *
+ * Pure function — no Android object method calls — so it is directly unit
+ * testable on the JVM without Robolectric/instrumentation.
+ */
+internal fun computeEnterOutcome(imeOptions: Int, inputType: Int): EnterOutcome {
+    val inputClass = inputType and InputType.TYPE_MASK_CLASS
+    val isMultiLine = inputClass == InputType.TYPE_CLASS_TEXT &&
+        (inputType and InputType.TYPE_TEXT_FLAG_MULTI_LINE) != 0
+    if (isMultiLine) return EnterOutcome.InsertNewline
+
+    val noEnterAction = imeOptions and EditorInfo.IME_FLAG_NO_ENTER_ACTION != 0
+    if (!noEnterAction) {
+        val imeAction = imeOptions and EditorInfo.IME_MASK_ACTION
+        when (imeAction) {
+            EditorInfo.IME_ACTION_SEND,
+            EditorInfo.IME_ACTION_SEARCH,
+            EditorInfo.IME_ACTION_GO,
+            EditorInfo.IME_ACTION_DONE,
+            EditorInfo.IME_ACTION_NEXT,
+            -> return EnterOutcome.PerformEditorAction(imeAction)
+        }
+    }
+    return EnterOutcome.SendEnterKey
+}
+
+/**
+ * Resolve the text to commit for an in-progress English composing buffer: the
+ * selected (or top) predicted candidate — but ONLY if that candidate was
+ * actually computed for the CURRENT composing prefix.
+ *
+ * English prediction is debounced ~30ms on a background coroutine, so the
+ * candidate list can still hold predictions for an earlier, shorter (or
+ * differently-cased) prefix at the exact instant Space/punctuation is pressed
+ * right after a letter — e.g. typing "cat" quickly and hitting Space before
+ * the debounce for the final "t" has resolved can otherwise silently commit a
+ * leftover suggestion like "car" instead of "cat". [ConversionCandidate.reading]
+ * records the exact prefix a candidate was generated for, so comparing it
+ * against the live buffer closes the race; a mismatch (stale, or no
+ * candidates yet) falls back to the literal typed text.
+ *
+ * Pure function over [ConversionCandidate] (itself plain Kotlin, no Android
+ * dependency) — directly unit testable on the JVM.
+ */
+internal fun pickEnglishCommitText(
+    composing: String,
+    candidates: List<ConversionCandidate>,
+    selectedIndex: Int,
+): String {
+    val candidate = selectedIndex.takeIf { it in candidates.indices }?.let { candidates[it] }
+        ?: candidates.firstOrNull()
+    return if (candidate != null && candidate.reading.equals(composing, ignoreCase = true)) {
+        candidate.surface
+    } else {
+        composing
+    }
+}
+
 class InputEngine(private val service: NacreInputMethodService) {
 
     private val scope = MainScope()
@@ -304,15 +384,9 @@ class InputEngine(private val service: NacreInputMethodService) {
                     } else {
                         // Non-letter (space, punctuation, digit): commit composing + the char
                         if (englishComposing.isNotEmpty()) {
-                            // If a candidate is selected, commit that; otherwise commit raw text
-                            if (selectedCandidateIndex >= 0 && candidates.isNotEmpty()) {
-                                val selected = candidates[selectedCandidateIndex]
-                                ic.commitText(selected.surface, 1)
-                                dictionary?.recordEnglishSelection(selected.surface)
-                            } else {
-                                ic.commitText(englishComposing, 1)
-                                dictionary?.recordEnglishSelection(englishComposing)
-                            }
+                            val toCommit = resolveEnglishCommitText()
+                            ic.commitText(toCommit, 1)
+                            dictionary?.recordEnglishSelection(toCommit)
                             englishComposing = ""
                             candidates.clear()
                             selectedCandidateIndex = -1
@@ -382,13 +456,14 @@ class InputEngine(private val service: NacreInputMethodService) {
                     englishComposing = ""
                     clearCandidates()
                 } else {
+                    // Decide send-action vs newline from the focused field's own
+                    // properties (multi-line flag / IME options), not from which
+                    // keyboard layer happens to be active — see computeEnterOutcome.
+                    // This still avoids accidental sends in Slack/Notion/web CLIs
+                    // because those compose boxes are themselves flagged multi-line.
+                    performEditorActionOrEnter(ic)
                     if (service.layerManager.currentLayer != Layer.Base) {
-                        performEditorActionOrEnter(ic)
                         service.layerManager.resetToBase()
-                    } else {
-                        // Chat/note first behavior: avoid accidental send in Slack,
-                        // Notion, web CLIs, and similar multiline text boxes.
-                        commitNewline(ic)
                     }
                 }
             }
@@ -417,15 +492,9 @@ class InputEngine(private val service: NacreInputMethodService) {
                     }
                 } else if (englishComposing.isNotEmpty()) {
                     // English: space commits the top candidate (or raw text) + space
-                    if (candidates.isNotEmpty()) {
-                        val best = if (selectedCandidateIndex >= 0) candidates[selectedCandidateIndex]
-                                   else candidates[0]
-                        ic.commitText(best.surface + " ", 1)
-                        dictionary?.recordEnglishSelection(best.surface)
-                    } else {
-                        ic.commitText(englishComposing + " ", 1)
-                        dictionary?.recordEnglishSelection(englishComposing)
-                    }
+                    val toCommit = resolveEnglishCommitText()
+                    ic.commitText(toCommit + " ", 1)
+                    dictionary?.recordEnglishSelection(toCommit)
                     englishComposing = ""
                     clearCandidates()
                 } else {
@@ -481,8 +550,11 @@ class InputEngine(private val service: NacreInputMethodService) {
                 if (englishComposing.isNotEmpty()) {
                     ic.commitText(englishComposing, 1)
                     englishComposing = ""
-                    clearCandidates()
                 }
+                // Always clear any leftover candidate bar (e.g. Japanese punctuation
+                // alternatives from symbolReplace) so it doesn't visually linger into
+                // the other language's typing session — see clearCandidates().
+                clearCandidates()
                 japaneseEngine.reset()
                 service.layerManager.toggleJapanese()
             }
@@ -791,6 +863,10 @@ class InputEngine(private val service: NacreInputMethodService) {
         }
     }
 
+    /** See [pickEnglishCommitText] for why this is more than `englishComposing`. */
+    private fun resolveEnglishCommitText(): String =
+        pickEnglishCommitText(englishComposing, candidates, selectedCandidateIndex)
+
     /**
      * Show next-word predictions based on recently committed context.
      * Uses bigram/trigram history to suggest likely follow-up words.
@@ -966,15 +1042,11 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun performEditorActionOrEnter(ic: InputConnection) {
-        val opts = editorInfo?.imeOptions ?: 0
-        val imeAction = opts and EditorInfo.IME_MASK_ACTION
-        when (imeAction) {
-            EditorInfo.IME_ACTION_SEND,
-            EditorInfo.IME_ACTION_SEARCH,
-            EditorInfo.IME_ACTION_GO,
-            EditorInfo.IME_ACTION_DONE,
-            EditorInfo.IME_ACTION_NEXT -> ic.performEditorAction(imeAction)
-            else -> sendKeyEvent(KeyEvent.KEYCODE_ENTER)
+        val ei = editorInfo
+        when (val outcome = computeEnterOutcome(ei?.imeOptions ?: 0, ei?.inputType ?: 0)) {
+            is EnterOutcome.PerformEditorAction -> ic.performEditorAction(outcome.imeAction)
+            EnterOutcome.SendEnterKey -> sendKeyEvent(KeyEvent.KEYCODE_ENTER)
+            EnterOutcome.InsertNewline -> commitNewline(ic)
         }
     }
 

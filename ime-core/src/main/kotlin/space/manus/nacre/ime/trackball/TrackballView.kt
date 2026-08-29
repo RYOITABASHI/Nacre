@@ -171,11 +171,12 @@ fun TrackballView(
                                 service.feedbackManager.onKeyPress(
                                     space.manus.nacre.config.KeyAction.Enter,
                                 )
-                                val ic = service.currentInputConnection
-                                if (ic != null) {
-                                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ENTER))
-                                    ic.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_ENTER))
-                                }
+                                // Route through InputEngine like the main keyboard's Enter key
+                                // (not a raw sendKeyEvent) so pending Japanese/English composing
+                                // text and candidates are flushed first, and the field's own
+                                // IME action / multi-line flag is honored consistently — see
+                                // InputEngine.computeEnterOutcome.
+                                service.inputEngine.processAction(space.manus.nacre.config.KeyAction.Enter)
                             }
                         }
                     }
