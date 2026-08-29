@@ -1126,9 +1126,15 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
-     * Apply dakuten/handakuten/small to the last kana.
-     * When type is Dakuten (tap), cycles: base → dakuten → handakuten → small → base
-     * e.g. は→ば→ぱ→は, つ→づ→っ→つ
+     * Direct-jump variant of the last kana, used by the ゛゜ key's explicit
+     * left/right flicks (iOS: flick left = dakuten, flick right = handakuten —
+     * both are just faster alternates to 1 tap / 2 taps of [processFlickDakutenCycle],
+     * not a separate cycle). [DakutenType.Small] is kept for API completeness but
+     * is not reachable from the ゛゜ key's flick gestures — small forms are only
+     * reached via the tap cycle, matching iOS (no key has a dedicated "small" flick).
+     * Falls back to whichever transform IS available if the requested one doesn't
+     * apply to lastChar (e.g. left-flick/dakuten on や, which has no dakuten form,
+     * still produces ゃ instead of doing nothing).
      */
     fun processFlickDakuten(type: DakutenType) {
         if (composingFlickKana.isEmpty()) return
@@ -1136,12 +1142,10 @@ class InputEngine(private val service: NacreInputMethodService) {
         val lastChar = composingFlickKana.last()
 
         val replaced = when (type) {
-            DakutenType.Dakuten -> {
-                // Tap: cycle through dakuten → handakuten → small → base
+            DakutenType.Dakuten ->
                 FlickEngine.applyDakuten(lastChar)
                     ?: FlickEngine.applyHandakuten(lastChar)
                     ?: FlickEngine.applySmall(lastChar)
-            }
             DakutenType.Handakuten -> FlickEngine.applyHandakuten(lastChar)
             DakutenType.Small -> FlickEngine.applySmall(lastChar)
         } ?: return

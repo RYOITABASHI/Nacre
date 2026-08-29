@@ -145,9 +145,12 @@ private fun FlickKanaGrid(
     val h = FLICK_ROW_HEIGHT.dp
     val sw = SIDE_WEIGHT
 
+    // iOS flick assignment for this key: tap=、, left=。, up=！, right=？, down=・
+    // (verified against real-device references; previously up/right were swapped
+    // and down was … instead of ・).
     val punctKey = FlickEngine.FlickKey(
         id = "punct", label = "、。",
-        tap = "、", left = "。", up = "？", right = "！", down = "…",
+        tap = "、", left = "。", up = "！", right = "？", down = "・",
         tapCycle = listOf("。", "、", "！", "？", "ー", "〜", "…", "「", "」", "・"),
     )
 
@@ -784,10 +787,15 @@ private fun FlickKeyView(
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * ゛゜小 key:
- *   Tap  → dakuten (゛)
- *   Up   → handakuten (゜)
- *   Down → small kana (小)
+ * ゛゜小 key — iOS behavior verified against real-device references:
+ * unlike the kana keys, this key has no plus-shaped 4-direction flick map.
+ *   Tap        → cycle the last kana through its variants: small → dakuten →
+ *                handakuten → base (e.g. つ→っ→づ→つ, は→ば→ぱ→は, か→が→か).
+ *   Flick left  → jump straight to dakuten (゛) — same target as one tap when
+ *                 the base form has no small variant (a faster alternate
+ *                 gesture, not a different result).
+ *   Flick right → jump straight to handakuten (゜) — same target as two taps.
+ *   Up / down   → no assigned meaning on iOS; falls back to the tap cycle.
  */
 @Composable
 private fun DakutenKeyView(
@@ -798,7 +806,7 @@ private fun DakutenKeyView(
 ) {
     var isPressed by remember { mutableStateOf(false) }
     var showPopup by remember { mutableStateOf(false) }
-    var popupLabel by remember { mutableStateOf("゛") }
+    var popupLabel by remember { mutableStateOf("゛゜") }
 
     val scale by animateFloatAsState(
         targetValue = if (isPressed) 0.95f else 1f,
@@ -858,13 +866,14 @@ private fun DakutenKeyView(
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     isPressed = true
-                    popupLabel = "゛"
+                    popupLabel = "゛゜"
                     showPopup = true
 
                     var totalX = 0f
                     var totalY = 0f
-                    // Gboard style: tap=toggle dakuten/handakuten, up=small, left=handakuten
-                    var resolved = DakutenType.Dakuten
+                    // iOS: only left/right are meaningful on this key (direct
+                    // shortcuts to dakuten / handakuten); tap, up, and down all
+                    // advance the small→dakuten→handakuten cycle below.
 
                     try {
                         while (true) {
@@ -878,17 +887,12 @@ private fun DakutenKeyView(
                                 totalX += delta.x
                                 totalY += delta.y
 
-                                resolved = when {
-                                    abs(totalX) < flickThresholdPx && abs(totalY) < flickThresholdPx ->
-                                        DakutenType.Dakuten // tap = toggle dakuten (が↔か)
-                                    totalY < -flickThresholdPx -> DakutenType.Small // up = small (つ→っ)
-                                    totalX < -flickThresholdPx -> DakutenType.Handakuten // left = handakuten (は→ぱ)
-                                    else -> DakutenType.Dakuten
-                                }
-                                popupLabel = when (resolved) {
-                                    DakutenType.Dakuten -> "゛"
-                                    DakutenType.Handakuten -> "゜"
-                                    DakutenType.Small -> "小"
+                                val isHorizontal = abs(totalX) > abs(totalY)
+                                popupLabel = when {
+                                    abs(totalX) < flickThresholdPx && abs(totalY) < flickThresholdPx -> "゛゜"
+                                    isHorizontal && totalX < -flickThresholdPx -> "゛" // left = dakuten
+                                    isHorizontal && totalX > flickThresholdPx -> "゜" // right = handakuten
+                                    else -> "゛゜" // up/down: no direct meaning, falls back to cycle
                                 }
                                 change.consume()
                             } else {
@@ -901,13 +905,16 @@ private fun DakutenKeyView(
                         showPopup = false
                     }
 
-                    // Tap (no flick) → iOS-style cycle (small first, then dakuten);
-                    // explicit up/left flicks still force small / handakuten.
-                    val isTap = abs(totalX) < flickThresholdPx && abs(totalY) < flickThresholdPx
-                    if (isTap) {
-                        service.inputEngine.processFlickDakutenCycle()
-                    } else {
-                        service.inputEngine.processFlickDakuten(resolved)
+                    val isHorizontal = abs(totalX) > abs(totalY)
+                    val isLeftFlick = isHorizontal && totalX < -flickThresholdPx
+                    val isRightFlick = isHorizontal && totalX > flickThresholdPx
+
+                    when {
+                        isLeftFlick -> service.inputEngine.processFlickDakuten(DakutenType.Dakuten)
+                        isRightFlick -> service.inputEngine.processFlickDakuten(DakutenType.Handakuten)
+                        // Tap, up-flick, or down-flick: iOS-style cycle (small first, then
+                        // dakuten, then handakuten) — this key has no up/down flick target.
+                        else -> service.inputEngine.processFlickDakutenCycle()
                     }
                     service.feedbackManager.onKeyPress(KeyAction.Text(popupLabel))
                     lighting.onKeyPress("゛", column)
