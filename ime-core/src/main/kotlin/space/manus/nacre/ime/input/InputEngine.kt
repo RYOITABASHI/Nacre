@@ -356,7 +356,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                         updateEnglishPredictions(englishComposing)
                     }
                 } else {
-                    ic.deleteSurroundingText(1, 0)
+                    deleteOneCharacterBeforeCursor(ic)
                 }
             }
 
@@ -903,6 +903,25 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
+     * Delete exactly one user-visible character immediately before the cursor,
+     * for the "nothing is being composed, just delete already-committed text"
+     * backspace case.
+     *
+     * `InputConnection.deleteSurroundingText(1, 0)` deletes ONE UTF-16 CODE
+     * UNIT, not one character. Most emoji, and any other character outside
+     * the Basic Multilingual Plane, are encoded as a surrogate PAIR (two
+     * code units). Deleting just one code unit off a surrogate pair leaves
+     * the other half behind as a lone, unpaired surrogate — invisible or
+     * rendered as a replacement glyph — which is exactly the "backspace
+     * leaves one character behind" symptom. Peek the two code units before
+     * the cursor and delete both when they form a real surrogate pair.
+     */
+    private fun deleteOneCharacterBeforeCursor(ic: InputConnection) {
+        val before = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
+        ic.deleteSurroundingText(backspaceDeleteCount(before), 0)
+    }
+
+    /**
      * Remove the last kana unit from romaji composing text.
      * Compares kana output to find how many romaji chars produce the last kana.
      * E.g. "ka" → "" (か), "kyo" → "" (きょ), "kakiko" → "kaki" (remove こ)
@@ -1209,7 +1228,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 updatePredictions(composingFlickKana)
             }
         } else {
-            ic.deleteSurroundingText(1, 0)
+            deleteOneCharacterBeforeCursor(ic)
         }
     }
 
@@ -1241,6 +1260,29 @@ class InputEngine(private val service: NacreInputMethodService) {
         val pkg = info?.packageName ?: return false
         return pkg.contains("termux") || pkg.contains("terminal") || pkg.contains("connectbot")
     }
+}
+
+/**
+ * How many UTF-16 code units a single "delete already-committed text" backspace
+ * press should remove, given the up-to-two code units immediately before the
+ * cursor. Extracted as a pure function (no InputConnection dependency) so it's
+ * unit-testable on a plain JVM, per this codebase's convention of extracting
+ * pure logic for testability (see EnglishMatcher).
+ *
+ * `InputConnection.deleteSurroundingText` counts in UTF-16 code units, not
+ * user-visible characters. A character outside the Basic Multilingual Plane
+ * (most emoji, some rare kanji) is a surrogate PAIR — two code units — so a
+ * naive "always delete 1" leaves the other half of the pair behind as a lone,
+ * unpaired surrogate (invisible or shown as a replacement glyph): the
+ * "backspace leaves one character behind" symptom. `beforeCursor` is expected
+ * to be the last up-to-2 characters before the cursor (from
+ * `getTextBeforeCursor(2, 0)`).
+ */
+internal fun backspaceDeleteCount(beforeCursor: String): Int {
+    if (beforeCursor.length < 2) return 1
+    val high = beforeCursor[beforeCursor.length - 2]
+    val low = beforeCursor[beforeCursor.length - 1]
+    return if (Character.isSurrogatePair(high, low)) 2 else 1
 }
 
 enum class SwipeDirection { Up, Down, Left, Right }
