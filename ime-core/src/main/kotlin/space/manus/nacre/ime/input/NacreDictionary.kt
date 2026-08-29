@@ -501,28 +501,14 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 30)
     }
 
-    override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
-        if (!loaded || kana.isEmpty()) return emptyList()
-
-        // #13: native Mozc drives the live candidate bar (off the main thread — predict()
-        // is dispatched on Dispatchers.Default). Prefer the raw romaji buffer (ASCII → the
-        // romaji table composes kana); fall back to the kana reading via AS_IS.
-        if (useMozcNative()) {
-            val mozc = mozcEngine.convert(romaji.ifBlank { kana })
-            if (mozc.isNotEmpty()) return mozc
-        }
-
-        val results = mutableListOf<ConversionCandidate>()
-        val seen = mutableSetOf<String>()
-
-        fun addUnique(candidates: List<ConversionCandidate>) {
-            for (c in candidates) {
-                if (seen.add(c.surface)) results.add(c)
-            }
-        }
-
-        // 0. Recent history matches (with prefix-length penalty)
-        val historyMatches = recentHistory.filter {
+    /**
+     * Recent conversion-history hits for [kana] (exact or prefix), with a length-proportional
+     * cost penalty on prefix matches so history doesn't dominate over an actually-typed longer
+     * reading. Shared by both the legacy-engine and Mozc-native branches of predict() so a
+     * recently-committed string surfaces again regardless of which conversion engine is active.
+     */
+    private fun historyMatchesFor(kana: String): List<ConversionCandidate> {
+        return recentHistory.filter {
             it.reading == kana || it.reading.startsWith(kana)
         }.map { h ->
             if (h.reading == kana) {
@@ -536,7 +522,49 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 h.copy(cost = h.cost + unmatched * perCharPenalty)
             }
         }.take(3)
-        addUnique(historyMatches)
+    }
+
+    override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
+        if (!loaded || kana.isEmpty()) return emptyList()
+
+        // #13: native Mozc drives the live candidate bar (off the main thread — predict()
+        // is dispatched on Dispatchers.Default). Prefer the raw romaji buffer (ASCII → the
+        // romaji table composes kana); fall back to the kana reading via AS_IS.
+        if (useMozcNative()) {
+            // NacreMozcEngine.convert() stamps reading = the exact string it composed with
+            // (the raw romaji buffer when typing QWERTY, since that's what's passed below) —
+            // NOT the kana reading. recordSelection() persists candidate.reading verbatim into
+            // recentHistory, so leaving it as romaji would silently break every future
+            // kana-keyed history lookup for anything typed via romaji (the common case).
+            // Normalize back to kana immediately so history storage/lookup stay consistent
+            // regardless of which raw buffer Mozc was actually driven with.
+            val mozc = mozcEngine.convert(romaji.ifBlank { kana }).map { it.copy(reading = kana) }
+            if (mozc.isNotEmpty()) {
+                // Mozc has its own (session-local) history via learn()/SUBMIT_CANDIDATE, but
+                // that never surfaces Nacre's own longer-lived recentHistory. Prepend Nacre's
+                // history hits the same way the legacy engine's own path (section 0 below) does,
+                // so recently-converted text still resurfaces regardless of which engine is active.
+                val historyMatches = historyMatchesFor(kana)
+                if (historyMatches.isEmpty()) return mozc
+                val seen = mutableSetOf<String>()
+                val merged = ArrayList<ConversionCandidate>(historyMatches.size + mozc.size)
+                for (h in historyMatches) if (seen.add(h.surface)) merged.add(h)
+                for (c in mozc) if (seen.add(c.surface)) merged.add(c)
+                return merged
+            }
+        }
+
+        val results = mutableListOf<ConversionCandidate>()
+        val seen = mutableSetOf<String>()
+
+        fun addUnique(candidates: List<ConversionCandidate>) {
+            for (c in candidates) {
+                if (seen.add(c.surface)) results.add(c)
+            }
+        }
+
+        // 0. Recent history matches (with prefix-length penalty)
+        addUnique(historyMatchesFor(kana))
 
         // 1. Exact match FIRST (single-word candidates rank highest)
         addUnique(exactMatch(kana))
@@ -696,6 +724,13 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         // through Mozc char-by-char, same per-key JNI cost as convert()/predict(), which must
         // not run on this (caller's) thread. Reading/surface only — no candidate object or
         // mutable state crosses the thread boundary.
+        //
+        // Known residual risk (Codex review): `candidate` here isn't guaranteed to have come
+        // from Mozc — it could be a recentHistory hit, a legacy-engine candidate, or a user
+        // dictionary entry. learn()'s suffix-stripped match against Mozc's own candidate list
+        // is normally a safe no-op for those (see learn()'s doc comment), but a coincidental
+        // full-string match could in principle submit the wrong candidate id. Not mitigated
+        // here — would need per-candidate engine provenance tracking to fix properly.
         if (useMozcNative()) {
             val reading = candidate.reading
             val surface = candidate.surface
