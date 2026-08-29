@@ -60,6 +60,15 @@ class NacreMozcEngine(private val context: Context) {
                 ?: return false
             sessionId = created.id
             Log.i(TAG, "CREATE_SESSION: id=$sessionId err=${created.errorCode}")
+            // N2: a failed CREATE_SESSION (error_code=SESSION_FAILURE, default id=0) must not
+            // be treated as ready — every later eval() would silently no-op against a dead
+            // session id, and callers would keep paying the JNI round-trip cost forever while
+            // getting empty results (indistinguishable from "Mozc has no candidates").
+            if (created.errorCode != Output.ErrorCode.SESSION_SUCCESS || sessionId == 0L) {
+                Log.e(TAG, "CREATE_SESSION failed: err=${created.errorCode} id=$sessionId")
+                sessionId = 0L
+                return false
+            }
             // Full mobile request — mixed_conversion alone is NOT enough to get candidates;
             // the romaji table (special_romanji_table) + the bundle are required.
             eval(
@@ -113,41 +122,7 @@ class NacreMozcEngine(private val context: Context) {
     fun convert(input: String): List<ConversionCandidate> {
         if (input.isEmpty() || !ensureReady()) return emptyList()
         return try {
-            sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
-            // Re-assert HIRAGANA after reset (every passing scenario does this).
-            eval(
-                Input.newBuilder()
-                    .setType(Input.CommandType.SEND_COMMAND)
-                    .setId(sessionId)
-                    .setCommand(
-                        SessionCommand.newBuilder()
-                            .setType(SessionCommand.CommandType.SWITCH_COMPOSITION_MODE)
-                            .setCompositionMode(CompositionMode.HIRAGANA),
-                    ),
-            )
-            for (ch in input) {
-                val key = KeyEvent.newBuilder()
-                if (ch.code < 0x80) {
-                    // ASCII (romaji) → key_code; the romaji table composes it into kana.
-                    key.setKeyCode(ch.code)
-                } else {
-                    // Literal kana → insert as-is (bypasses the romaji table).
-                    key.setKeyString(ch.toString()).setInputStyle(KeyEvent.InputStyle.AS_IS)
-                }
-                eval(
-                    Input.newBuilder()
-                        .setType(Input.CommandType.SEND_KEY)
-                        .setId(sessionId)
-                        .setKey(key),
-                )
-            }
-            // SPACE converts → full candidate list lands in all_candidate_words.
-            val outSp = eval(
-                Input.newBuilder()
-                    .setType(Input.CommandType.SEND_KEY)
-                    .setId(sessionId)
-                    .setKey(KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE)),
-            )
+            val outSp = composeAndConvert(input)
             val all = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
             val win = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
             val values = (all + win).filter { it.isNotEmpty() }.distinct()
@@ -157,6 +132,107 @@ class NacreMozcEngine(private val context: Context) {
             Log.e(TAG, "convert('$input') failed", e)
             emptyList()
         }
+    }
+
+    /**
+     * #13/M5: tell Mozc which candidate the user actually committed for [reading], so its own
+     * UserHistoryPredictor / segment-history-rewriter learns from real usage — mirroring what
+     * the mobile_apply_user_segment_history_rewriter.txt scenario in the Mozc source does:
+     * convert, then SessionCommand.SUBMIT_CANDIDATE with the chosen candidate's id.
+     *
+     * Without this, every convert()/predict() call is immediately followed by RESET_CONTEXT
+     * with no commit ever reaching the session, so Mozc's own learning never fires no matter
+     * what the user picks in Nacre's UI — history stays perpetually cold.
+     *
+     * Re-derives the candidate list for [reading] rather than reusing a cached one, so it does
+     * not need to track cross-call state with predict()/convert() (which may race on other
+     * threads); this call is fire-and-forget from the caller's perspective and safe to skip
+     * (no-op) if Mozc doesn't offer [surface] for [reading] — e.g. the candidate came from the
+     * legacy Kotlin engine instead. Must be called off the main thread (same JNI-per-char cost
+     * as convert()/predict()).
+     */
+    @Synchronized
+    fun learn(reading: String, surface: String) {
+        if (reading.isEmpty() || surface.isEmpty() || !ensureReady()) return
+        try {
+            val outSp = composeAndConvert(reading)
+            val candidateId = findCandidateId(outSp, surface)
+            if (candidateId != null) {
+                eval(
+                    Input.newBuilder()
+                        .setType(Input.CommandType.SEND_COMMAND)
+                        .setId(sessionId)
+                        .setCommand(
+                            SessionCommand.newBuilder()
+                                .setType(SessionCommand.CommandType.SUBMIT_CANDIDATE)
+                                .setId(candidateId),
+                        ),
+                )
+                Log.i(TAG, "learn: submitted candidate id=$candidateId for '$reading'->'$surface'")
+            }
+        } catch (e: Throwable) {
+            Log.e(TAG, "learn('$reading'->'$surface') failed", e)
+        } finally {
+            // Always leave the session clean for the next predict()/convert() call, whether or
+            // not a matching candidate was found/submitted.
+            runCatching { sendCommand(SessionCommand.CommandType.RESET_CONTEXT) }
+        }
+    }
+
+    private fun findCandidateId(output: Output?, surface: String): Int? {
+        if (output == null) return null
+        output.allCandidateWords?.candidatesList.orEmpty()
+            .firstOrNull { it.value == surface }
+            ?.let { return it.id }
+        output.candidateWindow?.candidateList.orEmpty()
+            .firstOrNull { it.value == surface }
+            ?.let { return it.id }
+        return null
+    }
+
+    /**
+     * RESET_CONTEXT, reassert HIRAGANA, compose [input] char-by-char, then SEND_KEY(SPACE) to
+     * convert. Shared by convert() and learn() so both stay in lockstep with the exact
+     * composition sequence verified against Mozc's predict_and_convert.txt scenario. Leaves the
+     * session in CONVERSION state (candidates focused) — callers are responsible for the
+     * follow-up RESET_CONTEXT (convert()) or SUBMIT_CANDIDATE+RESET_CONTEXT (learn()).
+     */
+    private fun composeAndConvert(input: String): Output? {
+        sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
+        // Re-assert HIRAGANA after reset (every passing scenario does this).
+        eval(
+            Input.newBuilder()
+                .setType(Input.CommandType.SEND_COMMAND)
+                .setId(sessionId)
+                .setCommand(
+                    SessionCommand.newBuilder()
+                        .setType(SessionCommand.CommandType.SWITCH_COMPOSITION_MODE)
+                        .setCompositionMode(CompositionMode.HIRAGANA),
+                ),
+        )
+        for (ch in input) {
+            val key = KeyEvent.newBuilder()
+            if (ch.code < 0x80) {
+                // ASCII (romaji) → key_code; the romaji table composes it into kana.
+                key.setKeyCode(ch.code)
+            } else {
+                // Literal kana → insert as-is (bypasses the romaji table).
+                key.setKeyString(ch.toString()).setInputStyle(KeyEvent.InputStyle.AS_IS)
+            }
+            eval(
+                Input.newBuilder()
+                    .setType(Input.CommandType.SEND_KEY)
+                    .setId(sessionId)
+                    .setKey(key),
+            )
+        }
+        // SPACE converts → full candidate list lands in all_candidate_words.
+        return eval(
+            Input.newBuilder()
+                .setType(Input.CommandType.SEND_KEY)
+                .setId(sessionId)
+                .setKey(KeyEvent.newBuilder().setSpecialKey(KeyEvent.SpecialKey.SPACE)),
+        )
     }
 
     private fun sendCommand(type: SessionCommand.CommandType) {
