@@ -350,6 +350,17 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // #13 native Mozc engine — lazily created on first use, gated by a setting.
     private val mozcEngine by lazy { NacreMozcEngine(context) }
 
+    // #13/M5: single background thread for NacreMozcEngine.learn() — a commit-time
+    // SUBMIT_CANDIDATE round-trip through the native session, same per-char JNI cost as
+    // convert()/predict(), so it must never run on the caller's thread (recordSelection() is
+    // invoked directly from the IME's key-handling path). Lazily created so it costs nothing
+    // when Mozc-native is off. Daemon thread: never blocks process shutdown.
+    private val mozcLearnExecutor by lazy {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "NacreMozcLearn").apply { isDaemon = true }
+        }
+    }
+
     // Public so the input engine + service can skip the now-redundant Kotlin-engine
     // helpers (KenLM 5-gram rescoring, the local-LLM reranker) when native Mozc is the
     // active conversion path — Mozc never consults them, so loading/running them just
@@ -678,6 +689,21 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         while (recentHistory.size > maxHistory) recentHistory.removeLast()
 
         debouncedSave()
+
+        // #13/M5: feed the choice back into Mozc's own history/learning so its ranking
+        // improves for this user too — otherwise native-Mozc conversion history never leaves
+        // "cold start" no matter how long the app is used. Async: this reading is composed
+        // through Mozc char-by-char, same per-key JNI cost as convert()/predict(), which must
+        // not run on this (caller's) thread. Reading/surface only — no candidate object or
+        // mutable state crosses the thread boundary.
+        if (useMozcNative()) {
+            val reading = candidate.reading
+            val surface = candidate.surface
+            mozcLearnExecutor.execute {
+                runCatching { mozcEngine.learn(reading, surface) }
+                    .onFailure { Log.e("NacreDictionary", "mozcEngine.learn failed", it) }
+            }
+        }
     }
 
     fun updateContext(surface: String) {
