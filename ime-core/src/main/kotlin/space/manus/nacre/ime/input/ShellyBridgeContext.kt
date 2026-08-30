@@ -229,6 +229,15 @@ class ShellyBridgeReader(context: Context) {
 
     private fun readAndParse(): ShellyBridgeContext? {
         return try {
+            // The bridge file lives on shared storage at a fixed, world-readable path — a
+            // corrupted or hostile file there (not necessarily from Shelly) could otherwise be
+            // arbitrarily large, costing the IME process memory and latency on every keystroke
+            // (Codex review, 2026-08-30). The real contract payload is a few hundred bytes;
+            // refuse anything absurdly larger before ever reading it into memory.
+            if (bridgeFile.length() > MAX_BRIDGE_FILE_BYTES) {
+                Log.w(TAG, "Shelly bridge file too large (${bridgeFile.length()} bytes), ignoring")
+                return null
+            }
             val text = bridgeFile.readText(Charsets.UTF_8)
             parseShellyBridgeContext(text)
         } catch (e: Exception) {
@@ -253,5 +262,10 @@ class ShellyBridgeReader(context: Context) {
         private const val TAG = "ShellyBridgeContext"
         private const val PREFS_NAME = "nacre_shelly_bridge"
         private const val KEY_ENABLED = "enabled"
+
+        /** The real contract payload is a few hundred bytes; refuse anything wildly larger
+         *  before reading it into memory (defense against a corrupted/hostile file on shared
+         *  storage — see readAndParse()). */
+        private const val MAX_BRIDGE_FILE_BYTES = 16 * 1024L
     }
 }
