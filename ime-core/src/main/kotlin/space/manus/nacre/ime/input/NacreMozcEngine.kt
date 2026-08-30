@@ -123,15 +123,51 @@ class NacreMozcEngine(private val context: Context) {
         if (input.isEmpty() || !ensureReady()) return emptyList()
         return try {
             val outSp = composeAndConvert(input)
-            val all = outSp?.allCandidateWords?.candidatesList.orEmpty().map { it.value }
-            val win = outSp?.candidateWindow?.candidateList.orEmpty().map { it.value }
-            val values = (all + win).filter { it.isNotEmpty() }.distinct()
+            val values = fullLengthCandidateValues(outSp)
             sendCommand(SessionCommand.CommandType.RESET_CONTEXT)
             values.map { ConversionCandidate(surface = it, reading = input) }
         } catch (e: Throwable) {
             Log.e(TAG, "convert('$input') failed", e)
             emptyList()
         }
+    }
+
+    /**
+     * After CONVERT, `preedit` holds EVERY bunsetsu segment of the reading
+     * (記者の｜記者が｜汽車で｜帰社した) while `all_candidate_words`/`candidate_window` hold
+     * alternatives for the FOCUSED (first) segment only. The candidate bar commits a candidate
+     * wholesale — replacing the *entire* composing reading — so a bare first-segment candidate
+     * would silently drop everything after it (bug: 変換候補を確定すると以降の文が消える, e.g.
+     * "しょうでんりょくもーどになってた" → selecting "省電力モード" lost "になってた" entirely).
+     * Rebuild each candidate as (first-segment alternative + the already-converted remaining
+     * segments) so every candidate is a full-length conversion of the whole reading and is safe
+     * to commit as-is — matches the pre-Mozc Kotlin engine's full-sentence candidate behavior.
+     */
+    private fun fullLengthCandidateValues(output: Output?): List<String> {
+        val segs = output?.preedit?.segmentList.orEmpty().map { it.value }
+        val rest = restAfterFocusedSegment(segs)
+        val fullConversion = segs.joinToString("")
+        val firstAlts = (
+            output?.allCandidateWords?.candidatesList.orEmpty().map { it.value } +
+                output?.candidateWindow?.candidateList.orEmpty().map { it.value }
+            ).filter { it.isNotEmpty() }
+        return buildList {
+            if (fullConversion.isNotEmpty()) add(fullConversion)
+            firstAlts.forEach { alt -> add(alt + rest) }
+        }.filter { it.isNotEmpty() }.distinct()
+    }
+
+    /**
+     * The already-converted text of every segment AFTER the focused one — the "rest" that
+     * [fullLengthCandidateValues] appends to a bare first-segment alternative, and that
+     * [learn] strips back off [surface] before matching it against Mozc's candidate list.
+     * Normally the focused segment is `segs[0]`, but this defends against an empty leading
+     * segment (e.g. a cursor-position placeholder) by using the first non-empty one instead —
+     * otherwise `rest` would swallow the real focused segment's own text too.
+     */
+    private fun restAfterFocusedSegment(segs: List<String>): String {
+        val focusedIndex = segs.indexOfFirst { it.isNotEmpty() }.let { if (it < 0) 0 else it }
+        return if (focusedIndex in segs.indices) segs.drop(focusedIndex + 1).joinToString("") else ""
     }
 
     /**
@@ -150,13 +186,26 @@ class NacreMozcEngine(private val context: Context) {
      * (no-op) if Mozc doesn't offer [surface] for [reading] — e.g. the candidate came from the
      * legacy Kotlin engine instead. Must be called off the main thread (same JNI-per-char cost
      * as convert()/predict()).
+     *
+     * [surface] is the full-length string convert()/[fullLengthCandidateValues] actually
+     * committed — i.e. (first-segment alternative + already-converted remaining segments), not
+     * a bare Mozc candidate value. Strip the shared `rest` suffix back off before matching
+     * against Mozc's own first-segment-only candidate list, or every multi-segment commit would
+     * silently fail to match anything and never teach Mozc.
      */
     @Synchronized
     fun learn(reading: String, surface: String) {
         if (reading.isEmpty() || surface.isEmpty() || !ensureReady()) return
         try {
             val outSp = composeAndConvert(reading)
-            val candidateId = findCandidateId(outSp, surface)
+            val segs = outSp?.preedit?.segmentList.orEmpty().map { it.value }
+            val rest = restAfterFocusedSegment(segs)
+            val firstSegmentSurface = if (rest.isNotEmpty() && surface.endsWith(rest)) {
+                surface.removeSuffix(rest)
+            } else {
+                surface
+            }
+            val candidateId = findCandidateId(outSp, firstSegmentSurface)
             if (candidateId != null) {
                 eval(
                     Input.newBuilder()
