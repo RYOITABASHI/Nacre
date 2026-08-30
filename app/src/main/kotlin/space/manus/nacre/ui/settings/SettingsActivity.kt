@@ -1574,7 +1574,7 @@ private fun WhisperModelSection() {
  * Keys are stored per-device via CloudLlmConfig (SharedPreferences, not
  * backed up). When multiple keys are set, VoiceInputManager tries them in
  * priority order: Qwen Max → Gemini Pro → DeepSeek V3. None of them are
- * required — if all are blank the app falls back to the on-device Gemma/Qwen model.
+ * required — if all are blank the app falls back to the on-device Qwen model.
  */
 @Composable
 private fun VoiceRewriteSection() {
@@ -1739,13 +1739,13 @@ private fun CloudLlmSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルGemma/Qwenにフォールバック。",
+                "音声入力の整文に使うクラウドLLM。キーを貼ると優先順（Qwen → Gemini → DeepSeek）で試し、全て失敗時のみローカルQwenにフォールバック。",
                 color = NacreTextDim,
                 fontSize = 12.sp,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "キー未設定時はオフライン（ローカルGemma/Qwen）のみで動作。キーは端末内にのみ保存されます。",
+                "キー未設定時はオフライン（ローカルQwen）のみで動作。キーは端末内にのみ保存されます。",
                 color = NacreTextDim.copy(alpha = 0.8f),
                 fontSize = 11.sp,
             )
