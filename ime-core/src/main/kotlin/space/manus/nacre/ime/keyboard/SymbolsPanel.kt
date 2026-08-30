@@ -116,6 +116,15 @@ private val SYMBOL_CATEGORIES = listOf(
     )),
 )
 
+// Index of the "プログラミング" category above — the panel defaults to this
+// tab during Shelly Dev Mode (see SymbolsPanel below) since it already covers
+// every symbol a terminal/code session commonly needs (/, -, _, ., ~, |, &, $,
+// {, }, [, ]) without any reordering. Looked up by label (not hardcoded) so a
+// future reordering of SYMBOL_CATEGORIES can't silently point this at the
+// wrong tab (Codex review, 2026-08-30).
+private val PROGRAMMING_CATEGORY_INDEX =
+    SYMBOL_CATEGORIES.indexOfFirst { it.label == "プログラミング" }.let { if (it < 0) 1 else it }
+
 // Recently used symbols — persisted
 private val recentSymbols = mutableStateListOf<String>()
 private var recentSymbolsLoaded = false
@@ -145,8 +154,20 @@ fun SymbolsPanel(
     onDismiss: () -> Unit,
 ) {
     LaunchedEffect(Unit) { loadRecentSymbols(service) }
-    // Default to recent if available, otherwise first real category
-    var selectedCategory by remember { mutableIntStateOf(if (recentSymbols.isNotEmpty()) 0 else 1) }
+    // Default to recent if available; otherwise, in Shelly Dev Mode, jump
+    // straight to "プログラミング" (already has every commonly-needed dev
+    // symbol) instead of the generic "算術" tab — makes symbol access easier
+    // without touching the flick-key layout itself.
+    val isDevMode = service.inputEngine.isShellyDevModeActive
+    var selectedCategory by remember(isDevMode) {
+        mutableIntStateOf(
+            when {
+                recentSymbols.isNotEmpty() -> 0
+                isDevMode -> PROGRAMMING_CATEGORY_INDEX
+                else -> 1
+            },
+        )
+    }
     val currentSymbols = if (selectedCategory == 0 && recentSymbols.isNotEmpty()) {
         recentSymbols.toList()
     } else {
