@@ -33,3 +33,6 @@ voice-test-runs/
 
 # Extracted AAR artifacts
 META-INF/
+
+# Local git worktrees (Claude Code isolated workspaces)
+.worktrees/
