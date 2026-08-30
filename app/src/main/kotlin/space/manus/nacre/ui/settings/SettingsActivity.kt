@@ -219,6 +219,12 @@ fun NacreSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // --- Shelly Bridge (terminal context → prediction) ---
+        SectionHeader("Shelly連携")
+        ShellyBridgeSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // --- User dictionary (単語登録) ---
         SectionHeader("単語登録")
         WordRegistrationSection()
@@ -804,6 +810,47 @@ private fun MozcNativeSection() {
                 Text("Mozcネイティブ変換（実験）", color = NacreText, fontSize = 14.sp)
                 Text(
                     "Mozc本体エンジンで変換。OFFで従来エンジン。問題があれば自動フォールバック",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    prefs.edit().putBoolean("enabled", it).apply()
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NacreAccent,
+                    checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShellyBridgeSection() {
+    val context = LocalContext.current
+    // Key/pref-name pair kept in lockstep with ShellyBridgeReader (ime-core) — see
+    // ime-core/src/main/kotlin/space/manus/nacre/ime/input/ShellyBridgeContext.kt.
+    val prefs = context.getSharedPreferences("nacre_shelly_bridge", Context.MODE_PRIVATE)
+    var enabled by remember { mutableStateOf(prefs.getBoolean("enabled", true)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Shellyターミナルの文脈を予測変換に利用", color = NacreText, fontSize = 14.sp)
+                Text(
+                    "Shelly（ターミナルアプリ）前面表示中、cwd・gitブランチ・技術用語を一時的に予測候補へ反映",
                     color = NacreTextDim,
                     fontSize = 12.sp,
                 )

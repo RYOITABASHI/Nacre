@@ -350,6 +350,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // #13 native Mozc engine — lazily created on first use, gated by a setting.
     private val mozcEngine by lazy { NacreMozcEngine(context) }
 
+    // Shelly Bridge — ephemeral terminal context (cwd/repo/branch/technical terms) shared by
+    // the Shelly Android terminal IDE while it's the foreground app. Lazily created so it costs
+    // nothing (no file stat) until predictEnglish() actually consults it. Independently
+    // re-sanitizes everything it reads — see ShellyBridgeContext.kt for the full contract.
+    private val shellyBridge by lazy { ShellyBridgeReader(context) }
+
     // #13/M5: single background thread for NacreMozcEngine.learn() — a commit-time
     // SUBMIT_CANDIDATE round-trip through the native session, same per-char JNI cost as
     // convert()/predict(), so it must never run on the caller's thread (recordSelection() is
@@ -1390,6 +1396,23 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
             }
         }
 
+        // 5. Shelly Bridge terms: repo name / git branch / cwd path segments / safe technical
+        // terms shared by the Shelly terminal IDE while it's in the foreground (see
+        // ShellyBridgeContext.kt). Purely additive — only prefix matches of what the user is
+        // already typing are added, and only if the dictionary pipeline above hasn't already
+        // surfaced the same word. Costed like an ordinary dictionary hit (base cost + a
+        // length-proportional penalty for the untyped remainder, mirroring historyMatchesFor())
+        // so it nudges the ranking without dominating exactMatch()/prefix-match results.
+        for (term in shellyBridge.matchingTerms(prefix)) {
+            if (results.any { it.surface.equals(term, ignoreCase = true) }) continue
+            val lengthPenalty = maxOf(0, term.length - prefixLower.length) * SHELLY_BRIDGE_TERM_PER_CHAR_PENALTY
+            results.add(ConversionCandidate(
+                surface = term,
+                reading = prefix,
+                cost = SHELLY_BRIDGE_TERM_BASE_COST + lengthPenalty,
+            ))
+        }
+
         return results.sortedBy { it.cost }.take(limit)
     }
 
@@ -1771,6 +1794,13 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         private const val KENLM_WEIGHT = 5000f
         // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
         private const val VITERBI_LM_WEIGHT = 3000f
+
+        // Shelly Bridge term cost: base cost lands it in the same range as an ordinary
+        // dictionary/spell-correction hit (see spellCorrect()'s +3000/+2500 penalties above) —
+        // high enough that it never outranks an actual exact-match dictionary word, but still
+        // competitive so a relevant repo/branch/cwd/technical term can surface.
+        private const val SHELLY_BRIDGE_TERM_BASE_COST = 3500
+        private const val SHELLY_BRIDGE_TERM_PER_CHAR_PENALTY = 400
 
         // Mozc POS ID range checks (from id.def)
         fun isNoun(id: Int) = id in 1841..2193
