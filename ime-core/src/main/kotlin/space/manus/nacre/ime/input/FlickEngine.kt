@@ -30,11 +30,18 @@ object FlickEngine {
         FlickKey("な", "な", "な", "に", "ぬ", "ね", "の"),
         FlickKey("は", "は", "は", "ひ", "ふ", "へ", "ほ"),
         FlickKey("ま", "ま", "ま", "み", "む", "め", "も"),
-        FlickKey("や", "や", "や", "ゆ", "よ", null, null,
+        // iOS: up=ゆ, down=よ (や row has no i/e forms); left/right are repurposed
+        // for the corner-bracket shortcut iOS added in iOS 8 (flick left = 「, right = 」).
+        // Previously left=ゆ/up=よ, which put both vowels on the wrong direction
+        // and dropped the bracket shortcut entirely.
+        FlickKey("や", "や", "や", "「", "ゆ", "」", "よ",
             tapCycle = listOf("や", "ゆ", "よ", "ゃ", "ゅ", "ょ")),
         FlickKey("ら", "ら", "ら", "り", "る", "れ", "ろ"),
         FlickKey("わ", "わ", "わ", "を", "ん", "ー", "〜",
-            tapCycle = listOf("わ", "を", "ん", "ー")),
+            // Was missing 〜 (down-flick target) and ゎ (わ's small form) —
+            // every other multi-key row's tapCycle covers all 5 flick slots
+            // plus any small form(s); this one previously stopped after ー.
+            tapCycle = listOf("わ", "を", "ん", "ー", "〜", "ゎ")),
     )
 
     data class SymbolFlickKey(
