@@ -22,6 +22,41 @@ import space.manus.nacre.ime.NacreInputMethodService
 private val CTRL_PATTERN = Regex("^C-([a-zA-Z])$")
 private val DIRECT_TOKEN_CONTEXT = Regex("(^|[\\s\\n\\t])[@#/][A-Za-z0-9._-]*$")
 
+/** Shelly (dev.shelly.terminal) — Nacre と同じ開発者が作る自作Androidターミナル IDE. */
+internal const val SHELLY_TERMINAL_PACKAGE_NAME = "dev.shelly.terminal"
+
+private const val SHELLY_DEV_MODE_PREFS = "nacre_shelly_dev_mode"
+private const val KEY_SHELLY_DEV_MODE_ENABLED = "enabled"
+
+/**
+ * Shelly Dev Mode の起動判定: フォーカス中のフィールドの [EditorInfo.packageName]
+ * が Shelly そのものかどうか。[InputEngine.isTerminalApp] はカーソル移動の分岐
+ * (DPADキーイベント送信 vs setSelection)に使う判定で、termux/connectbot等も
+ * 拾うようあえて部分一致(`contains`)にしているが、こちらは「Shellyの入力欄に
+ * フォーカスしている」というより強い意図を持つ機能フラグの起点なので、他の
+ * terminal系アプリを誤って拾わないよう完全一致に留める。
+ *
+ * Pure function — no Android object method calls — directly unit testable on
+ * the JVM, matching this file's convention (see [computeEnterOutcome] etc).
+ */
+internal fun isShellyDevModeTarget(packageName: String?): Boolean =
+    packageName == SHELLY_TERMINAL_PACKAGE_NAME
+
+/**
+ * True when [textBeforeCursor] ends with a printable-ASCII, non-space
+ * character — i.e. the just-committed text looks like code/shell input
+ * (paths, flags, command names) rather than Japanese prose. Used to bias
+ * [InputEngine.showNextWordPredictions] away from firing during Shelly Dev
+ * Mode: an unrelated Japanese next-word guess popping into the candidate bar
+ * right after typing e.g. `cd /usr/loc` is more distracting than helpful.
+ *
+ * Pure function over a plain string — directly unit testable on the JVM.
+ */
+internal fun looksLikeCodeTail(textBeforeCursor: String): Boolean {
+    val last = textBeforeCursor.trimEnd(' ', '\t').lastOrNull() ?: return false
+    return last.code in 0x21..0x7E
+}
+
 /**
  * What pressing Enter should do, decided purely from the focused field's own
  * properties (never from which keyboard layer happens to be active).
@@ -145,6 +180,13 @@ class InputEngine(private val service: NacreInputMethodService) {
     var isPasswordField by mutableStateOf(false)
         private set
 
+    // Shelly Dev Mode: true only while focused on Shelly's own input (exact
+    // package match, see isShellyDevModeTarget) AND the user hasn't disabled
+    // it in prefs (default ON). Observable so Compose (e.g. SymbolsPanel) can
+    // react to it per-field the same way CandidateBar reacts to isPasswordField.
+    var isShellyDevModeActive by mutableStateOf(false)
+        private set
+
     // Dictionary reference (set from IO thread after loading)
     @Volatile
     var dictionary: DictionaryProvider? = null
@@ -174,6 +216,15 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingKana = ""
         japaneseEngine.reset()
         clearCandidates()
+
+        // Shelly Dev Mode detection — exact package match (isShellyDevModeTarget),
+        // gated by a user-facing opt-out that defaults to ON. Recomputed on every
+        // field focus change since the user may switch away from Shelly mid-session.
+        val devModePrefEnabled = service.getSharedPreferences(
+            SHELLY_DEV_MODE_PREFS,
+            android.content.Context.MODE_PRIVATE,
+        ).getBoolean(KEY_SHELLY_DEV_MODE_ENABLED, true)
+        isShellyDevModeActive = devModePrefEnabled && isShellyDevModeTarget(info?.packageName)
 
         // EditorInfo handling: disable Japanese for password/number fields
         if (info != null) {
@@ -874,6 +925,14 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun showNextWordPredictions() {
         if (isPasswordField) return
         if (!service.layerManager.isJapanese) return
+        // Shelly Dev Mode: don't let a Japanese context guess interrupt code/
+        // command typing. Users mix ASCII paths/flags with occasional Japanese
+        // comments in a terminal, and prepending an unrelated Japanese
+        // next-word suggestion right after e.g. "cd /usr/loc" is noise, not help.
+        if (isShellyDevModeActive) {
+            val tail = service.currentInputConnection?.getTextBeforeCursor(4, 0)?.toString().orEmpty()
+            if (looksLikeCodeTail(tail)) return
+        }
         val nacrDict = dictionary as? NacreDictionary ?: return
         predictionJob?.cancel()
         predictionJob = scope.launch {
@@ -1036,8 +1095,11 @@ class InputEngine(private val service: NacreInputMethodService) {
         val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
         val fullText = extracted?.text?.toString() ?: ""
 
-        // Check auto-convert rules (e.g. "->" → "→")
-        if (service.autoConvertEngine.isEnabled && fullText.isNotEmpty()) {
+        // Check auto-convert rules (e.g. "->" → "→") — skipped during Shelly Dev
+        // Mode: committing shell/code text where "->" or "!=" are meant literally
+        // (e.g. a C pointer deref, a shell inequality test) would otherwise get
+        // silently mangled into "→"/"≠" mid-command.
+        if (service.autoConvertEngine.isEnabled && !isShellyDevModeActive && fullText.isNotEmpty()) {
             service.autoConvertEngine.checkAndConvert(fullText, ic)
         }
 
