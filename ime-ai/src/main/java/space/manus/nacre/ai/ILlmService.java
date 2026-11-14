@@ -12,6 +12,12 @@ public interface ILlmService extends android.os.IInterface {
     void unloadModel() throws android.os.RemoteException;
     void transform(String text, String instruction, ILlmCallback callback) throws android.os.RemoteException;
     void cancelGeneration() throws android.os.RemoteException;
+    // zenz neural conversion (separate model handle from the cleanup LLM)
+    void loadZenzModel(String modelPath) throws android.os.RemoteException;
+    boolean isZenzModelLoaded() throws android.os.RemoteException;
+    String getZenzLoadError() throws android.os.RemoteException;
+    void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException;
+    void cancelZenzGeneration() throws android.os.RemoteException;
 
     public static class Default implements ILlmService {
         @Override public boolean isModelLoaded() throws android.os.RemoteException { return false; }
@@ -20,6 +26,11 @@ public interface ILlmService extends android.os.IInterface {
         @Override public void unloadModel() throws android.os.RemoteException {}
         @Override public void transform(String text, String instruction, ILlmCallback callback) throws android.os.RemoteException {}
         @Override public void cancelGeneration() throws android.os.RemoteException {}
+        @Override public void loadZenzModel(String modelPath) throws android.os.RemoteException {}
+        @Override public boolean isZenzModelLoaded() throws android.os.RemoteException { return false; }
+        @Override public String getZenzLoadError() throws android.os.RemoteException { return ""; }
+        @Override public void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException {}
+        @Override public void cancelZenzGeneration() throws android.os.RemoteException {}
         @Override public android.os.IBinder asBinder() { return null; }
     }
 
@@ -32,6 +43,11 @@ public interface ILlmService extends android.os.IInterface {
         static final int TRANSACTION_unloadModel = android.os.IBinder.FIRST_CALL_TRANSACTION + 3;
         static final int TRANSACTION_transform = android.os.IBinder.FIRST_CALL_TRANSACTION + 4;
         static final int TRANSACTION_cancelGeneration = android.os.IBinder.FIRST_CALL_TRANSACTION + 5;
+        static final int TRANSACTION_loadZenzModel = android.os.IBinder.FIRST_CALL_TRANSACTION + 6;
+        static final int TRANSACTION_isZenzModelLoaded = android.os.IBinder.FIRST_CALL_TRANSACTION + 7;
+        static final int TRANSACTION_getZenzLoadError = android.os.IBinder.FIRST_CALL_TRANSACTION + 8;
+        static final int TRANSACTION_zenzConvert = android.os.IBinder.FIRST_CALL_TRANSACTION + 9;
+        static final int TRANSACTION_cancelZenzGeneration = android.os.IBinder.FIRST_CALL_TRANSACTION + 10;
 
         public Stub() { this.attachInterface(this, DESCRIPTOR); }
 
@@ -85,6 +101,40 @@ public interface ILlmService extends android.os.IInterface {
                 case TRANSACTION_cancelGeneration: {
                     data.enforceInterface(DESCRIPTOR);
                     this.cancelGeneration();
+                    reply.writeNoException();
+                    return true;
+                }
+                case TRANSACTION_loadZenzModel: {
+                    data.enforceInterface(DESCRIPTOR);
+                    this.loadZenzModel(data.readString());
+                    reply.writeNoException();
+                    return true;
+                }
+                case TRANSACTION_isZenzModelLoaded: {
+                    data.enforceInterface(DESCRIPTOR);
+                    boolean _result = this.isZenzModelLoaded();
+                    reply.writeNoException();
+                    reply.writeInt(_result ? 1 : 0);
+                    return true;
+                }
+                case TRANSACTION_getZenzLoadError: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String _result = this.getZenzLoadError();
+                    reply.writeNoException();
+                    reply.writeString(_result);
+                    return true;
+                }
+                case TRANSACTION_zenzConvert: {
+                    data.enforceInterface(DESCRIPTOR);
+                    String _arg0 = data.readString();
+                    ILlmCallback _arg1 = ILlmCallback.Stub.asInterface(data.readStrongBinder());
+                    this.zenzConvert(_arg0, _arg1);
+                    reply.writeNoException();
+                    return true;
+                }
+                case TRANSACTION_cancelZenzGeneration: {
+                    data.enforceInterface(DESCRIPTOR);
+                    this.cancelZenzGeneration();
                     reply.writeNoException();
                     return true;
                 }
@@ -165,6 +215,66 @@ public interface ILlmService extends android.os.IInterface {
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
                     mRemote.transact(TRANSACTION_cancelGeneration, _data, _reply, 0);
+                    _reply.readException();
+                } finally { _reply.recycle(); _data.recycle(); }
+            }
+
+            @Override
+            public void loadZenzModel(String modelPath) throws android.os.RemoteException {
+                android.os.Parcel _data = android.os.Parcel.obtain();
+                android.os.Parcel _reply = android.os.Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(modelPath);
+                    mRemote.transact(TRANSACTION_loadZenzModel, _data, _reply, 0);
+                    _reply.readException();
+                } finally { _reply.recycle(); _data.recycle(); }
+            }
+
+            @Override
+            public boolean isZenzModelLoaded() throws android.os.RemoteException {
+                android.os.Parcel _data = android.os.Parcel.obtain();
+                android.os.Parcel _reply = android.os.Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(TRANSACTION_isZenzModelLoaded, _data, _reply, 0);
+                    _reply.readException();
+                    return _reply.readInt() != 0;
+                } finally { _reply.recycle(); _data.recycle(); }
+            }
+
+            @Override
+            public String getZenzLoadError() throws android.os.RemoteException {
+                android.os.Parcel _data = android.os.Parcel.obtain();
+                android.os.Parcel _reply = android.os.Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(TRANSACTION_getZenzLoadError, _data, _reply, 0);
+                    _reply.readException();
+                    return _reply.readString();
+                } finally { _reply.recycle(); _data.recycle(); }
+            }
+
+            @Override
+            public void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException {
+                android.os.Parcel _data = android.os.Parcel.obtain();
+                android.os.Parcel _reply = android.os.Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    _data.writeString(katakanaReading);
+                    _data.writeStrongBinder(callback != null ? callback.asBinder() : null);
+                    mRemote.transact(TRANSACTION_zenzConvert, _data, _reply, 0);
+                    _reply.readException();
+                } finally { _reply.recycle(); _data.recycle(); }
+            }
+
+            @Override
+            public void cancelZenzGeneration() throws android.os.RemoteException {
+                android.os.Parcel _data = android.os.Parcel.obtain();
+                android.os.Parcel _reply = android.os.Parcel.obtain();
+                try {
+                    _data.writeInterfaceToken(DESCRIPTOR);
+                    mRemote.transact(TRANSACTION_cancelZenzGeneration, _data, _reply, 0);
                     _reply.readException();
                 } finally { _reply.recycle(); _data.recycle(); }
             }

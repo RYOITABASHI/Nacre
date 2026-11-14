@@ -56,6 +56,7 @@ class ModelDownloader(private val context: Context) {
             "llm" to (getLlmModelPath() != null),
             "kenlm" to File(getModelsDir(), KENLM_FILENAME).exists(),
             "kenlm_compact" to File(getModelsDir(), COMPACT_KENLM_FILENAME).exists(),
+            "zenz" to (getZenzModelPath() != null),
         )
     }
 
@@ -277,6 +278,27 @@ class ModelDownloader(private val context: Context) {
         return findModelFile(QWEN_LLM_FILENAME) ?: findModelFile(LLM_FILENAME)
     }
 
+    // ---- zenz neural conversion (zenz-v3.2-small, GGUF Q5_K_M, ~74MB) ----
+    //
+    // zenz is a GPT-2-arch kana-kanji converter (azooKey Zenzai). It needs the
+    // "gpt2-small-japanese-char" pre-tokenizer, which stock llama.cpp rejects;
+    // the repo's llama build enables it via a configure-time patch (see
+    // ime-ai/src/main/cpp/CMakeLists.txt). License: CC-BY-SA-4.0 — attribution
+    // in THIRD_PARTY_LICENSES.md and the Settings AI Models section. The model
+    // is downloaded by the user, never bundled in the APK.
+
+    /** Download zenz-v3.2-small (Q5_K_M) from Hugging Face. */
+    fun downloadZenz(onComplete: (Boolean) -> Unit) {
+        downloadModel(
+            url = ZENZ_URL,
+            modelName = "zenz-v3.2-small (Q5_K_M)",
+            fileName = ZENZ_FILENAME,
+            onComplete = onComplete,
+        )
+    }
+
+    fun getZenzModelPath(): String? = findModelFile(ZENZ_FILENAME)
+
     fun getPreferredLlmModelPaths(): List<String> {
         // Qwen first (loads on the pinned llama.cpp b3500); a stray legacy Gemma
         // file is only tried as a last resort and will simply fail to load.
@@ -313,6 +335,7 @@ class ModelDownloader(private val context: Context) {
     fun ensureDefaultModelsDownloaded(
         downloadCompactKenLm: Boolean = true,
         downloadLlm: Boolean = true,
+        downloadZenz: Boolean = true,
     ) {
         synchronized(ModelDownloader::class.java) {
             if (autoProvisionStarted) return
@@ -343,6 +366,16 @@ class ModelDownloader(private val context: Context) {
                     url = QWEN_LLM_URL,
                     modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
                     fileName = QWEN_LLM_FILENAME,
+                )
+            }
+            // zenz neural conversion (~74MB) — small next to the models above,
+            // and it is the primary conversion-quality lever, so provision it
+            // with the default set.
+            if (downloadZenz && findModelFile(ZENZ_FILENAME) == null) {
+                downloadModelInternal(
+                    url = ZENZ_URL,
+                    modelName = "zenz-v3.2-small (Q5_K_M)",
+                    fileName = ZENZ_FILENAME,
                 )
             }
         }
@@ -647,6 +680,8 @@ class ModelDownloader(private val context: Context) {
         const val COMPACT_KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-compact.klm"
         const val LLM_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
         const val QWEN_LLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val ZENZ_FILENAME = "zenz-v3.2-small-q5_k_m.gguf"
+        const val ZENZ_URL = "https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf"
         @Volatile private var autoProvisionStarted = false
     }
 }

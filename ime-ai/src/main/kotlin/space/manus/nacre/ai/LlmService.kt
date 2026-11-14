@@ -37,6 +37,9 @@ class LlmService : Service() {
     private var isGenerating = false
 
     @Volatile
+    private var isZenzGenerating = false
+
+    @Volatile
     private var promptFormat: PromptFormat = PromptFormat.GEMMA
 
     // NOTE: The former 30-second idle-auto-unload was removed because voice
@@ -107,6 +110,61 @@ class LlmService : Service() {
             LlamaJni.cancelGeneration()
             this@LlmService.isGenerating = false
         }
+
+        // --- zenz neural conversion ---
+
+        override fun loadZenzModel(modelPath: String) {
+            scope.launch {
+                Log.i(TAG, "Loading zenz model: $modelPath")
+                val ok = LlamaJni.isAvailable() && LlamaJni.loadZenzModel(modelPath)
+                Log.i(TAG, "zenz model loaded: $ok")
+            }
+        }
+
+        override fun isZenzModelLoaded(): Boolean {
+            return LlamaJni.isAvailable() && LlamaJni.isZenzModelLoaded()
+        }
+
+        override fun getZenzLoadError(): String {
+            return if (LlamaJni.isAvailable()) LlamaJni.getZenzLoadError() else "native library unavailable"
+        }
+
+        override fun zenzConvert(katakanaReading: String, callback: ILlmCallback?) {
+            if (this@LlmService.isZenzGenerating) {
+                try { callback?.onError("zenz already generating") } catch (_: RemoteException) {}
+                return
+            }
+            if (!isZenzModelLoaded()) {
+                try { callback?.onError("zenz model not loaded") } catch (_: RemoteException) {}
+                return
+            }
+            this@LlmService.isZenzGenerating = true
+            scope.launch {
+                try {
+                    // zenz input format (azooKey zenzai docs):
+                    // U+EE00 + katakana reading + U+EE01, generate until </s>.
+                    // No left-context (U+EE02) in v1.
+                    val prompt = "\uEE00" + katakanaReading + "\uEE01"
+                    val maxTokens = (katakanaReading.length * 2 + 16).coerceIn(16, 192)
+                    val result = LlamaJni.generateZenz(prompt, maxTokens)
+                    withContext(Dispatchers.Main) {
+                        try { callback?.onResult(result) } catch (_: RemoteException) {}
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "zenz convert error", e)
+                    withContext(Dispatchers.Main) {
+                        try { callback?.onError(e.message ?: "zenz convert failed") } catch (_: RemoteException) {}
+                    }
+                } finally {
+                    this@LlmService.isZenzGenerating = false
+                }
+            }
+        }
+
+        override fun cancelZenzGeneration() {
+            LlamaJni.cancelZenzGeneration()
+            this@LlmService.isZenzGenerating = false
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -121,6 +179,10 @@ class LlmService : Service() {
         if (level >= TRIM_MEMORY_RUNNING_LOW && !isGenerating) {
             Log.w(TAG, "onTrimMemory($level) — force unloading model")
             LlamaJni.unloadModel()
+        }
+        if (level >= TRIM_MEMORY_RUNNING_LOW && !isZenzGenerating && LlamaJni.isZenzModelLoaded()) {
+            Log.w(TAG, "onTrimMemory($level) — force unloading zenz model")
+            LlamaJni.unloadZenzModel()
         }
     }
 
@@ -255,6 +317,9 @@ class LlmService : Service() {
         scope.cancel()
         if (LlamaJni.isModelLoaded()) {
             LlamaJni.unloadModel()
+        }
+        if (LlamaJni.isZenzModelLoaded()) {
+            LlamaJni.unloadZenzModel()
         }
         super.onDestroy()
     }

@@ -152,6 +152,12 @@ class InputEngine(private val service: NacreInputMethodService) {
     var flickAlphaMode: Boolean = false
     private var predictionJob: Job? = null
 
+    // zenz neural conversion: async job + a sequence number that invalidates
+    // in-flight zenz requests whenever the conversion state changes (new
+    // conversion, segment adjustment, commit, cancel).
+    private var zenzJob: Job? = null
+    private var conversionSeq = 0
+
     // LLM-based candidate reranking (optional, async)
     val llmReranker = LlmReranker(service)
 
@@ -714,6 +720,7 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun startConversion(ic: InputConnection) {
+        val seq = ++conversionSeq
         val kana = japaneseEngine.romajiToHiragana(composingText, finalize = true)
         fullKana = kana
         segmentBoundary = kana.length // Default: entire kana is one segment
@@ -726,11 +733,54 @@ class InputEngine(private val service: NacreInputMethodService) {
                 selectedCandidateIndex = 0
                 isConverting = true
                 ic.setComposingText(results[0].surface, 1)
+                requestZenzCandidate(kana, seq)
                 return
             }
         }
         // No dictionary or no results: commit as kana
         finishComposing(ic)
+    }
+
+    /**
+     * zenz neural conversion (async, non-blocking): the engine candidates are
+     * already on screen; when the zenz full-sentence result arrives it is
+     * inserted as the FIRST candidate, deduplicated against the engine list.
+     * The user's current selection is preserved by surface identity, and the
+     * composing text always ends up showing the selected candidate (if the
+     * selection was the first candidate, the zenz surface takes over the
+     * composing text). Failure/timeout/unavailable leaves the candidate list
+     * exactly as the engine produced it. Stale results — composing changed,
+     * conversion committed/cancelled, segment boundary adjusted — are dropped
+     * via [conversionSeq] + [fullKana] equality.
+     */
+    private fun requestZenzCandidate(kana: String, seq: Int) {
+        if (isPasswordField) return // SPEC: no AI features in password fields
+        if (kana.length < 2) return
+        zenzJob?.cancel()
+        zenzJob = scope.launch {
+            val surface = try {
+                withContext(Dispatchers.Default) {
+                    service.voiceInputManager.convertViaZenz(kana, timeoutMs = 2500)
+                }
+            } catch (_: Exception) {
+                null
+            } ?: return@launch
+            if (!isConverting || seq != conversionSeq || fullKana != kana) return@launch
+            val ic = service.currentInputConnection ?: return@launch
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                val prevSelectedSurface = candidates.getOrNull(selectedCandidateIndex)?.surface
+                val existingIdx = candidates.indexOfFirst { it.surface == surface }
+                if (existingIdx >= 0) candidates.removeAt(existingIdx)
+                candidates.add(0, ConversionCandidate(surface = surface, reading = kana, cost = -100))
+                selectedCandidateIndex = when {
+                    prevSelectedSurface == null -> 0
+                    prevSelectedSurface == surface -> 0
+                    else -> candidates.indexOfFirst { it.surface == prevSelectedSurface }
+                        .takeIf { it >= 0 } ?: selectedCandidateIndex.coerceIn(0, candidates.size - 1)
+                }
+                ic.setComposingText(candidates[selectedCandidateIndex].surface, 1)
+            }
+        }
     }
 
     /**
@@ -742,6 +792,11 @@ class InputEngine(private val service: NacreInputMethodService) {
         if (!isConverting || fullKana.isEmpty()) return
         val ic = service.currentInputConnection ?: return
         val dict = dictionary ?: return
+        // Segment adjustment replaces the candidate list with segment-scoped
+        // results — a pending full-sentence zenz result no longer applies.
+        conversionSeq++
+        zenzJob?.cancel()
+        zenzJob = null
 
         when (direction) {
             SwipeDirection.Left -> {
@@ -1002,6 +1057,9 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun clearCandidates() {
         predictionJob?.cancel()
         predictionJob = null
+        conversionSeq++
+        zenzJob?.cancel()
+        zenzJob = null
         candidates.clear()
         selectedCandidateIndex = -1
         isConverting = false
@@ -1328,6 +1386,7 @@ class InputEngine(private val service: NacreInputMethodService) {
      * Flick-mode conversion. Uses composingFlickKana directly (no romaji).
      */
     private fun startFlickConversion(ic: android.view.inputmethod.InputConnection) {
+        val seq = ++conversionSeq
         val kana = composingFlickKana
         val dict = dictionary
         if (dict != null) {
@@ -1340,6 +1399,8 @@ class InputEngine(private val service: NacreInputMethodService) {
                 selectedCandidateIndex = 0
                 isConverting = true
                 ic.setComposingText(results[0].surface, 1)
+                // zenz converts Japanese kana only — skip in ABC (alpha) mode.
+                if (!flickAlphaMode) requestZenzCandidate(kana, seq)
                 return
             }
         }

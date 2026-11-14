@@ -21,7 +21,10 @@ import space.manus.nacre.ai.ILlmCallback
 import space.manus.nacre.ai.ILlmService
 import space.manus.nacre.ai.IWhisperService
 import space.manus.nacre.ai.IWhisperCallback
+import space.manus.nacre.ai.KanaUtils
 import space.manus.nacre.ai.LlmPostProcessor
+import space.manus.nacre.ai.ZenzOutput
+import space.manus.nacre.ai.ZenzStatus
 import space.manus.nacre.ime.NacreInputMethodService
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -76,6 +79,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     // LLM post-processing (local Qwen via isolated LlmService over AIDL)
     @Volatile private var llmService: ILlmService? = null
     @Volatile private var llmBound = false
+
+    // zenz neural conversion (model lives in the same LlmService process, but
+    // with its own handle). llmService above is only assigned when the Qwen
+    // cleanup model loads, so zenz keeps its own service reference — it must
+    // also work when a cloud refiner is configured and Qwen is never loaded.
+    @Volatile private var zenzService: ILlmService? = null
+    private val zenzLoadLock = Any()
+    @Volatile private var zenzLoadState = ZENZ_LOAD_IDLE
+    @Volatile private var zenzLoadFailedAt = 0L
 
     // Deterministic, instant (no LLM round-trip) post-processing: hallucination
     // filtering and self-correction ("じゃなくて" / "no wait") resolution. Runs
@@ -150,7 +162,14 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         override fun onServiceConnected(name: android.content.ComponentName?, binder: android.os.IBinder?) {
             val svc = ILlmService.Stub.asInterface(binder)
             llmBound = true
+            zenzService = svc
             writeDiagnostic("llmConnection.onServiceConnected")
+            // zenz warm-up: independent of the Qwen/cloud logic below (whose
+            // early returns must not skip it). Lazy-loads the 74MB converter
+            // in the background so the first conversion after startup can
+            // already use it; if it is not ready yet, conversions simply
+            // fall back to engine candidates until it is.
+            ensureZenzLoaded()
             Thread {
                 try {
                     // Cloud-first: when a cloud refiner key is configured, do NOT load
@@ -205,6 +224,8 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             Log.w(TAG, "LlmService disconnected")
             llmService = null
             llmBound = false
+            zenzService = null
+            synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_IDLE }
         }
     }
 
@@ -1309,6 +1330,8 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             service.unbindService(llmConnection)
             llmBound = false
             llmService = null
+            zenzService = null
+            synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_IDLE }
         }
     }
 
@@ -1448,6 +1471,142 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         return result.get()
     }
 
+    // ── zenz neural conversion ──────────────────────────────────────────
+
+    /**
+     * Lazy zenz load state machine: IDLE → LOADING → READY / FAILED.
+     * Triggered on LlmService connect (warm-up) and on each conversion
+     * request. A conversion that arrives while LOADING gets no zenz
+     * candidate (engine candidates still show); later conversions use the
+     * model. Every failure is recorded via [ZenzStatus] so the Settings
+     * screen can show it — a dead zenz model must never fail silently.
+     */
+    private fun ensureZenzLoaded() {
+        val svc = zenzService ?: return
+        if (!ZenzStatus.isEnabled(service)) {
+            ZenzStatus.record(service, ZenzStatus.State.DISABLED)
+            return
+        }
+        synchronized(zenzLoadLock) {
+            if (zenzLoadState == ZENZ_LOAD_LOADING || zenzLoadState == ZENZ_LOAD_READY) return
+            if (zenzLoadState == ZENZ_LOAD_FAILED &&
+                System.currentTimeMillis() - zenzLoadFailedAt < ZENZ_LOAD_RETRY_MS
+            ) return
+            zenzLoadState = ZENZ_LOAD_LOADING
+        }
+        Thread {
+            try {
+                if (svc.isZenzModelLoaded) {
+                    synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_READY }
+                    ZenzStatus.record(service, ZenzStatus.State.READY)
+                    return@Thread
+                }
+                val downloader = space.manus.nacre.ai.ModelDownloader(service)
+                val path = downloader.getZenzModelPath()
+                if (path == null) {
+                    synchronized(zenzLoadLock) {
+                        zenzLoadState = ZENZ_LOAD_FAILED
+                        zenzLoadFailedAt = System.currentTimeMillis()
+                    }
+                    ZenzStatus.record(
+                        service, ZenzStatus.State.NOT_DOWNLOADED,
+                        "zenz-v3.2-small is not downloaded yet",
+                    )
+                    writeDiagnostic("zenz: model file not found — conversion stays engine-only")
+                    return@Thread
+                }
+                ZenzStatus.record(service, ZenzStatus.State.LOADING, java.io.File(path).name)
+                svc.loadZenzModel(path)
+                val start = System.currentTimeMillis()
+                while (!svc.isZenzModelLoaded && System.currentTimeMillis() - start < 30_000) {
+                    Thread.sleep(300)
+                }
+                if (svc.isZenzModelLoaded) {
+                    synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_READY }
+                    ZenzStatus.record(service, ZenzStatus.State.READY, java.io.File(path).name)
+                    writeDiagnostic("zenz: model ready")
+                } else {
+                    val err = try { svc.zenzLoadError } catch (_: Exception) { "" }
+                    synchronized(zenzLoadLock) {
+                        zenzLoadState = ZENZ_LOAD_FAILED
+                        zenzLoadFailedAt = System.currentTimeMillis()
+                    }
+                    ZenzStatus.record(
+                        service, ZenzStatus.State.LOAD_ERROR,
+                        err.ifBlank { "model did not become ready after 30s" },
+                    )
+                    writeDiagnostic("zenz: LOAD FAILED: $err")
+                }
+            } catch (e: Exception) {
+                synchronized(zenzLoadLock) {
+                    zenzLoadState = ZENZ_LOAD_FAILED
+                    zenzLoadFailedAt = System.currentTimeMillis()
+                }
+                ZenzStatus.record(service, ZenzStatus.State.LOAD_ERROR, e.message ?: "load exception")
+                writeDiagnostic("zenz: load exception ${e.message}")
+            }
+        }.start()
+    }
+
+    /**
+     * zenz neural conversion of a composing hiragana string. Blocking — call
+     * from a background dispatcher. Returns the converted surface, or null
+     * when zenz is disabled / not ready / busy / timed out / produced
+     * nothing usable; null always means "engine candidates only", i.e.
+     * exactly today's behavior. Failures are recorded in [ZenzStatus].
+     * Never logs the input text (user content).
+     */
+    fun convertViaZenz(hiragana: String, timeoutMs: Long = ZENZ_TIMEOUT_MS): String? {
+        if (hiragana.length < 2) return null
+        // zenz converts Japanese kana; anything else (e.g. ASCII) is out of scope.
+        if (hiragana.none { it in 'ぁ'..'ゖ' || it in 'ァ'..'ヶ' }) return null
+        if (!ZenzStatus.isEnabled(service)) return null
+        val svc = zenzService ?: run {
+            // :llm binding is lazy (binds on first voice/LLM use). Kick it off
+            // so later conversions can use zenz; this one stays engine-only.
+            mainHandler.post { ensureLlmBound() }
+            return null
+        }
+        ensureZenzLoaded()
+        val ready = try { svc.isZenzModelLoaded } catch (_: Exception) { false }
+        if (!ready) return null
+
+        val katakana = KanaUtils.hiraganaToKatakana(hiragana)
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<String?>(null)
+        val error = AtomicReference<String?>(null)
+        try {
+            svc.zenzConvert(
+                katakana,
+                object : ILlmCallback.Stub() {
+                    override fun onResult(text: String) {
+                        result.set(text)
+                        latch.countDown()
+                    }
+                    override fun onPartialResult(text: String) { /* not used */ }
+                    override fun onError(message: String) {
+                        error.set(message)
+                        latch.countDown()
+                    }
+                },
+            )
+        } catch (e: Exception) {
+            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, e.message ?: "IPC failed")
+            return null
+        }
+        val finished = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!finished) {
+            try { svc.cancelZenzGeneration() } catch (_: Exception) {}
+            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, "timeout after ${timeoutMs}ms")
+            return null
+        }
+        error.get()?.let {
+            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, it)
+            return null
+        }
+        return ZenzOutput.sanitize(result.get(), katakana, hiragana)
+    }
+
     /**
      * Write diagnostic info to a file readable from Termux.
      * File: /sdcard/Download/nacre-voice-debug.txt
@@ -1478,6 +1637,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         // in 500-1500ms; allow a few seconds of tail before falling through to
         // the next provider in the chain.
         private const val CLOUD_REFINE_TIMEOUT_MS = 6_000
+        // zenz conversion timeout: the 95M-param model converts a sentence in
+        // well under a second on-device; 2.5s of tail keeps a slow device from
+        // stalling the candidate bar (engine candidates are already shown).
+        private const val ZENZ_TIMEOUT_MS = 2_500L
+        private const val ZENZ_LOAD_RETRY_MS = 30_000L
+        private const val ZENZ_LOAD_IDLE = 0
+        private const val ZENZ_LOAD_LOADING = 1
+        private const val ZENZ_LOAD_READY = 2
+        private const val ZENZ_LOAD_FAILED = 3
         // No deferred commit timer — Typeless model: commit only on user stop action
         private val STT_BIASING_TERMS = listOf(
             "git", "git rebase", "git merge", "git pull", "git push", "GitHub",

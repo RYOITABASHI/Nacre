@@ -42,4 +42,31 @@ object LlamaJni {
      * @return generated text
      */
     external fun generate(prompt: String, maxTokens: Int): String
+
+    // --- zenz neural conversion (separate model handle from the cleanup LLM) ---
+
+    /** Load the zenz GGUF model. Blocks until loaded. Independent of [loadModel]. */
+    external fun loadZenzModel(modelPath: String): Boolean
+
+    /** Unload the zenz model and free its memory. */
+    external fun unloadZenzModel()
+
+    /** Check if the zenz model is currently loaded. */
+    external fun isZenzModelLoaded(): Boolean
+
+    /**
+     * Last zenz load failure detail (empty when the last load succeeded or no
+     * load was attempted). Surfaced in Settings so a dead model is visible.
+     */
+    external fun getZenzLoadError(): String
+
+    /** Cancel an in-progress zenz generation. */
+    external fun cancelZenzGeneration()
+
+    /**
+     * Generate a conversion with zenz. The prompt must already be in zenz
+     * format (U+EE00 + katakana reading + U+EE01); see LlmService.zenzConvert.
+     * @return generated text ("" on failure / not loaded)
+     */
+    external fun generateZenz(prompt: String, maxTokens: Int): String
 }
