@@ -28,6 +28,18 @@ class FeedbackManager(context: Context) {
         sound.onKeyTap(SoundManager.KeyType.NORMAL)
     }
 
+    /**
+     * One tick of a long-press delete REPEAT (fires every ~50ms while the
+     * key is held). Deliberately the light trackball tick, not the full
+     * key-press vibration: the strengthened tap would buzz continuously
+     * during a long delete. The single deliberate backspace press still
+     * goes through [onKeyPress] and gets the full tap.
+     */
+    fun onDeleteRepeat() {
+        haptic.onTrackballStep()
+        sound.onKeyTap(SoundManager.KeyType.BACKSPACE)
+    }
+
     fun onLongPress() {
         haptic.onLongPress()
     }

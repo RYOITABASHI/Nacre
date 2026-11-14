@@ -1367,7 +1367,7 @@ private fun FlickModKeyView(
         delay(80L)
         while (bsRepeating) {
             service.inputEngine.processFlickBackspace()
-            service.feedbackManager.onKeyPress(KeyAction.Backspace)
+            service.feedbackManager.onDeleteRepeat()
             delay(50L)
         }
     }

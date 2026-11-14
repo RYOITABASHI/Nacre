@@ -57,7 +57,7 @@ fun KeyView(
         while (bsRepeating) {
             val wasComposing = service.inputEngine.composingKana.isNotEmpty()
             service.inputEngine.processAction(KeyAction.Backspace)
-            service.feedbackManager.onKeyPress(KeyAction.Backspace)
+            service.feedbackManager.onDeleteRepeat()
             val isNowEmpty = service.inputEngine.composingKana.isEmpty()
             if (wasComposing && isNowEmpty) {
                 // Composing text just cleared — pause before deleting committed text

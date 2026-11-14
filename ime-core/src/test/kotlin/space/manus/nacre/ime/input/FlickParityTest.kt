@@ -20,9 +20,16 @@ import org.junit.Test
  *          https://wmkeyboard.app/languages/cjk/
  *          https://www.fluentu.com/help/how-do-i-type-japanese-on-my-ios-device/
  * Assumptions where sources are silent (stated in the PR): the わ tap-cycle
- * punctuation tail order 、。！？・… (feature-phone convention), brackets
- * sitting at their flick positions inside the や tap cycle, and ・ appended
+ * punctuation tail order 、。！？・… (feature-phone convention), and ・ appended
  * at the end of the 、。？！ tap cycle for tap reachability (iOS: long-press).
+ *
+ * Correction (2026-11-15): the や tap cycle does NOT interleave the corner
+ * brackets at their flick positions. On iOS the multi-tap cycle follows the
+ * row's KANA order like every other row — tapping や twice yields ゆ, not 「
+ * (verified: appllio's iPhone toggle-input explainer, 「やや」と打つと「ゆ」に
+ * なる). The brackets are flick/long-press characters on iOS. Nacre keeps
+ * them at the cycle TAIL for tap reachability (the ・ precedent above), so
+ * the kana positions are や=1, ゆ=2, よ=3, ゃ=4, ゅ=5, ょ=6, 「=7, 」=8.
  */
 class FlickParityTest {
 
@@ -81,7 +88,7 @@ class FlickParityTest {
             "な" to listOf("な", "に", "ぬ", "ね", "の"),
             "は" to listOf("は", "ひ", "ふ", "へ", "ほ"),
             "ま" to listOf("ま", "み", "む", "め", "も"),
-            "や" to listOf("や", "「", "ゆ", "」", "よ", "ゃ", "ゅ", "ょ"),
+            "や" to listOf("や", "ゆ", "よ", "ゃ", "ゅ", "ょ", "「", "」"),
             "ら" to listOf("ら", "り", "る", "れ", "ろ"),
             "わ" to listOf("わ", "を", "ん", "ー", "〜", "、", "。", "！", "？", "・", "…"),
             "punct" to listOf("、", "。", "？", "！", "…", "・"),
@@ -122,8 +129,10 @@ class FlickParityTest {
         assertEquals(5, FlickEngine.tapsToReach(key("あ"), "お"))
         assertEquals(6, FlickEngine.tapsToReach(key("あ"), "ぁ"))
         assertEquals(6, FlickEngine.tapsToReach(key("た"), "っ"))
-        assertEquals(2, FlickEngine.tapsToReach(key("や"), "「"))
-        assertEquals(4, FlickEngine.tapsToReach(key("や"), "」"))
+        assertEquals(2, FlickEngine.tapsToReach(key("や"), "ゆ"))
+        assertEquals(3, FlickEngine.tapsToReach(key("や"), "よ"))
+        assertEquals(7, FlickEngine.tapsToReach(key("や"), "「"))
+        assertEquals(8, FlickEngine.tapsToReach(key("や"), "」"))
         assertEquals(3, FlickEngine.tapsToReach(key("わ"), "ん"))
         assertEquals(-1, FlickEngine.tapsToReach(key("か"), "。"))
     }
@@ -311,6 +320,66 @@ class FlickParityTest {
         assertEquals("づ", pad.composing)
         pad.dakutenKey()
         assertEquals("つ", pad.composing)
+    }
+
+    // ── や row tap order: kana order, no brackets interleaved ──────
+    //
+    // The anomaly the owner hit: や was the ONLY row whose tap cycle was
+    // built from flick positions, parking 「/」 between the kana. A tap
+    // user tapping や twice for ゆ got 「, ゆ cost 3 taps and よ 5 taps.
+    // On iOS the toggle cycle follows the row's kana order (や→ゆ→よ→
+    // ゃ→ゅ→ょ), the brackets being flick-only characters; Nacre keeps
+    // them reachable at the cycle tail.
+
+    @Test
+    fun `ya double tap gives yu not a bracket`() {
+        val pad = FakeKanaPad()
+        val ya = key("や")
+        pad.tap(ya, 0L)
+        assertEquals("や", pad.composing)
+        pad.tap(ya, 100L)
+        assertEquals("ゆ", pad.composing) // was 「 before the fix
+        pad.tap(ya, 200L)
+        assertEquals("よ", pad.composing) // was ゆ before the fix
+    }
+
+    @Test
+    fun `ya row words type with kana order taps`() {
+        val pad = FakeKanaPad()
+        val ya = key("や"); val ka = key("か"); val ra = key("ら")
+        var t = 0L
+        fun taps(k: FlickEngine.FlickKey, n: Int) { repeat(n) { pad.tap(k, t); t += 100L } }
+        taps(ya, 2); taps(ka, 2) // ゆき (ゆ was 3 taps before the fix)
+        assertEquals("ゆき", pad.composing)
+
+        val pad2 = FakeKanaPad()
+        t = 0L
+        fun taps2(k: FlickEngine.FlickKey, n: Int) { repeat(n) { pad2.tap(k, t); t += 100L } }
+        taps2(ya, 3); taps2(ra, 3) // よる (よ was 5 taps before the fix)
+        assertEquals("よる", pad2.composing)
+    }
+
+    @Test
+    fun `no kana row interleaves brackets between its kana`() {
+        // For every kana key, any 「/」 in its tap cycle must sit AFTER all
+        // of the row's own kana (cross members + their small forms). The わ
+        // row's punctuation tail passes because 、。… are not brackets and
+        // its kana (わをん) lead the cycle.
+        val brackets = setOf("「", "」", "『", "』", "（", "）")
+        for (k in FlickEngine.kanaKeys) {
+            val cycle = FlickEngine.tapCycleOf(k)
+            val rowKana = listOfNotNull(k.tap, k.left, k.up, k.right, k.down)
+                .filter { it !in brackets }
+                .flatMap { s -> listOf(s, FlickEngine.cycleKanaForm(s[0])?.toString() ?: s) }
+                .toSet()
+            val firstBracket = cycle.indexOfFirst { it in brackets }
+            if (firstBracket < 0) continue
+            val lastKana = cycle.indexOfLast { it in rowKana }
+            assertEquals(
+                "row ${k.id}: brackets must follow all row kana in $cycle",
+                true, firstBracket > lastKana,
+            )
+        }
     }
 
     @Test
