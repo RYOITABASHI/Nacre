@@ -22,6 +22,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.MacroEngine
+import space.manus.nacre.ime.input.VoiceAsrUiState
+import space.manus.nacre.ime.input.VoiceRefineUiState
 import space.manus.nacre.ime.trackball.TrackballView
 import kotlinx.coroutines.launch
 
@@ -153,6 +155,24 @@ fun QuickInputPad(service: NacreInputMethodService) {
                 modifier = Modifier.padding(top = 2.dp),
             )
         }
+        // Voice engine state, shown persistently (not only while listening)
+        // so a missing ASR model, an external-recognition fallback, or a
+        // dead refiner is visible BEFORE dictation — not silently after.
+        Text(
+            text = voiceManager.voiceStateSummary,
+            color = if (
+                voiceManager.voiceAsrUiState == VoiceAsrUiState.MODEL_MISSING ||
+                voiceManager.voiceAsrUiState == VoiceAsrUiState.EXTERNAL ||
+                voiceManager.voiceAsrUiState == VoiceAsrUiState.ERROR ||
+                voiceManager.voiceRefineUiState == VoiceRefineUiState.UNAVAILABLE
+            ) {
+                Color(0xFFFFAA33)
+            } else {
+                Color(0xFF888888)
+            },
+            fontSize = 9.sp,
+            modifier = Modifier.padding(top = 2.dp),
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
