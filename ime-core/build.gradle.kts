@@ -27,6 +27,13 @@ android {
     buildFeatures {
         compose = true
     }
+
+    testOptions {
+        // Unit tests run against the stub android.jar. Let android.util.Log
+        // and friends return default values instead of throwing, so the
+        // dictionary engine can run on a plain JVM (conversion benchmark).
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 // Mozc protobuf (vendored from google/mozc src/protocol/*.proto) → javalite Java.
