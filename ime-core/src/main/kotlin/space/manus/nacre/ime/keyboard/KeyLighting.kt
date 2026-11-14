@@ -1,11 +1,19 @@
 package space.manus.nacre.ime.keyboard
 
 import android.content.Context
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.dp
 import kotlin.math.*
 
 /**
@@ -70,8 +78,22 @@ class KeyLighting(context: Context) {
     // Matrix: random column activations
     private val matrixColumns = mutableStateMapOf<Int, Long>()
 
-    // Animation ticker — updated by KeyboardScreen
+    // Animation ticker — updated by KeyboardScreen, at 20fps and ONLY while a
+    // time-animated mode is active and the IME window is resumed.
     var animationTick by mutableStateOf(0L)
+
+    /**
+     * True for modes whose colors actually change with time (they read
+     * [animationTick]). OFF / STATIC / HEATMAP colors are time-invariant:
+     * STATIC depends only on [baseHue], HEATMAP only on press counts. Driving
+     * the ticker for them — as KeyboardScreen used to do for every non-OFF
+     * mode — recomposed every key 20x/sec while changing nothing on screen.
+     */
+    val isTimeAnimated: Boolean
+        get() = when (mode) {
+            Mode.REACTIVE, Mode.WAVE, Mode.BREATHING, Mode.MATRIX -> true
+            Mode.OFF, Mode.STATIC, Mode.HEATMAP -> false
+        }
 
     fun setMode(newMode: Mode) {
         mode = newMode
@@ -110,15 +132,18 @@ class KeyLighting(context: Context) {
             return FLUORESCENT_ORANGE.copy(alpha = 0.85f)
         }
 
-        val now = animationTick
+        // animationTick is read ONLY by the time-animated branches. Reading it
+        // unconditionally (as this function used to) subscribed every calling
+        // composable to the 20fps ticker even in OFF/STATIC/HEATMAP modes,
+        // where the returned color cannot depend on it.
         return when (mode) {
             Mode.OFF -> Color.Transparent
             Mode.STATIC -> hsvToColor(baseHue, 0.8f, 0.7f)
-            Mode.REACTIVE -> reactiveColor(keyId, now)
-            Mode.WAVE -> waveColor(column, now)
-            Mode.BREATHING -> breathingColor(now)
+            Mode.REACTIVE -> reactiveColor(keyId, animationTick)
+            Mode.WAVE -> waveColor(column, animationTick)
+            Mode.BREATHING -> breathingColor(animationTick)
             Mode.HEATMAP -> heatmapColor(keyId)
-            Mode.MATRIX -> matrixColor(row, column, now)
+            Mode.MATRIX -> matrixColor(row, column, animationTick)
         }
     }
 
@@ -199,5 +224,42 @@ class KeyLighting(context: Context) {
 
     private fun loadHue(): Float {
         return prefs.getFloat(KEY_HUE, 170f) // Default: cyan-ish (#00D4AA ≈ 163°)
+    }
+}
+
+/**
+ * The lighting border of a single key, isolated in its own tiny recomposition
+ * scope.
+ *
+ * Key composables used to call [KeyLighting.getKeyColor] in their own body —
+ * and the flick keys additionally read `animationTick` directly — so every
+ * 20fps tick invalidated and recomposed EVERY key on the pad (gesture
+ * handlers, popups, labels and all). Here the color is computed inside a
+ * [derivedStateOf] read only by this border: a tick recomputes colors off to
+ * the side, and this composable recomposes only when THIS key's color
+ * actually changes. In non-animated modes nothing subscribes to the tick at
+ * all (see [KeyLighting.getKeyColor]).
+ *
+ * [suppressed] hides the border without reading the color at all — used while
+ * the key is pressed, where the press glow takes precedence, exactly as the
+ * old in-body border selection did.
+ */
+@Composable
+fun KeyLightingBorder(
+    lighting: KeyLighting,
+    keyId: String,
+    row: Int,
+    column: Int,
+    shape: Shape,
+    suppressed: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
+    if (suppressed) return
+    val colorState = remember(lighting, keyId, row, column, lighting.mode, lighting.baseHue) {
+        derivedStateOf { lighting.getKeyColor(keyId, row, column) }
+    }
+    val color by colorState
+    if (color != Color.Transparent) {
+        Box(modifier.border(width = 1.dp, color = color, shape = shape))
     }
 }

@@ -662,10 +662,10 @@ private fun FlickKeyView(
     val surfaceColor = Color(theme.surface.toInt())
 
     val lighting = service.keyLighting
-    // Read animationTick to trigger recomposition on lighting updates
-    @Suppress("UNUSED_VARIABLE")
-    val tick = lighting.animationTick
-    val lightingColor = lighting.getKeyColor(flickKey.id, row, column)
+    // NOTE: no animationTick / getKeyColor read in this body anymore. The
+    // lighting border is drawn by KeyLightingBorder (below, in the Box
+    // content) inside a derivedStateOf, so the 20fps tick recomposes only
+    // that tiny border scope — never this whole key.
 
     val glowAlpha by animateFloatAsState(
         targetValue = if (isPressed) 0.8f else 0f,
@@ -673,11 +673,7 @@ private fun FlickKeyView(
         label = "flickGlow",
     )
     val pressGlow = if (isPressed) accentColor.copy(alpha = glowAlpha) else Color.Transparent
-    val borderColor = when {
-        pressGlow != Color.Transparent -> pressGlow
-        lightingColor != Color.Transparent -> lightingColor
-        else -> Color.Transparent
-    }
+    val borderColor = pressGlow
 
     val shape = RoundedCornerShape(6.dp)
     val flickThresholdPx = with(LocalDensity.current) { FLICK_THRESHOLD_DP.dp.toPx() }
@@ -801,6 +797,18 @@ private fun FlickKeyView(
             )
         }
 
+        // Lighting border overlay (own recomposition scope; hidden while
+        // pressed, where the press glow above takes precedence)
+        KeyLightingBorder(
+            lighting = lighting,
+            keyId = flickKey.id,
+            row = row,
+            column = column,
+            shape = shape,
+            suppressed = isPressed,
+            modifier = Modifier.matchParentSize(),
+        )
+
         // Flick popup: 48×48dp bubble above the key showing resolved kana
         if (showPopup && popupKana.isNotEmpty()) {
             val popupOffsetPx = with(LocalDensity.current) { -56.dp.roundToPx() }
@@ -868,9 +876,7 @@ private fun DakutenKeyView(
     val surfaceColor = Color(theme.surface.toInt())
 
     val lighting = service.keyLighting
-    @Suppress("UNUSED_VARIABLE")
-    val tick2 = lighting.animationTick
-    val lightingColor = lighting.getKeyColor("゛", row, column)
+    // Lighting color is read only inside KeyLightingBorder (see FlickKeyView).
 
     val glowAlpha by animateFloatAsState(
         targetValue = if (isPressed) 0.8f else 0f,
@@ -878,11 +884,7 @@ private fun DakutenKeyView(
         label = "dakutenGlow",
     )
     val pressGlow = if (isPressed) accentColor.copy(alpha = glowAlpha) else Color.Transparent
-    val borderColor = when {
-        pressGlow != Color.Transparent -> pressGlow
-        lightingColor != Color.Transparent -> lightingColor
-        else -> Color.Transparent
-    }
+    val borderColor = pressGlow
 
     val shape = RoundedCornerShape(6.dp)
     val flickThresholdPx = with(LocalDensity.current) { FLICK_THRESHOLD_DP.dp.toPx() }
@@ -994,6 +996,17 @@ private fun DakutenKeyView(
             )
         }
 
+        // Lighting border overlay (own recomposition scope)
+        KeyLightingBorder(
+            lighting = lighting,
+            keyId = "゛",
+            row = row,
+            column = column,
+            shape = shape,
+            suppressed = isPressed,
+            modifier = Modifier.matchParentSize(),
+        )
+
         // Popup
         if (showPopup) {
             val popupOffsetPx = with(LocalDensity.current) { -56.dp.roundToPx() }
@@ -1061,9 +1074,7 @@ private fun FlickModKeyView(
     val surfaceColor = Color(theme.surface.toInt())
 
     val lighting = service.keyLighting
-    @Suppress("UNUSED_VARIABLE")
-    val tick3 = lighting.animationTick
-    val lightingColor = lighting.getKeyColor(label, row, column)
+    // Lighting color is read only inside KeyLightingBorder (see FlickKeyView).
 
     val glowAlpha by animateFloatAsState(
         targetValue = if (isPressed) 0.8f else 0f,
@@ -1071,11 +1082,7 @@ private fun FlickModKeyView(
         label = "modKeyGlow",
     )
     val pressGlow = if (isPressed) accentColor.copy(alpha = glowAlpha) else Color.Transparent
-    val borderColor = when {
-        pressGlow != Color.Transparent -> pressGlow
-        lightingColor != Color.Transparent -> lightingColor
-        else -> Color.Transparent
-    }
+    val borderColor = pressGlow
 
     val shape = RoundedCornerShape(6.dp)
 
@@ -1163,6 +1170,17 @@ private fun FlickModKeyView(
             } else {
                 androidx.compose.ui.text.TextStyle.Default
             },
+        )
+
+        // Lighting border overlay (own recomposition scope)
+        KeyLightingBorder(
+            lighting = lighting,
+            keyId = label,
+            row = row,
+            column = column,
+            shape = shape,
+            suppressed = isPressed,
+            modifier = Modifier.matchParentSize(),
         )
     }
 }
