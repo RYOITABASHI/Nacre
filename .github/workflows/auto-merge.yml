@@ -1,0 +1,51 @@
+name: Auto-merge marked PRs
+
+on:
+  workflow_run:
+    workflows: ["Build Android APK"]
+    types: [completed]
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  auto-merge:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge the marked PR for this build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          PR=$(gh api "repos/${REPO}/pulls?state=open&base=main&head=${REPO%%/*}:${HEAD_BRANCH}" --jq '.[0].number // empty')
+          if [ -z "${PR}" ]; then echo "No open PR for ${HEAD_BRANCH}; nothing to do."; exit 0; fi
+          BODY=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.body // ""')
+          if ! grep -q '<!-- hayato:auto-merge -->' <<< "${BODY}"; then
+            echo "PR #${PR} has no auto-merge marker; leaving it manual."; exit 0
+          fi
+          DRAFT=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.draft')
+          if [ "${DRAFT}" = "true" ]; then echo "PR #${PR} is a draft; skipping."; exit 0; fi
+          if gh api "repos/${REPO}/pulls/${PR}/files" --paginate --jq '.[].filename' | grep -q '^\.github/workflows/'; then
+            echo "PR #${PR} touches .github/workflows/; never auto-merged."; exit 0
+          fi
+          MERGEABLE=null
+          for i in 1 2 3 4 5; do
+            MERGEABLE=$(gh api "repos/${REPO}/pulls/${PR}" --jq '.mergeable')
+            [ "${MERGEABLE}" != "null" ] && break
+            sleep 3
+          done
+          if [ "${MERGEABLE}" != "true" ]; then
+            echo "PR #${PR} is not mergeable (conflicts?); skipping."; exit 0
+          fi
+          gh api -X PUT "repos/${REPO}/pulls/${PR}/merge" -f merge_method=merge -f commit_title="Merge pull request #${PR} (auto-merge)"
+          echo "PR #${PR} merged."
+          gh api -X DELETE "repos/${REPO}/git/refs/heads/${HEAD_BRANCH}" || true
+          gh workflow run build-android.yml --repo "${REPO}" --ref main
+          echo "Release build dispatched on main."
