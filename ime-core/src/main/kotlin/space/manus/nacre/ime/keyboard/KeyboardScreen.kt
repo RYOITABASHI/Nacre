@@ -11,8 +11,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.delay
 import space.manus.nacre.config.ConfigRepository
 import space.manus.nacre.ime.NacreInputMethodService
@@ -35,31 +33,9 @@ fun KeyboardScreen(service: NacreInputMethodService) {
     val layoutEpoch = service.layoutEpoch.value
     val layoutMode = remember(layoutEpoch) { service.layoutSelector.selectLayout() }
 
-    // Lighting ticker (20fps). Two gates, both previously missing:
-    //  1. Mode: only time-animated modes (REACTIVE/WAVE/BREATHING/MATRIX) may
-    //     drive the tick. STATIC and HEATMAP colors never change with time,
-    //     yet the old `mode != OFF` condition ticked for them too, recomposing
-    //     every key 20x/sec for a static picture.
-    //  2. Visibility: the tick runs only while the IME window is resumed.
-    //     The input view is cached and the service lifecycle is driven by
-    //     onWindowShown/onWindowHidden, so tracking it here stops the ticker
-    //     when the keyboard is hidden instead of relying on view detachment.
+    // Animate lighting tick (updates every frame when lighting is active)
     val lighting = service.keyLighting
-    var windowResumed by remember {
-        mutableStateOf(service.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
-    }
-    DisposableEffect(service) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> windowResumed = true
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> windowResumed = false
-                else -> Unit
-            }
-        }
-        service.lifecycle.addObserver(observer)
-        onDispose { service.lifecycle.removeObserver(observer) }
-    }
-    if (lighting.isTimeAnimated && windowResumed) {
+    if (lighting.mode != KeyLighting.Mode.OFF) {
         LaunchedEffect(lighting.mode) {
             while (true) {
                 lighting.animationTick = System.currentTimeMillis()
