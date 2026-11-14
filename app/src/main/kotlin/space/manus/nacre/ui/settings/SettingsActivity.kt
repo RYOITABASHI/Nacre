@@ -63,6 +63,7 @@ private data class ModelDiscovery(
     val llmPath: String? = null,
     val zenzPath: String? = null,
     val senseVoiceDir: String? = null,
+    val parakeetDir: String? = null,
     val vadPath: String? = null,
 )
 
@@ -76,6 +77,7 @@ private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloa
                 llmPath = downloader.getLlmModelPath(),
                 zenzPath = downloader.getZenzModelPath(),
                 senseVoiceDir = downloader.getPreferredAsrModelDir(),
+                parakeetDir = downloader.getParakeetModelDir(),
                 vadPath = downloader.getVadModelPath(),
             )
         }
@@ -1759,6 +1761,14 @@ private fun KenLmModelSection() {
     }
 }
 
+/** Total size (MB) of the .onnx files in an ASR model directory — works
+ *  for all three layouts (transducer parts, single-file CTC/SenseVoice). */
+private fun asrDirSizeMb(dirPath: String): Long {
+    val dir = java.io.File(dirPath)
+    val bytes = dir.listFiles { f -> f.extension == "onnx" }?.sumOf { it.length() } ?: 0L
+    return bytes / 1024 / 1024
+}
+
 @Composable
 private fun WhisperModelSection() {
     val context = LocalContext.current
@@ -1767,10 +1777,30 @@ private fun WhisperModelSection() {
     var modelDir by remember { mutableStateOf<String?>(null) }
     var vadPath by remember { mutableStateOf<String?>(null) }
     val isReady = modelDir != null && vadPath != null
-    var modelSize by remember {
-        mutableStateOf(
-            modelDir?.let { downloader.getSenseVoiceModelFile(it)?.length()?.div(1024)?.div(1024) } ?: 0L
+    var modelSize by remember { mutableStateOf(0L) }
+    // Engine name of the preferred (active) ASR dir, from its file layout.
+    val activeEngine = modelDir?.let {
+        space.manus.nacre.ai.AsrModelDetector.engineDisplayName(
+            space.manus.nacre.ai.AsrModelDetector.detect(java.io.File(it)),
         )
+    }
+
+    // Parakeet opt-in download state (never auto-downloaded; see below).
+    var parakeetDir by remember { mutableStateOf<String?>(null) }
+    var parakeetDownloading by remember { mutableStateOf(false) }
+    var parakeetProgressPct by remember { mutableStateOf(0) }
+    var parakeetProgressBytes by remember { mutableStateOf(0L to 0L) }
+    var showParakeetConfirm by remember { mutableStateOf(false) }
+    val parakeetSizeMb = space.manus.nacre.ai.ModelDownloader.PARAKEET_MODEL_BYTES / 1024 / 1024
+
+    fun refreshParakeet() {
+        val found = downloader.getParakeetModelDir()
+        parakeetDir = found
+        if (found != null) {
+            // Parakeet outranks the other engines once present.
+            modelDir = found
+            modelSize = asrDirSizeMb(found)
+        }
     }
 
     // Re-check model when returning from permission settings
@@ -1782,10 +1812,11 @@ private fun WhisperModelSection() {
                 val foundVad = discovery.vadPath
                 if (foundDir != null) {
                     modelDir = foundDir
-                    modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
+                    modelSize = asrDirSizeMb(foundDir)
                 }
                 if (foundVad != null) vadPath = foundVad
             }
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refreshParakeet()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -1795,11 +1826,17 @@ private fun WhisperModelSection() {
         val foundDir = discovery.senseVoiceDir
         if (modelDir == null && foundDir != null) {
             modelDir = foundDir
-            modelSize = downloader.getSenseVoiceModelFile(foundDir)?.length()?.div(1024)?.div(1024) ?: 0L
+            modelSize = asrDirSizeMb(foundDir)
         }
         val foundVad = discovery.vadPath
         if (vadPath == null && foundVad != null) {
             vadPath = foundVad
+        }
+    }
+
+    LaunchedEffect(discovery.parakeetDir) {
+        if (parakeetDir == null && discovery.parakeetDir != null) {
+            parakeetDir = discovery.parakeetDir
         }
     }
 
@@ -1810,7 +1847,10 @@ private fun WhisperModelSection() {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("SenseVoice", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Text(
+                    activeEngine?.let { "音声認識（$it）" } ?: "音声認識 (ASR)",
+                    color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                )
                 Spacer(modifier = Modifier.width(8.dp))
                 if (isReady) {
                     Text("Ready", color = Color(0xFF4CAF50), fontSize = 12.sp, fontWeight = FontWeight.Bold)
@@ -1822,7 +1862,7 @@ private fun WhisperModelSection() {
             Spacer(modifier = Modifier.height(4.dp))
 
             if (isReady) {
-                Text("Offline voice input — ja/en/zh/ko (${modelSize}MB)", color = NacreTextDim, fontSize = 12.sp)
+                Text("Offline voice input — 端末内認識 (${modelSize}MB)", color = NacreTextDim, fontSize = 12.sp)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(modelDir!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
                 if (vadPath != null) {
@@ -1830,7 +1870,7 @@ private fun WhisperModelSection() {
                 }
             } else {
                 Text(
-                    "Place SenseVoice model directory + silero_vad.onnx in /sdcard/Download/",
+                    "Place an ASR model directory (ReazonSpeech/SenseVoice) + silero_vad.onnx in /sdcard/Download/",
                     color = NacreTextDim, fontSize = 12.sp,
                 )
                 if (modelDir == null) {
@@ -1840,7 +1880,120 @@ private fun WhisperModelSection() {
                     Text("VAD: not found", color = Color(0xFFFF6666), fontSize = 11.sp)
                 }
             }
+
+            // ── Parakeet: opt-in high-accuracy ASR upgrade ──────────────
+            // 655MB, so it is NEVER auto-downloaded: the size is shown in
+            // the section and again in the confirmation dialog before the
+            // download starts. Once present it outranks ReazonSpeech at
+            // voice start; if it fails to load, ReazonSpeech takes over
+            // and the fallback is shown in the voice panel / VoiceStatus.
+            Spacer(modifier = Modifier.height(16.dp))
+            androidx.compose.material3.HorizontalDivider(color = NacreTextDim.copy(alpha = 0.2f))
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("高精度音声認識 Parakeet", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(modifier = Modifier.width(8.dp))
+                if (parakeetDir != null) {
+                    Text("ダウンロード済み", color = Color(0xFF4CAF50), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                } else {
+                    Text("未ダウンロード", color = NacreTextDim, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "NVIDIA Parakeet（日本語特化）へのアップグレード。実測CER 7.46%（現行ReazonSpeech 8.10%、JSUT）で、" +
+                    "ダウンロード後は自動で優先使用されます。読込に失敗した場合はReazonSpeechに自動で戻ります。",
+                color = NacreTextDim, fontSize = 12.sp,
+            )
+            if (parakeetDir != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(parakeetDir!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
+            } else {
+                Text(
+                    "サイズ: 約${parakeetSizeMb}MB（自動ダウンロードはされません）",
+                    color = NacreTextDim, fontSize = 12.sp,
+                )
+            }
+            if (parakeetDownloading) {
+                Spacer(modifier = Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { parakeetProgressPct / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                    trackColor = NacreTextDim.copy(alpha = 0.3f),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "${parakeetProgressPct}% (${parakeetProgressBytes.first / 1024 / 1024}/${parakeetProgressBytes.second / 1024 / 1024}MB)",
+                    color = NacreTextDim, fontSize = 11.sp,
+                )
+            }
+            if (parakeetDir == null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = { showParakeetConfirm = true },
+                    enabled = !parakeetDownloading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NacreAccent,
+                        contentColor = Color.Black,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (parakeetDownloading) "Downloading..."
+                        else "Parakeetをダウンロード（約${parakeetSizeMb}MB）"
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Model: Parakeet-tdt_ctc-0.6b-ja by NVIDIA, CC-BY-4.0. " +
+                    "sherpa-onnx package: csukuangfj/sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8. " +
+                    "モデルは端末へダウンロードされ、APKには含まれません。",
+                color = NacreTextDim.copy(alpha = 0.7f),
+                fontSize = 10.sp,
+            )
         }
+    }
+
+    if (showParakeetConfirm) {
+        AlertDialog(
+            onDismissRequest = { showParakeetConfirm = false },
+            title = { Text("Parakeetをダウンロード") },
+            text = {
+                Text(
+                    "高精度音声認識モデル Parakeet（約${parakeetSizeMb}MB）をダウンロードします。" +
+                        "大きなファイルです。Wi-Fi環境でのダウンロードを推奨します。" +
+                        "中断した場合は途中から再開できます。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showParakeetConfirm = false
+                        parakeetDownloading = true
+                        parakeetProgressPct = 0
+                        downloader.onProgress = { p ->
+                            parakeetProgressPct = p.percent
+                            parakeetProgressBytes = p.bytesDownloaded to p.totalBytes
+                        }
+                        downloader.downloadParakeet { ok ->
+                            parakeetDownloading = false
+                            downloader.onProgress = null
+                            if (ok) {
+                                refreshParakeet()
+                                Toast.makeText(context, "Parakeet downloaded. Restart keyboard.", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(context, "Download failed. 再開はもう一度ボタンから。", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                ) { Text("ダウンロード") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showParakeetConfirm = false }) { Text("キャンセル") }
+            },
+        )
     }
 }
 

@@ -52,6 +52,7 @@ class ModelDownloader(private val context: Context) {
     fun getDownloadedModels(): Map<String, Boolean> {
         return mapOf(
             "sensevoice" to (getSenseVoiceModelDir() != null),
+            "parakeet" to (getParakeetModelDir() != null),
             "vad" to (getVadModelPath() != null),
             "llm" to (getLlmModelPath() != null),
             "kenlm" to File(getModelsDir(), KENLM_FILENAME).exists(),
@@ -125,23 +126,20 @@ class ModelDownloader(private val context: Context) {
     }
 
     private fun isSenseVoiceDir(dir: File): Boolean {
+        // Layout classification is shared with SherpaRecognizer: a Parakeet
+        // (NeMo CTC) directory has the same model.int8.onnx + tokens.txt
+        // shape but must NOT be claimed as SenseVoice here.
         return try {
-            dir.isDirectory &&
-                getSenseVoiceModelFile(dir) != null &&
-                File(dir, "tokens.txt").exists()
+            AsrModelDetector.detect(dir) == AsrModelDetector.Kind.SENSEVOICE
         } catch (_: Exception) { false }
     }
 
-    // ---- ReazonSpeech ja Zipformer (preferred ASR) ----
+    // ---- ReazonSpeech ja Zipformer ----
 
     /** True when [dir] holds a Zipformer transducer (encoder/decoder/joiner + tokens). */
     private fun isReazonSpeechDir(dir: File): Boolean {
         return try {
-            if (!dir.isDirectory) return false
-            fun has(prefix: String) =
-                dir.listFiles { f -> f.name.startsWith(prefix) && f.name.endsWith(".onnx") && f.length() > 0 }
-                    ?.isNotEmpty() == true
-            has("encoder") && has("decoder") && has("joiner") && File(dir, "tokens.txt").exists()
+            AsrModelDetector.detect(dir) == AsrModelDetector.Kind.TRANSDUCER
         } catch (_: Exception) { false }
     }
 
@@ -169,11 +167,101 @@ class ModelDownloader(private val context: Context) {
     }
 
     /**
-     * Preferred ASR model dir: the Japanese-specialized ReazonSpeech transducer if
-     * present, otherwise the legacy SenseVoice dir. SherpaRecognizer auto-detects
-     * the model type from the directory contents.
+     * Preferred ASR model dir, highest priority first: Parakeet (opt-in
+     * high-accuracy upgrade) → ReazonSpeech transducer → legacy SenseVoice.
+     * SherpaRecognizer classifies the model type from the directory layout
+     * (see [AsrModelDetector]).
      */
-    fun getPreferredAsrModelDir(): String? = getReazonSpeechModelDir() ?: getSenseVoiceModelDir()
+    fun getPreferredAsrModelDir(): String? = getAsrModelDirCandidates().firstOrNull()
+
+    /**
+     * All present ASR model dirs in priority order (Parakeet, ReazonSpeech,
+     * SenseVoice), deduplicated. The voice startup path walks this list so a
+     * model that fails to load falls back to the next one instead of
+     * degrading the whole session.
+     */
+    fun getAsrModelDirCandidates(): List<String> =
+        listOfNotNull(getParakeetModelDir(), getReazonSpeechModelDir(), getSenseVoiceModelDir())
+            .distinct()
+
+    // ---- Parakeet-tdt_ctc-0.6b-ja (opt-in high-accuracy ASR upgrade) ----
+    //
+    // NVIDIA Parakeet FastConformer TDT-CTC (CTC side), int8, ~655MB.
+    // Measured 2026-11-15 on JSUT basic5000 (first 100 utterances, same
+    // sherpa-onnx 1.12.34 runtime, punctuation-stripped CER): 7.46% vs
+    // ReazonSpeech 8.10%, decode speed on par; the cost is size (about
+    // 3.9x ReazonSpeech) and a slower cold load. License: CC-BY-4.0 —
+    // attribution in THIRD_PARTY_LICENSES.md and the Settings AI Models
+    // section.
+    //
+    // NEVER bundled and NEVER auto-downloaded: at 655MB it is an explicit
+    // Settings opt-in (Settings → AI Models → 音声認識), with the size
+    // shown before the user confirms. ensureDefaultModelsDownloaded must
+    // not reference it.
+
+    /** True when [dir] holds the NeMo CTC (Parakeet) package layout. */
+    private fun isParakeetDir(dir: File): Boolean {
+        return try {
+            AsrModelDetector.detect(dir) == AsrModelDetector.Kind.NEMO_CTC
+        } catch (_: Exception) { false }
+    }
+
+    /** Path of the Parakeet model directory if present, else null. */
+    fun getParakeetModelDir(): String? {
+        val candidates = mutableListOf<File>()
+        candidates.add(File(getModelsDir(), PARAKEET_DIR))
+        context.getExternalFilesDir(null)?.let { candidates.add(File(it, "models/$PARAKEET_DIR")) }
+        val downloads = android.os.Environment.getExternalStoragePublicDirectory(
+            android.os.Environment.DIRECTORY_DOWNLOADS,
+        )
+        candidates.addAll(
+            listOf(
+                File(downloads, PARAKEET_DIR),
+                File("/sdcard/Download/$PARAKEET_DIR"),
+            ),
+        )
+        for (dir in candidates.distinctBy { it.absolutePath }) {
+            if (isParakeetDir(dir)) {
+                Log.i(TAG, "getParakeetModelDir: FOUND at ${dir.absolutePath}")
+                return dir.absolutePath
+            }
+        }
+        return null
+    }
+
+    /**
+     * Download the Parakeet package (model.int8.onnx ~655MB + tokens.txt)
+     * into the models dir. Resumable via the shared .tmp/Range mechanism;
+     * progress flows through [onProgress] per file. User-initiated only —
+     * call sites must show the size and get an explicit confirmation first.
+     */
+    fun downloadParakeet(onComplete: (Boolean) -> Unit) {
+        currentJob = scope.launch {
+            val dir = File(getModelsDir(), PARAKEET_DIR)
+            dir.mkdirs()
+            val modelOk = downloadModelInternal(
+                url = PARAKEET_MODEL_URL,
+                modelName = "Parakeet 高精度音声認識モデル",
+                fileName = "$PARAKEET_DIR/$PARAKEET_MODEL_FILENAME",
+            )
+            val tokensOk = if (modelOk) {
+                downloadModelInternal(
+                    url = PARAKEET_TOKENS_URL,
+                    modelName = "Parakeet tokens",
+                    fileName = "$PARAKEET_DIR/tokens.txt",
+                )
+            } else {
+                false
+            }
+            val ok = modelOk && tokensOk && getParakeetModelDir() != null
+            if (!ok) {
+                Log.w(TAG, "Parakeet download incomplete (model=$modelOk, tokens=$tokensOk); .tmp kept for resume")
+            }
+            withContext(Dispatchers.Main) {
+                onComplete(ok)
+            }
+        }
+    }
 
     /** Download the ReazonSpeech ja int8 model (~160MB) into the models dir if missing. */
     private suspend fun downloadReazonSpeechIfMissing() {
@@ -662,6 +750,14 @@ class ModelDownloader(private val context: Context) {
         // sherpa-onnx engine (offline transducer). Files mirrored into the Nacre
         // v0.1.0-models release as reazonspeech-ja-*; saved locally with clean names.
         const val REAZONSPEECH_DIR = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+        // Parakeet-tdt_ctc-0.6b-ja int8 (NeMo CTC) — opt-in download only,
+        // served from the sherpa-onnx Hugging Face mirror (same package the
+        // 2026-11-15 evaluation measured: model.int8.onnx sha256 3addd00e…).
+        const val PARAKEET_DIR = "sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8"
+        const val PARAKEET_MODEL_FILENAME = "model.int8.onnx"
+        const val PARAKEET_MODEL_BYTES = 655_542_604L
+        const val PARAKEET_MODEL_URL = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8/resolve/main/model.int8.onnx"
+        const val PARAKEET_TOKENS_URL = "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8/resolve/main/tokens.txt"
         const val REAZON_ENCODER = "encoder.int8.onnx"
         const val REAZON_DECODER = "decoder.onnx"
         const val REAZON_JOINER = "joiner.int8.onnx"

@@ -125,9 +125,16 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     var voiceRefineUiState by mutableStateOf(VoiceRefineUiState.LOADING)
         private set
 
+    /** Display name of the on-device ASR engine actually loaded
+     *  ("Parakeet" / "ReazonSpeech" / "SenseVoice"), resolved from the
+     *  model directory layout at load time. Blank until a load lands. */
+    var voiceAsrEngineName by mutableStateOf("")
+        private set
+
     fun asrStateLabel(): String = when (voiceAsrUiState) {
         VoiceAsrUiState.LOADING -> "モデル読込中"
-        VoiceAsrUiState.ON_DEVICE -> "端末内認識"
+        VoiceAsrUiState.ON_DEVICE ->
+            if (voiceAsrEngineName.isBlank()) "端末内認識" else "端末内認識（$voiceAsrEngineName）"
         VoiceAsrUiState.MODEL_MISSING -> "ASRモデル未DL"
         VoiceAsrUiState.EXTERNAL -> "外部認識で代用中"
         VoiceAsrUiState.ERROR -> "認識エラー"
@@ -230,34 +237,82 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             writeDiagnostic("onServiceConnected: WhisperService bound")
             Thread {
                 try {
+                    // Detail for the READY record when an earlier candidate
+                    // failed and a fallback engine took over (never silent).
+                    var readyDetail: String? = null
                     if (!svc.isModelLoaded) {
                         voiceAsrUiState = VoiceAsrUiState.LOADING
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
-                        // Prefer the ja-specialized ReazonSpeech transducer; fall back
-                        // to SenseVoice until ReazonSpeech finishes downloading.
-                        val modelDir = downloader.getPreferredAsrModelDir()
+                        // Priority order: Parakeet (opt-in high-accuracy
+                        // upgrade) -> ReazonSpeech -> SenseVoice. A model
+                        // that fails or times out falls back to the next
+                        // candidate instead of dropping the whole session
+                        // to the external SpeechRecognizer.
+                        val candidateDirs = downloader.getAsrModelDirCandidates()
                         val vadPath = downloader.getVadModelPath()
-                        writeDiagnostic("onServiceConnected: modelDir=$modelDir, vadPath=$vadPath")
-                        if (modelDir != null && vadPath != null) {
-                            svc.loadModel("$modelDir|$vadPath")
-                            for (i in 0 until 120) {
-                                Thread.sleep(500)
-                                if (svc.isModelLoaded) break
+                        writeDiagnostic("onServiceConnected: candidates=$candidateDirs, vadPath=$vadPath")
+                        if (candidateDirs.isNotEmpty() && vadPath != null) {
+                            var firstFailure: String? = null
+                            for (dir in candidateDirs) {
+                                val kind = space.manus.nacre.ai.AsrModelDetector.detect(java.io.File(dir))
+                                val engine = space.manus.nacre.ai.AsrModelDetector.engineDisplayName(kind) ?: "ASR"
+                                val loadStart = System.currentTimeMillis()
+                                svc.loadModel("$dir|$vadPath")
+                                // Parakeet is a 655MB CTC model with a much
+                                // slower cold load — give it a longer window
+                                // than the transducer's 60s.
+                                val timeoutMs = if (kind == space.manus.nacre.ai.AsrModelDetector.Kind.NEMO_CTC) {
+                                    120_000L
+                                } else {
+                                    60_000L
+                                }
+                                var failedFast = false
+                                val deadline = loadStart + timeoutMs
+                                while (System.currentTimeMillis() < deadline) {
+                                    if (svc.isModelLoaded) break
+                                    // WhisperService records a LOAD_ERROR in
+                                    // VoiceStatus the moment initialize()
+                                    // fails, naming the engine — don't wait
+                                    // out the timeout when that lands.
+                                    val snap = space.manus.nacre.ai.VoiceStatus.read(service)
+                                    if (snap?.asrState == space.manus.nacre.ai.VoiceStatus.AsrState.LOAD_ERROR &&
+                                        snap.epochMillis >= loadStart &&
+                                        snap.asrDetail.contains(engine)
+                                    ) {
+                                        failedFast = true
+                                        break
+                                    }
+                                    Thread.sleep(500)
+                                }
+                                if (svc.isModelLoaded) {
+                                    voiceAsrEngineName = engine
+                                    if (firstFailure != null) {
+                                        readyDetail = "$firstFailure → ${engine}で継続"
+                                        writeDiagnostic("onServiceConnected: $engine loaded after fallback ($firstFailure)")
+                                    }
+                                    break
+                                }
+                                val reason = if (failedFast) {
+                                    "${engine}読込失敗"
+                                } else {
+                                    "${engine}読込タイムアウト（${timeoutMs / 1000}秒）"
+                                }
+                                writeDiagnostic("onServiceConnected: $reason (dir=$dir)")
+                                if (firstFailure == null) firstFailure = reason
                             }
                             if (!svc.isModelLoaded) {
-                                writeDiagnostic("onServiceConnected: model load TIMEOUT after 60s")
                                 voiceAsrUiState = VoiceAsrUiState.ERROR
                                 space.manus.nacre.ai.VoiceStatus.recordAsr(
                                     service, space.manus.nacre.ai.VoiceStatus.AsrState.LOAD_ERROR,
-                                    "ASRモデルの読み込みが60秒で完了しませんでした",
+                                    "ASRモデルの読み込みに失敗しました（${firstFailure ?: "不明"}）",
                                 )
                             }
                         } else {
-                            writeDiagnostic("onServiceConnected: model NOT FOUND (dir=$modelDir, vad=$vadPath)")
+                            writeDiagnostic("onServiceConnected: model NOT FOUND (dirs=$candidateDirs, vad=$vadPath)")
                             voiceAsrUiState = VoiceAsrUiState.MODEL_MISSING
                             space.manus.nacre.ai.VoiceStatus.recordAsr(
                                 service, space.manus.nacre.ai.VoiceStatus.AsrState.NOT_DOWNLOADED,
-                                "ASRモデル（ReazonSpeech/SenseVoice + VAD）が見つかりません",
+                                "ASRモデル（Parakeet/ReazonSpeech/SenseVoice + VAD）が見つかりません",
                             )
                         }
                     } else {
@@ -265,7 +320,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     }
                     if (svc.isModelLoaded) {
                         whisperService = svc
-                        markAsrOnDevice()
+                        markAsrOnDevice(readyDetail)
                         writeDiagnostic("onServiceConnected: SUCCESS, whisperService set")
                     } else {
                         writeDiagnostic("onServiceConnected: FAIL, model not loaded, fallback to SpeechRecognizer")
@@ -646,11 +701,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
 
     // ── Whisper live preview / incremental commit helpers (main thread) ──
 
-    private fun markAsrOnDevice() {
+    private fun markAsrOnDevice(detail: String? = null) {
         voiceAsrUiState = VoiceAsrUiState.ON_DEVICE
         space.manus.nacre.ai.VoiceStatus.recordAsr(
             service, space.manus.nacre.ai.VoiceStatus.AsrState.READY,
-            "sherpa-onnx on-device model loaded",
+            detail ?: if (voiceAsrEngineName.isNotBlank()) {
+                "端末内認識: $voiceAsrEngineName"
+            } else {
+                "sherpa-onnx on-device model loaded"
+            },
         )
     }
 
