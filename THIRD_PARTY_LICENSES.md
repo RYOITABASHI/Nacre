@@ -136,3 +136,40 @@ in the file.
 
 Usage in Nacre: Supplementary dictionary for person-name conversion
 (surnames, given names, and composed full names).
+---
+
+## JMdict - Japanese-Multilingual Dictionary (loanword data)
+
+File: JMdict_e, by the Electronic Dictionary Research and Development
+Group (EDRDG).
+License: CC-BY-SA-4.0 (Creative Commons Attribution-ShareAlike 4.0
+International), per the EDRDG licence statement:
+https://www.edrdg.org/edrdg/licence.html
+Source: https://www.edrdg.org/jmdict/j_jmdict.html
+
+Usage in Nacre: A derived subset is bundled as
+ime-core/src/main/assets/dict/loanwords_en.tsv — hiragana reading ->
+English spelling for common katakana loanwords whose katakana form is a
+common entry in the bundled Mozc dictionary. It powers the English
+conversion candidates offered while composing Japanese (e.g. かめら ->
+"camera"). The derivation (selection and filtering rules) is documented
+in tools/build_english_assets.py; the generated file is distributed
+under the same CC-BY-SA-4.0 license.
+
+---
+
+## FrequencyWords - English Word Frequency (completion wordlist)
+
+Data: content/2018/en/en_50k.txt from the FrequencyWords project
+(hermitdave), generated from the OpenSubtitles 2018 English corpus
+(OPUS / OpenSubtitles.org).
+License: CC-BY-SA-4.0 for the content (MIT for the project code).
+Source: https://github.com/hermitdave/FrequencyWords
+
+Usage in Nacre: A derived subset is bundled as
+ime-core/src/main/assets/dict/english_full.tsv — the top 15,000 words
+by corpus frequency with costs derived from rank, plus a small
+hand-written supplement of modern/tech terms. It powers ABC-mode
+English completion in the candidate bar. The derivation is documented
+in tools/build_english_assets.py; the generated file is distributed
+under the same CC-BY-SA-4.0 license.
