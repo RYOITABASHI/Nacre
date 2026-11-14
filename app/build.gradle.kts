@@ -94,9 +94,32 @@ android {
         buildConfig = true
     }
 
-    // Prevent aapt2 from re-compressing already-gzipped assets
+    // Prevent aapt2 from re-compressing already-gzipped assets.
+    // NOTE: "bin" is deliberately NOT in this list. The two dict .bin
+    // assets are read exclusively through AssetManager streams, so APK
+    // deflate is transparent to them — and connection.bin (a mostly
+    // sparse 2670x2670 int16 matrix, 14,257,804 bytes raw) deflates to
+    // ~1.9MB, saving ~12.4MB of APK size. mozc_dict.bin is a gzip
+    // payload, so deflating it is size-neutral.
     androidResources {
-        noCompress += listOf("gz", "tsv.gz", "bin")
+        noCompress += listOf("gz", "tsv.gz")
+    }
+
+    packaging {
+        jniLibs {
+            // sherpa-onnx is only ever loaded through its JNI library
+            // (libsherpa-onnx-jni.so, via the sherpa-onnx Kotlin API).
+            // The vendored AAR also bundles the C and C++ API variants
+            // (libsherpa-onnx-c-api.so / libsherpa-onnx-cxx-api.so) for
+            // native consumers; nothing in the app loads them and the
+            // JNI library does not link them (verified with readelf:
+            // its NEEDED entries are only libonnxruntime.so and system
+            // libraries). Excluding them saves ~20.8MB across 4 ABIs.
+            excludes += listOf(
+                "**/libsherpa-onnx-c-api.so",
+                "**/libsherpa-onnx-cxx-api.so",
+            )
+        }
     }
 }
 
