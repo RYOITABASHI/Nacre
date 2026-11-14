@@ -175,7 +175,7 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
 
       - name: Publish GitHub Release (in-app updater channel)
-        if: env.NACRE_SIGNED_APK == 'true' && github.event_name == 'push'
+        if: env.NACRE_SIGNED_APK == 'true' && github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
