@@ -25,6 +25,11 @@ class SherpaRecognizer {
     private var vad: Vad? = null
     private var isInitialized = false
 
+    /** Layout classification of the currently loaded model dir, set by
+     *  [initialize]. [AsrModelDetector.Kind.NONE] until a load succeeds. */
+    var loadedKind: AsrModelDetector.Kind = AsrModelDetector.Kind.NONE
+        private set
+
     /**
      * Initialize the recognizer with model files from the given directory.
      * @param modelDir Directory containing model.int8.onnx or model.onnx, plus tokens.txt
@@ -34,7 +39,7 @@ class SherpaRecognizer {
         try {
             Log.i(TAG, "Initializing SherpaRecognizer from $modelDir")
             val modelConfig = buildModelConfig(modelDir)
-                ?: error("No recognizable ASR model (transducer or SenseVoice) in $modelDir")
+                ?: error("No recognizable ASR model (transducer, NeMo CTC, or SenseVoice) in $modelDir")
 
             val config = OfflineRecognizerConfig(
                 featConfig = FeatureConfig(sampleRate = SAMPLE_RATE, featureDim = 80),
@@ -58,21 +63,26 @@ class SherpaRecognizer {
             vad = Vad(config = vadConfig)
 
             isInitialized = true
-            Log.i(TAG, "SherpaRecognizer initialized successfully")
+            loadedKind = AsrModelDetector.detect(java.io.File(modelDir))
+            Log.i(TAG, "SherpaRecognizer initialized successfully (kind=$loadedKind)")
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize SherpaRecognizer", e)
             isInitialized = false
+            loadedKind = AsrModelDetector.Kind.NONE
             return false
         }
     }
 
     /**
-     * Build the model config by detecting what's in [modelDir]:
-     *  - a Zipformer transducer (encoder/decoder/joiner *.onnx) → ReazonSpeech ja
-     *    (preferred, Japanese-specialized);
-     *  - otherwise a SenseVoice model.onnx/model.int8.onnx → SenseVoice (fallback).
-     * Returns null if neither is present.
+     * Build the model config from the layout classification of [modelDir]
+     * (see [AsrModelDetector] for the rules):
+     *  - TRANSDUCER → ReazonSpeech ja Zipformer;
+     *  - NEMO_CTC → Parakeet-tdt_ctc-0.6b-ja (OfflineNemoEncDecCtc; the
+     *    pinned sherpa-onnx 1.12.34 AAR ships this config class and the
+     *    model dispatches on its embedded ONNX metadata);
+     *  - SENSEVOICE → SenseVoice (legacy fallback).
+     * Returns null when the directory holds no recognizable model.
      */
     private fun buildModelConfig(modelDir: String): OfflineModelConfig? {
         val dir = java.io.File(modelDir)
@@ -82,44 +92,52 @@ class SherpaRecognizer {
                 ?.sortedByDescending { it.name.contains("int8") }
                 ?.firstOrNull()
 
-        val encoder = pick("encoder")
-        val decoder = pick("decoder")
-        val joiner = pick("joiner")
-        if (encoder != null && decoder != null && joiner != null) {
-            Log.i(TAG, "Detected Zipformer transducer (ReazonSpeech): ${encoder.name}")
-            return OfflineModelConfig(
-                transducer = OfflineTransducerModelConfig(
-                    encoder = encoder.absolutePath,
-                    decoder = decoder.absolutePath,
-                    joiner = joiner.absolutePath,
-                ),
-                tokens = "$modelDir/tokens.txt",
-                numThreads = 2,
-                provider = "cpu",
-                modelType = "transducer",
-            )
+        return when (AsrModelDetector.detect(dir)) {
+            AsrModelDetector.Kind.TRANSDUCER -> {
+                val encoder = pick("encoder") ?: return null
+                val decoder = pick("decoder") ?: return null
+                val joiner = pick("joiner") ?: return null
+                Log.i(TAG, "Detected Zipformer transducer (ReazonSpeech): ${encoder.name}")
+                OfflineModelConfig(
+                    transducer = OfflineTransducerModelConfig(
+                        encoder = encoder.absolutePath,
+                        decoder = decoder.absolutePath,
+                        joiner = joiner.absolutePath,
+                    ),
+                    tokens = "$modelDir/tokens.txt",
+                    numThreads = 2,
+                    provider = "cpu",
+                    modelType = "transducer",
+                )
+            }
+            AsrModelDetector.Kind.NEMO_CTC -> {
+                val model = AsrModelDetector.singleModelFile(dir) ?: return null
+                Log.i(TAG, "Detected NeMo CTC model (Parakeet): ${model.name}")
+                OfflineModelConfig(
+                    nemo = OfflineNemoEncDecCtcModelConfig(
+                        model = model.absolutePath,
+                    ),
+                    tokens = "$modelDir/tokens.txt",
+                    numThreads = 2,
+                    provider = "cpu",
+                )
+            }
+            AsrModelDetector.Kind.SENSEVOICE -> {
+                val senseVoiceModel = AsrModelDetector.singleModelFile(dir)?.absolutePath ?: return null
+                Log.i(TAG, "Detected SenseVoice model: $senseVoiceModel")
+                OfflineModelConfig(
+                    senseVoice = OfflineSenseVoiceModelConfig(
+                        model = senseVoiceModel,
+                        language = RECOGNITION_LANGUAGE,
+                        useInverseTextNormalization = true,
+                    ),
+                    tokens = "$modelDir/tokens.txt",
+                    numThreads = 2,
+                    provider = "cpu",
+                )
+            }
+            AsrModelDetector.Kind.NONE -> null
         }
-
-        val senseVoiceModel = pickSenseVoiceModelFile(modelDir) ?: return null
-        Log.i(TAG, "Detected SenseVoice model: $senseVoiceModel")
-        return OfflineModelConfig(
-            senseVoice = OfflineSenseVoiceModelConfig(
-                model = senseVoiceModel,
-                language = RECOGNITION_LANGUAGE,
-                useInverseTextNormalization = true,
-            ),
-            tokens = "$modelDir/tokens.txt",
-            numThreads = 2,
-            provider = "cpu",
-        )
-    }
-
-    private fun pickSenseVoiceModelFile(modelDir: String): String? {
-        val candidates = listOf("model.onnx", "model.int8.onnx")
-        return candidates
-            .map { java.io.File(modelDir, it) }
-            .firstOrNull { it.exists() && it.length() > 0 }
-            ?.absolutePath
     }
 
     fun isReady(): Boolean = isInitialized
@@ -191,6 +209,7 @@ class SherpaRecognizer {
         recognizer = null
         vad = null
         isInitialized = false
+        loadedKind = AsrModelDetector.Kind.NONE
         Log.i(TAG, "SherpaRecognizer released")
     }
 }

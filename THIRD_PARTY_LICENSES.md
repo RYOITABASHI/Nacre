@@ -120,6 +120,30 @@ attribution is also shown in the Settings AI Models section.
 
 ---
 
+## Parakeet - High-Accuracy Japanese ASR Model (user-downloaded, not bundled)
+
+Model: Parakeet-tdt_ctc-0.6b-ja (FastConformer TDT-CTC, CTC decoder, int8)
+Author: NVIDIA
+License: CC-BY-4.0 (Creative Commons Attribution 4.0 International)
+License text: https://creativecommons.org/licenses/by/4.0/
+
+Source model: https://huggingface.co/nvidia/parakeet-tdt_ctc-0.6b-ja
+sherpa-onnx package (the exact files Nacre downloads at runtime):
+https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt_ctc-0.6b-ja-35000-int8
+
+Changes: none to the model itself. Nacre downloads the int8 sherpa-onnx
+package as published and runs it with the bundled sherpa-onnx runtime.
+
+Usage in Nacre: Optional high-accuracy upgrade for on-device voice input.
+It is NEVER bundled in the APK and NEVER auto-downloaded: the user opts in
+explicitly in Settings → AI Models → 音声認識 (the ~655MB size is shown
+before confirming). Once downloaded it takes priority over the bundled
+provisioning default (ReazonSpeech), which remains as the automatic
+fallback if the Parakeet model fails to load. This attribution is also
+shown in the Settings AI Models section.
+
+---
+
 ## Person-name dictionary data (bundled asset: dict/person_names.tsv)
 
 The surname selection and order follow the national surname ranking

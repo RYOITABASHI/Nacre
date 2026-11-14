@@ -40,6 +40,13 @@ class WhisperService : Service() {
 
     private var sherpaRecognizer: SherpaRecognizer? = null
 
+    // In-flight model load. A new loadModel call supersedes the previous
+    // one: the IME's priority fallback (Parakeet -> ReazonSpeech) issues a
+    // second loadModel while a slow/failed first load may still be running,
+    // and only the latest call's result may be adopted.
+    @Volatile
+    private var loadJob: Job? = null
+
     // Deterministic hallucination filtering for individual ASR segments. Cheap,
     // stateless, and catches known SenseVoice/whisper-style artifacts (e.g. the
     // model transcribing silence as "ご視聴ありがとうございました") before they
@@ -58,33 +65,60 @@ class WhisperService : Service() {
 
         override fun loadModel(modelPath: String) {
             writeDiag("loadModel called: $modelPath")
-            scope.launch {
+            // Supersede any in-flight load (see loadJob). The superseded
+            // coroutine's result is discarded when it eventually returns.
+            loadJob?.cancel()
+            val job = scope.launch {
                 try {
                     // modelPath format: "modelDir|vadModelPath"
                     val parts = modelPath.split("|", limit = 2)
                     val modelDir = parts[0]
                     val vadPath = if (parts.size > 1) parts[1] else ""
-                    writeDiag("Loading SenseVoice: dir=$modelDir, vad=$vadPath")
-                    val modelFile = pickSenseVoiceModelFile(modelDir)
+                    val kind = AsrModelDetector.detect(java.io.File(modelDir))
+                    val engine = AsrModelDetector.engineDisplayName(kind) ?: "ASR"
+                    writeDiag("Loading $engine: dir=$modelDir, vad=$vadPath")
+                    val modelFile = AsrModelDetector.singleModelFile(java.io.File(modelDir))
                     val vadFile = java.io.File(vadPath)
-                    writeDiag("sensevoice model=${modelFile?.name} exists=${modelFile?.exists()} size=${modelFile?.length() ?: 0}")
+                    writeDiag("model=${modelFile?.name} exists=${modelFile?.exists()} size=${modelFile?.length() ?: 0}")
                     writeDiag("silero_vad.onnx exists=${vadFile.exists()} size=${vadFile.length()}")
 
                     val rec = SherpaRecognizer()
                     val ok = rec.initialize(modelDir, vadPath)
-                    writeDiag("SherpaRecognizer.initialize() result=$ok")
+                    writeDiag("SherpaRecognizer.initialize() result=$ok (kind=${rec.loadedKind})")
+                    if (!isActive) {
+                        // A newer loadModel superseded this one while the
+                        // native recognizer was being constructed.
+                        writeDiag("loadModel superseded; discarding $engine result")
+                        rec.release()
+                        return@launch
+                    }
                     if (ok) {
                         sherpaRecognizer?.release()
                         sherpaRecognizer = rec
-                        writeDiag("SenseVoice model loaded successfully")
+                        writeDiag("$engine model loaded successfully")
                     } else {
-                        writeDiag("FAILED to initialize SherpaRecognizer")
+                        writeDiag("FAILED to initialize SherpaRecognizer ($engine)")
                         rec.release()
+                        // Record the failure where the IME process polls
+                        // for it: it can then fall back to the next model
+                        // in priority order immediately instead of waiting
+                        // out its load timeout. Never silent.
+                        VoiceStatus.recordAsr(
+                            applicationContext,
+                            VoiceStatus.AsrState.LOAD_ERROR,
+                            "${engine}モデルの読み込みに失敗しました",
+                        )
                     }
                 } catch (e: Exception) {
                     writeDiag("loadModel EXCEPTION: ${e.message}\n${e.stackTraceToString()}")
+                    VoiceStatus.recordAsr(
+                        applicationContext,
+                        VoiceStatus.AsrState.LOAD_ERROR,
+                        "ASRモデル読み込み例外: ${e.message}",
+                    )
                 }
             }
+            loadJob = job
         }
 
         override fun unloadModel() {
@@ -392,14 +426,8 @@ class WhisperService : Service() {
         Log.d(TAG, "WhisperService created (process=${android.os.Process.myPid()})")
     }
 
-    private fun pickSenseVoiceModelFile(modelDir: String): java.io.File? {
-        return listOf("model.onnx", "model.int8.onnx")
-            .map { java.io.File(modelDir, it) }
-            .firstOrNull { it.exists() && it.length() > 0 }
-    }
-
     /**
-     * Fallback to Android SpeechRecognizer when SenseVoice model is unavailable.
+     * Fallback to Android SpeechRecognizer when the on-device model is unavailable.
      */
     private fun startFallbackRecognition(language: String, callback: IWhisperCallback?) {
         if (!android.speech.SpeechRecognizer.isRecognitionAvailable(this)) {
