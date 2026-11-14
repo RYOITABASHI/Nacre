@@ -47,8 +47,6 @@ fun KeyView(
 ) {
     var isPressed by remember { mutableStateOf(false) }
     var bsRepeating by remember { mutableStateOf(false) }
-    var showLongPressPopup by remember { mutableStateOf(false) }
-    var longPressChar by remember { mutableStateOf("") }
 
     // BS long-press repeat delete
     LaunchedEffect(bsRepeating) {
@@ -166,6 +164,9 @@ fun KeyView(
                     var totalDragY = 0f
                     var wasDragged = false
                     var longPressHandled = false
+                    // Long-press alternate awaiting release-to-commit
+                    // (Gboard style); sliding off the key cancels it.
+                    var pendingAlternate: String? = null
 
                     try {
                         while (true) {
@@ -196,10 +197,15 @@ fun KeyView(
                                         val lang = if (service.layerManager.isJapanese) "ja-JP" else "en-US"
                                         service.voiceInputManager.startListening(lang)
                                     } else if (keyDef.longPress != null) {
-                                        // SPEC: Gboard-style popup bubble for long-press character
-                                        longPressChar = keyDef.longPress!!
-                                        showLongPressPopup = true
-                                        service.inputEngine.processAction(KeyAction.Text(keyDef.longPress!!))
+                                        // Gboard-style alternate: the press-preview
+                                        // bubble switches to the alternate character
+                                        // and the character commits on RELEASE (in
+                                        // the release handling below), so sliding
+                                        // off the key cancels it. A long-press
+                                        // previews the alternate; it does not fire
+                                        // it while the finger is still down.
+                                        pendingAlternate = keyDef.longPress
+                                        pressPopupChar = keyDef.longPress
                                     }
                                 }
                                 continue
@@ -227,7 +233,6 @@ fun KeyView(
                     } finally {
                         isPressed = false
                         bsRepeating = false
-                        showLongPressPopup = false
                         pressPopupChar = null
                     }
 
@@ -257,6 +262,20 @@ fun KeyView(
                             feedback.onLayerChange()
                         }
                     } else when {
+                        longPressHandled -> {
+                            // The hold consumed this gesture: no swipe or tap
+                            // fires after a long-press. A pending alternate
+                            // commits here, on release, unless the finger
+                            // slid away first (cancel). The other long-press
+                            // actions (BS repeat, voice, emoji) already fired
+                            // during the hold itself.
+                            val alt = pendingAlternate
+                            if (alt != null && !wasDragged) {
+                                feedback.onKeyPress(KeyAction.Text(alt))
+                                service.keyLighting.onKeyPress(alt, column)
+                                service.inputEngine.processAction(KeyAction.Text(alt))
+                            }
+                        }
                         wasDragged -> {
                             val direction = if (abs(totalDragX) > abs(totalDragY)) {
                                 if (totalDragX > 0) SwipeDirection.Right else SwipeDirection.Left
@@ -265,9 +284,6 @@ fun KeyView(
                             }
                             feedback.onSwipe()
                             service.inputEngine.processSwipe(keyDef, direction)
-                        }
-                        longPressHandled -> {
-                            // Already handled during hold — do nothing on release
                         }
                         else -> {
                             feedback.onKeyPress(keyDef.action)
@@ -385,30 +401,6 @@ fun KeyView(
             }
         }
 
-        // SPEC: Gboard-style popup bubble for long-press characters
-        if (showLongPressPopup && longPressChar.isNotEmpty()) {
-            Popup(
-                alignment = Alignment.TopCenter,
-                offset = androidx.compose.ui.unit.IntOffset(0, with(LocalDensity.current) { -56.dp.roundToPx() }),
-                properties = PopupProperties(focusable = false),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(48.dp, 48.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(Color(0xFF3A3A6A)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = longPressChar,
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-            }
-        }
-
         // Lighting border overlay (own recomposition scope; hidden while
         // pressed, where the press glow above takes precedence)
         KeyLightingBorder(
@@ -421,10 +413,13 @@ fun KeyView(
             modifier = Modifier.matchParentSize(),
         )
 
-        // Swipe hints
-        if (keyDef.swipeUp != null) {
+        // Corner hint: the long-press alternate when the key has one
+        // (Gboard prints the folded number-row digit here), otherwise
+        // the swipe-up character, as before.
+        val hintText = keyDef.longPress ?: keyDef.swipeUp
+        if (hintText != null) {
             Text(
-                text = keyDef.swipeUp!!,
+                text = hintText,
                 color = KeyTextSwipe,
                 fontSize = 9.sp,
                 modifier = Modifier

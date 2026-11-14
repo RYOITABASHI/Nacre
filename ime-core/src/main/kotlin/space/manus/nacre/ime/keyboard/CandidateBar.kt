@@ -10,15 +10,25 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalDensity
@@ -66,11 +76,26 @@ fun CandidateBar(
         scrollState.scrollTo(0)
     }
 
-    Row(
+    // Expand-all grid state. The grid belongs to the current composing
+    // session: typing the next character (which replaces the candidate
+    // set) collapses it without committing, as does the set emptying
+    // (commit / clear). Tapping a grid chip commits and closes it.
+    var expanded by remember { mutableStateOf(false) }
+    val composingKana = service.inputEngine.composingKana
+    LaunchedEffect(composingKana) { expanded = false }
+    LaunchedEffect(candidates.isEmpty()) {
+        if (candidates.isEmpty()) expanded = false
+    }
+
+    Column(
         modifier = modifier
             .fillMaxWidth()
-            .height(36.dp)
             .background(barBg),
+    ) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(36.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Fixed dictation mic (outline). Always visible; tap toggles voice input,
@@ -224,6 +249,28 @@ fun CandidateBar(
         }
         }
 
+        // Expand-all toggle (Gboard/iPhone style chevron). It sits between
+        // the scrolling candidates and the zenz status label, which keeps
+        // the far right end of the bar. Shown only when there are more
+        // candidates than the strip can usefully show, and never while
+        // dictating (the bar then carries the voice status instead).
+        if (candidates.size > 3 && !voiceListening && voicePartial != "Thinking...") {
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(36.dp)
+                    .clickable { expanded = !expanded }
+                    .semantics {
+                        contentDescription = if (expanded) "候補を閉じる" else "候補をすべて表示"
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(modifier = Modifier.size(width = 16.dp, height = 12.dp)) {
+                    drawChevronIcon(accent, up = expanded, strokeWidthPx = 1.8.dp.toPx())
+                }
+            }
+        }
+
         // zenz readiness indicator (fixed at the bar's right end, both
         // layouts): a silently-dead neural converter was indistinguishable
         // from "conversion is just weak" — this makes the state diagnosable
@@ -255,6 +302,53 @@ fun CandidateBar(
             )
         }
     }
+
+    // Expanded candidate grid: the full candidate list as chips in rows,
+    // directly above the keys. A chip here behaves exactly like the same
+    // chip in the strip (select during conversion, commit otherwise,
+    // long-press registers a user word) and closes the panel.
+    if (expanded && candidates.isNotEmpty()) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 104.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 124.dp)
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            itemsIndexed(
+                candidates,
+                key = { index, candidate -> "$index|${candidate.reading}|${candidate.surface}" },
+            ) { index, candidate ->
+                CandidateChip(
+                    candidate = candidate,
+                    isSelected = index == selectedIndex,
+                    onClick = {
+                        if (isConverting) {
+                            service.inputEngine.selectCandidate(index)
+                        } else {
+                            service.inputEngine.commitCandidate(index)
+                        }
+                        expanded = false
+                    },
+                    onLongClick = {
+                        if (candidate.reading.isNotEmpty()) {
+                            service.inputEngine.registerUserWord(candidate.reading, candidate.surface)
+                            service.feedbackManager.onLongPress()
+                        }
+                    },
+                    index = index,
+                    chipBg = Color(theme.keyBackground.toInt()),
+                    chipText = Color(theme.keyText.toInt()),
+                    selectedBg = accent,
+                    selectedText = Color(theme.background.toInt()),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+    }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -269,12 +363,13 @@ private fun CandidateChip(
     chipText: Color,
     selectedBg: Color,
     selectedText: Color,
+    modifier: Modifier = Modifier,
 ) {
     val bg = if (isSelected) selectedBg else chipBg
     val textColor = if (isSelected) selectedText else chipText
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .height(32.dp)
             .clip(RoundedCornerShape(6.dp))
             .background(bg)
@@ -290,6 +385,29 @@ private fun CandidateChip(
             color = textColor,
             fontSize = 14.sp,
             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
         )
     }
+}
+
+/** Chevron for the expand-all toggle, drawn like the mic icon (no icon dependency). */
+private fun DrawScope.drawChevronIcon(color: Color, up: Boolean, strokeWidthPx: Float) {
+    val w = size.width
+    val h = size.height
+    val yEnds = if (up) h * 0.70f else h * 0.30f
+    val yApex = if (up) h * 0.30f else h * 0.70f
+    drawLine(
+        color = color,
+        start = Offset(w * 0.10f, yEnds),
+        end = Offset(w * 0.50f, yApex),
+        strokeWidth = strokeWidthPx,
+        cap = StrokeCap.Round,
+    )
+    drawLine(
+        color = color,
+        start = Offset(w * 0.50f, yApex),
+        end = Offset(w * 0.90f, yEnds),
+        strokeWidth = strokeWidthPx,
+        cap = StrokeCap.Round,
+    )
 }

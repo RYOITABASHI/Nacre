@@ -37,9 +37,9 @@ data class KeyboardLayout(
 
 object DefaultLayouts {
 
-    val qwertyBase: KeyboardLayout = KeyboardLayout(
+    val qwertyBase: KeyboardLayout = QwertyAlternates.applyTopRowDigits(KeyboardLayout(
         rows = listOf(
-            // Row 1: Q-P
+            // Row 1: Q-P (long-press folds the number row onto this row)
             listOf(
                 key("q", swipeUp = "1", swipeLeft = "~", swipeRight = "`"),
                 key("w", swipeUp = "2"), key("e", swipeUp = "3"),
@@ -81,7 +81,7 @@ object DefaultLayouts {
                 KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.2f),
             ),
         ),
-    )
+    ))
 
     /**
      * Compact cover-screen layout for Z Fold class sub-displays.
@@ -89,7 +89,7 @@ object DefaultLayouts {
      * Keeps the Japanese-first base behavior, but trims the bottom row down to
      * the essentials so the cover display stays usable with a thumb.
      */
-    val compactJapaneseQwerty: KeyboardLayout = KeyboardLayout(
+    val compactJapaneseQwerty: KeyboardLayout = QwertyAlternates.applyTopRowDigits(KeyboardLayout(
         rows = listOf(
             // Row 1: Q-P
             listOf(
@@ -133,7 +133,7 @@ object DefaultLayouts {
                 KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.85f),
             ),
         ),
-    )
+    ))
 
     val fnLayer1: KeyboardLayout = KeyboardLayout(
         rows = listOf(
