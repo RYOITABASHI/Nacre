@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.MacroEngine
 import space.manus.nacre.ime.input.VoiceAsrUiState
+import space.manus.nacre.ime.input.VoiceEditUiState
 import space.manus.nacre.ime.input.VoiceRefineUiState
 import space.manus.nacre.ime.trackball.TrackballView
 import kotlinx.coroutines.launch
@@ -173,6 +174,22 @@ fun QuickInputPad(service: NacreInputMethodService) {
             fontSize = 9.sp,
             modifier = Modifier.padding(top = 2.dp),
         )
+        // Speak to Edit status: edit mode must be visible BEFORE speaking
+        // (the utterance becomes an instruction, not dictation), and its
+        // outcome — applied, or failed with the original kept — after.
+        val editStatusLine = voiceManager.voiceEditStatusLine
+        if (editStatusLine != null) {
+            Text(
+                text = editStatusLine,
+                color = if (voiceManager.voiceEditUiState == VoiceEditUiState.FAILED) {
+                    Color(0xFFFF6666)
+                } else {
+                    Color(0xFF00D4AA)
+                },
+                fontSize = 9.sp,
+                modifier = Modifier.padding(top = 2.dp),
+            )
+        }
 
         Spacer(modifier = Modifier.height(8.dp))
 

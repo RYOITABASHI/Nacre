@@ -1856,6 +1856,24 @@ private fun WhisperModelSection() {
 private fun VoiceRewriteSection() {
     val context = LocalContext.current
     var activeId by remember { mutableStateOf(space.manus.nacre.ai.RefinePresets.activeId(context)) }
+    var autoByApp by remember { mutableStateOf(space.manus.nacre.ai.RefinePresets.autoByAppEnabled(context)) }
+    // Generic app categories for the per-app tone mapping (keys are
+    // VoiceAppCategory names; defaults come from RefinePresets).
+    val categories = listOf(
+        "MAIL" to "メール",
+        "CHAT" to "チャット",
+        "BROWSER" to "ブラウザ",
+        "CODE" to "コード/端末",
+        "NOTES" to "ノート",
+        "OTHER" to "その他",
+    )
+    var categoryPresetIds by remember {
+        mutableStateOf(
+            categories.associate { (key, _) ->
+                key to space.manus.nacre.ai.RefinePresets.categoryPresetId(context, key)
+            },
+        )
+    }
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -1895,6 +1913,96 @@ private fun VoiceRewriteSection() {
                     }
                 }
             }
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                "プリセットの決め方",
+                color = NacreText,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for ((label, isAuto) in listOf("手動" to false, "自動（アプリ別）" to true)) {
+                    val selected = autoByApp == isAuto
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) NacreAccent else NacreBackground)
+                            .clickable {
+                                autoByApp = isAuto
+                                space.manus.nacre.ai.RefinePresets.setAutoByAppEnabled(context, isAuto)
+                            }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            label,
+                            color = if (selected) Color.Black else NacreText,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+            if (autoByApp) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "アプリの種類ごとに使うプリセット。音声パネルには「（自動）」付きで実際に選ばれたプリセットが表示されます。",
+                    color = NacreTextDim,
+                    fontSize = 11.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                for ((categoryKey, categoryLabel) in categories) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            categoryLabel,
+                            color = NacreText,
+                            fontSize = 11.sp,
+                            modifier = Modifier.width(76.dp),
+                        )
+                        for (preset in space.manus.nacre.ai.RefinePresets.PRESETS) {
+                            val selected = categoryPresetIds[categoryKey] == preset.id
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (selected) NacreAccent else NacreBackground)
+                                    .clickable {
+                                        categoryPresetIds = categoryPresetIds + (categoryKey to preset.id)
+                                        space.manus.nacre.ai.RefinePresets.setCategoryPresetId(
+                                            context, categoryKey, preset.id,
+                                        )
+                                    }
+                                    .padding(vertical = 5.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    preset.label,
+                                    color = if (selected) Color.Black else NacreText,
+                                    fontSize = 10.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+            Text(
+                "テキストを選択した状態で音声入力を始めると「音声編集」モードになり、話した指示（例：もっと丁寧に／短くして）で選択範囲を書き換えます。失敗時は元のテキストがそのまま残ります。",
+                color = NacreTextDim,
+                fontSize = 11.sp,
+            )
         }
     }
 }

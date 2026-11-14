@@ -40,6 +40,9 @@ enum class VoiceAsrUiState { LOADING, ON_DEVICE, MODEL_MISSING, EXTERNAL, ERROR 
 /** Refinement (整文) availability as shown in the voice panel. */
 enum class VoiceRefineUiState { LOADING, READY_LOCAL, READY_CLOUD, UNAVAILABLE }
 
+/** Speak to Edit session phase as shown in the voice panel. */
+enum class VoiceEditUiState { IDLE, RECORDING, APPLYING, DONE, FAILED }
+
 /**
  * Typeless-level voice input manager.
  *
@@ -137,9 +140,54 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         VoiceRefineUiState.UNAVAILABLE -> "不可"
     }
 
-    /** One-line engine summary for the voice panel (QuickInputPad). */
+    /** One-line engine summary for the voice panel (QuickInputPad). The
+     *  session's resolved refinement preset is named here too, with a
+     *  ・自動 suffix when the per-app mapping chose it, so an auto-chosen
+     *  tone is visible rather than silently different. */
     val voiceStateSummary: String
-        get() = "認識: ${asrStateLabel()} / 整文: ${refineStateLabel()}"
+        get() = buildString {
+            append("認識: ${asrStateLabel()} / 整文: ${refineStateLabel()}")
+            if (sessionPresetLabel.isNotEmpty()) {
+                append("（")
+                append(sessionPresetLabel)
+                if (sessionPresetAuto) append("・自動")
+                append("）")
+            }
+        }
+
+    // ── Speak to Edit / per-app tone session state ─────────────────────
+
+    /** True while this session edits the start-of-session selection
+     *  (Speak to Edit) instead of dictating. */
+    var isVoiceEditMode by mutableStateOf(false)
+        private set
+    var voiceEditUiState by mutableStateOf(VoiceEditUiState.IDLE)
+        private set
+    /** Preset label resolved for the current/last session (panel display). */
+    var sessionPresetLabel by mutableStateOf("")
+        private set
+    /** True when the per-app category mapping chose the session preset. */
+    var sessionPresetAuto by mutableStateOf(false)
+        private set
+    /**
+     * Explicit per-session manual preset choice. When set before a
+     * session starts it wins over both the standing manual preset and the
+     * per-app auto mapping; it is consumed (cleared) by that session.
+     */
+    var sessionPresetOverrideId: String? = null
+
+    private var editTargetText: String? = null
+    private var sessionPresetInstruction: String? = null
+
+    /** Status line for Speak to Edit, shown in the voice panel. */
+    val voiceEditStatusLine: String?
+        get() = when (voiceEditUiState) {
+            VoiceEditUiState.RECORDING -> "✏️ 音声編集モード：選択範囲への指示を話してください"
+            VoiceEditUiState.APPLYING -> "✏️ 音声編集を適用中…"
+            VoiceEditUiState.DONE -> "✏️ 音声編集を適用しました"
+            VoiceEditUiState.FAILED -> "✏️ 音声編集に失敗しました（元のテキストを保持）"
+            VoiceEditUiState.IDLE -> null
+        }
 
     // ── Whisper live-preview / incremental-commit session state ────────
     // Fed by VoiceSegmentFinalizer decisions on the main thread only.
@@ -398,6 +446,45 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         }
     }
 
+    /**
+     * Resolve this session's refinement preset once, at session start:
+     * an explicit session override wins, then (in auto mode) the
+     * foreground app's category mapping, then the standing manual
+     * preset. The resolved instruction is what [tryLlmRefinement] and
+     * Speak to Edit use for the whole session, and the label/auto flag
+     * are surfaced in the voice panel.
+     */
+    private fun resolveSessionPreset() {
+        val manualId = space.manus.nacre.ai.RefinePresets.activeId(service)
+        val auto = space.manus.nacre.ai.RefinePresets.autoByAppEnabled(service)
+        val pkg = try {
+            service.currentInputEditorInfo?.packageName
+        } catch (_: Exception) {
+            null
+        }
+        val category = VoiceToneResolver.categorize(pkg)
+        val mapping = VoiceAppCategory.values().associateWith {
+            space.manus.nacre.ai.RefinePresets.categoryPresetId(service, it.name)
+        }
+        val resolved = VoiceToneResolver.resolvePreset(
+            sessionOverrideId = sessionPresetOverrideId,
+            autoEnabled = auto,
+            manualId = manualId,
+            category = category,
+            autoMapping = mapping,
+        )
+        // A session override is explicit and single-use.
+        sessionPresetOverrideId = null
+        val preset = space.manus.nacre.ai.RefinePresets.presetById(resolved.presetId)
+        sessionPresetInstruction = preset.instruction
+        sessionPresetLabel = preset.label
+        sessionPresetAuto = resolved.autoChosen
+        writeDiagnostic(
+            "resolveSessionPreset: pkg=$pkg category=$category preset=${preset.id}" +
+                (if (resolved.autoChosen) " (auto)" else ""),
+        )
+    }
+
     /** Retry a failed local LLM load at the start of a voice session. */
     private fun maybeRetryLocalLlmLoad() {
         if (voiceRefineUiState != VoiceRefineUiState.UNAVAILABLE) return
@@ -416,6 +503,23 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 partialText = ""
                 rmsLevel = 0f
                 releaseAudioFocus()
+
+                if (isVoiceEditMode) {
+                    // Speak to Edit: the final transcript is the edit
+                    // instruction. Nothing was committed during recording,
+                    // so applying (or failing) cannot lose user text.
+                    whisperFinalizer.reset()
+                    whisperCloudSession = false
+                    when {
+                        text.isBlank() ->
+                            failVoiceEdit("指示を聞き取れませんでした")
+                        postProcessor.isHallucination(text) ->
+                            failVoiceEdit("指示を聞き取れませんでした")
+                        else ->
+                            runSpeakToEdit(postProcessor.resolveCorrections(text))
+                    }
+                    return@post
+                }
 
                 if (wasSession && !whisperCloudSession) {
                     // On-device session: segments were committed incrementally
@@ -482,6 +586,16 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             if (!whisperSessionActive || text.isBlank()) return
             mainHandler.post {
                 if (!whisperSessionActive) return@post
+                if (isVoiceEditMode) {
+                    // The utterance is an edit instruction: preview it in
+                    // the panel only, never in the editor, and commit
+                    // nothing — the selection stays untouched until the
+                    // LLM result is verified at final.
+                    partialText = space.manus.nacre.ai.LlmPostProcessor.quickClean(
+                        postProcessor.resolveCorrections(text)
+                    )
+                    return@post
+                }
                 if (whisperCloudSession) {
                     // Cloud ASR will replace the whole transcript at stop, so
                     // the on-device segments are preview-only here.
@@ -505,6 +619,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 isWhisperContinuousMode = false
                 whisperSessionActive = false
                 whisperFinalizer.reset()
+                // An edit session dies with the error; the selection was
+                // never touched, so there is nothing to roll back.
+                clearVoiceEditSession()
                 // Keep whatever was already spoken: finish the composing
                 // preview as-is rather than dropping it with the error.
                 if (whisperPreviewInEditor) {
@@ -713,6 +830,34 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         whisperEditorPreviewEnabled =
             service.inputEngine.composingKana.isEmpty() && !service.inputEngine.isConverting
         asrFallbackDetail = ""
+
+        // ── Speak to Edit + per-app tone (session setup) ──
+        // A reliably read, non-empty selection at voice start makes this
+        // an edit session: the utterance is an instruction for the
+        // selected text, never dictation (see VoiceEditPolicy). When the
+        // selection cannot be read reliably, the session falls back to
+        // normal dictation — the panel simply shows no edit mode.
+        val startIc = service.currentInputConnection
+        var selectionAtStart: String? = null
+        var selectionReadable = false
+        if (startIc != null) {
+            try {
+                selectionAtStart = startIc.getSelectedText(0)?.toString()
+                selectionReadable = true
+            } catch (e: Exception) {
+                writeDiagnostic("startListening: selection unreadable (${e.message}) — dictation mode")
+            }
+        }
+        isVoiceEditMode = VoiceEditPolicy.shouldEnterEditMode(selectionAtStart, selectionReadable)
+        editTargetText = if (isVoiceEditMode) selectionAtStart else null
+        voiceEditUiState = if (isVoiceEditMode) VoiceEditUiState.RECORDING else VoiceEditUiState.IDLE
+        if (isVoiceEditMode) {
+            // The live editor preview must never touch the selection;
+            // partials are shown in the panel only.
+            whisperEditorPreviewEnabled = false
+            writeDiagnostic("startListening: Speak to Edit session (selection ${selectionAtStart?.length} chars)")
+        }
+        resolveSessionPreset()
         // A refinement load failure must not persist silently: retry the
         // load now (no-op unless the state is UNAVAILABLE).
         maybeRetryLocalLlmLoad()
@@ -876,8 +1021,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             return
         }
         continuousMode = false
-        // Commit any remaining partial text
-        commitRemainingPartial()
+        // Commit any remaining partial text — never in Speak to Edit
+        // mode: the partial there is an instruction, not dictation.
+        if (!isVoiceEditMode) commitRemainingPartial()
         try {
             speechRecognizer?.stopListening()
         } catch (_: Exception) {}
@@ -900,6 +1046,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             isWhisperContinuousMode = false
             whisperSessionActive = false
             whisperFinalizer.reset()
+            clearVoiceEditSession()
             isListening = false
             partialText = ""
             rmsLevel = 0f
@@ -914,6 +1061,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             return
         }
         continuousMode = false
+        clearVoiceEditSession()
         try {
             speechRecognizer?.cancel()
         } catch (_: Exception) {}
@@ -1545,6 +1693,29 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             val rawText = selectBestResult(results)
             writeDiagnostic("SpeechRecognizer.onResults: text='${rawText.take(80)}' (${rawText.length} chars)")
 
+            if (isVoiceEditMode) {
+                // Speak to Edit: this one utterance concludes the session.
+                // The transcript is an instruction, not dictation, so
+                // nothing is committed here, and the continuous restart
+                // below is suppressed — the edit (or its failure) ends it.
+                isListening = false
+                continuousMode = false
+                rmsLevel = 0f
+                partialText = ""
+                lastCommittedPartial = ""
+                partialStableCount = 0
+                lastPartialText = ""
+                when {
+                    rawText.isEmpty() ->
+                        failVoiceEdit("指示を聞き取れませんでした")
+                    postProcessor.isHallucination(rawText) ->
+                        failVoiceEdit("指示を聞き取れませんでした")
+                    else ->
+                        runSpeakToEdit(postProcessor.resolveCorrections(rawText))
+                }
+                return
+            }
+
             if (rawText.isEmpty()) {
                 writeDiagnostic("SpeechRecognizer.onResults: EMPTY text, skipping")
             } else if (postProcessor.isHallucination(rawText)) {
@@ -1603,6 +1774,13 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         override fun onPartialResults(partialResults: Bundle?) {
             val rawText = selectBestResult(partialResults)
             if (rawText.isBlank()) return
+
+            if (isVoiceEditMode) {
+                // Instruction preview only — no streaming commit (a
+                // committed prefix would insert the instruction as text).
+                partialText = LlmPostProcessor.quickClean(postProcessor.resolveCorrections(rawText))
+                return
+            }
 
             // Typeless-style retroactive correction: resolve any self-correction
             // cue in this partial ("火曜日じゃなくて水曜日" → "水曜日"). If the
@@ -1735,9 +1913,12 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 // its way even if this session reached refinement without a
                 // prior predictNextViaLlm (no-op once bound).
                 ensureLlmBound()
-                // Active rewrite preset (整文/英訳/要約/敬語/箇条書き) — applied by
-                // the refiner instead of the fixed cleanup instruction.
-                val instruction = space.manus.nacre.ai.RefinePresets.activeInstruction(service)
+                // Active rewrite preset (整文/英訳/要約/敬語/箇条書き) — resolved
+                // once per session by resolveSessionPreset() (a session
+                // override, else the per-app auto mapping in auto mode,
+                // else the standing manual choice).
+                val instruction = sessionPresetInstruction
+                    ?: space.manus.nacre.ai.RefinePresets.activeInstruction(service)
 
                 // Step 1: cloud chain
                 val cloudChain = space.manus.nacre.ai.cloud.RefinerFactory.build(service)
@@ -1822,6 +2003,114 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             ic.commitText(refined, 1)
             writeDiagnostic("tryLlmRefinement[$source]: replaced quickClean with LLM result")
         }
+    }
+
+    // ── Speak to Edit execution ────────────────────────────────────────
+
+    /** End an edit session without applying anything (cancel). An edit
+     *  already applying is dropped by [applyVoiceEditResult]'s guard. */
+    private fun clearVoiceEditSession() {
+        isVoiceEditMode = false
+        editTargetText = null
+        if (voiceEditUiState == VoiceEditUiState.RECORDING ||
+            voiceEditUiState == VoiceEditUiState.APPLYING
+        ) {
+            voiceEditUiState = VoiceEditUiState.IDLE
+        }
+    }
+
+    /**
+     * Run one Speak to Edit request: [utterance] says how to rewrite the
+     * captured selection, via the same cloud→local refiner chain as
+     * dictation refinement but with the edit instruction. The selection
+     * is replaced only in [applyVoiceEditResult] after verification;
+     * every failure path keeps the original text and surfaces via
+     * [voiceEditUiState] / [lastError] — the selection is never deleted
+     * speculatively.
+     */
+    private fun runSpeakToEdit(utterance: String) {
+        val original = editTargetText
+        if (original.isNullOrEmpty() || utterance.isBlank()) {
+            failVoiceEdit("指示を聞き取れませんでした")
+            return
+        }
+        voiceEditUiState = VoiceEditUiState.APPLYING
+        val instruction = VoiceEditPolicy.buildEditInstruction(utterance)
+        writeDiagnostic(
+            "runSpeakToEdit: utterance='${utterance.take(60)}', selection=${original.length} chars",
+        )
+        Thread {
+            try {
+                ensureLlmBound()
+                var edited: String? = null
+                var source = ""
+                val cloudChain = space.manus.nacre.ai.cloud.RefinerFactory.build(service)
+                for (refiner in cloudChain) {
+                    val result = refiner.refine(original, instruction, CLOUD_REFINE_TIMEOUT_MS)
+                    if (result.isSuccess) {
+                        edited = result.getOrNull()?.trim()
+                        source = refiner.name
+                        break
+                    }
+                    writeDiagnostic(
+                        "runSpeakToEdit[cloud:${refiner.name}]: FAIL ${result.exceptionOrNull()?.message}",
+                    )
+                }
+                if (edited == null) {
+                    val svc = llmService
+                    if (svc != null && svc.isModelLoaded && !svc.isGenerating) {
+                        edited = refineViaAidl(svc, original, LLM_REFINE_TIMEOUT_MS, instruction)
+                        source = "local-qwen"
+                    }
+                }
+                val resultText = edited
+                val resultSource = source
+                mainHandler.post { applyVoiceEditResult(original, resultText, resultSource) }
+            } catch (e: Exception) {
+                writeDiagnostic("runSpeakToEdit: error ${e.javaClass.simpleName}: ${e.message}")
+                mainHandler.post { failVoiceEdit("編集処理でエラーが発生しました") }
+            }
+        }.start()
+    }
+
+    private fun applyVoiceEditResult(original: String, edited: String?, source: String) {
+        // The session may have been cancelled or superseded while the
+        // LLM worked — then the edit is dropped, the selection untouched.
+        if (!isVoiceEditMode || editTargetText != original) {
+            writeDiagnostic("applyVoiceEditResult[$source]: dropped (edit session no longer active)")
+            return
+        }
+        if (edited.isNullOrBlank()) {
+            failVoiceEdit("整文エンジンが利用できませんでした")
+            return
+        }
+        val ic = service.currentInputConnection
+        val currentSelection = try {
+            ic?.getSelectedText(0)?.toString()
+        } catch (_: Exception) {
+            null
+        }
+        if (ic == null || !VoiceEditPolicy.isSelectionIntact(currentSelection, original)) {
+            failVoiceEdit("選択範囲が変わったため、編集を中止しました")
+            return
+        }
+        // commitText replaces the current selection — just verified to
+        // still be exactly the captured original.
+        ic.commitText(edited, 1)
+        isVoiceEditMode = false
+        editTargetText = null
+        voiceEditUiState = VoiceEditUiState.DONE
+        writeDiagnostic(
+            "applyVoiceEditResult[$source]: selection replaced (${original.length} -> ${edited.length} chars)",
+        )
+    }
+
+    private fun failVoiceEdit(reason: String) {
+        writeDiagnostic("failVoiceEdit: $reason (original selection kept)")
+        isVoiceEditMode = false
+        editTargetText = null
+        voiceEditUiState = VoiceEditUiState.FAILED
+        lastError = "音声編集に失敗: $reason"
     }
 
     /**
