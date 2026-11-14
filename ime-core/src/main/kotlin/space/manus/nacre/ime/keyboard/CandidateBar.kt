@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.ConversionCandidate
 import space.manus.nacre.ime.input.SwipeDirection
+import space.manus.nacre.ime.input.ZenzUiState
 import kotlin.math.abs
 
 @Composable
@@ -204,6 +205,37 @@ fun CandidateBar(
                 }
             }
         }
+        }
+
+        // zenz readiness indicator (fixed at the bar's right end, both
+        // layouts): a silently-dead neural converter was indistinguishable
+        // from "conversion is just weak" — this makes the state diagnosable
+        // from the keyboard. Hidden when the user turned zenz off, in ABC
+        // mode, and in non-Japanese layers (zenz converts Japanese only).
+        val zenzState = service.voiceInputManager.zenzUiState
+        if (zenzState != ZenzUiState.OFF &&
+            service.layerManager.isJapanese &&
+            !service.inputEngine.flickAlphaMode
+        ) {
+            Text(
+                text = when (zenzState) {
+                    ZenzUiState.READY -> "zenz"
+                    ZenzUiState.LOADING -> "zenz…"
+                    ZenzUiState.NOT_DOWNLOADED -> "zenz未DL"
+                    ZenzUiState.ERROR -> "zenz⚠"
+                    ZenzUiState.OFF -> ""
+                },
+                color = when (zenzState) {
+                    ZenzUiState.READY -> accent.copy(alpha = 0.55f)
+                    ZenzUiState.LOADING -> Color(0xFF888888)
+                    ZenzUiState.NOT_DOWNLOADED -> Color(0xFFFFAA33)
+                    ZenzUiState.ERROR -> Color(0xFFFF6666)
+                    ZenzUiState.OFF -> Color.Transparent
+                },
+                fontSize = 9.sp,
+                maxLines = 1,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
     }
 }
