@@ -34,15 +34,68 @@ object FlickEngine {
         // for the corner-bracket shortcut iOS added in iOS 8 (flick left = 「, right = 」).
         // Previously left=ゆ/up=よ, which put both vowels on the wrong direction
         // and dropped the bracket shortcut entirely.
+        // The tap cycle follows the same cross order (tap→left→up→right→down),
+        // so the brackets sit at their flick positions — a tap-only user can
+        // still reach 「/」 by tapping through (や→「→ゆ→」→よ), then the smalls.
         FlickKey("や", "や", "や", "「", "ゆ", "」", "よ",
-            tapCycle = listOf("や", "ゆ", "よ", "ゃ", "ゅ", "ょ")),
+            tapCycle = listOf("や", "「", "ゆ", "」", "よ", "ゃ", "ゅ", "ょ")),
         FlickKey("ら", "ら", "ら", "り", "る", "れ", "ろ"),
         FlickKey("わ", "わ", "わ", "を", "ん", "ー", "〜",
-            // Was missing 〜 (down-flick target) and ゎ (わ's small form) —
-            // every other multi-key row's tapCycle covers all 5 flick slots
-            // plus any small form(s); this one previously stopped after ー.
-            tapCycle = listOf("わ", "を", "ん", "ー", "〜", "ゎ")),
+            // iOS / feature-phone multi-tap order: after the 5 cross slots the
+            // わ key keeps cycling into the punctuation set 、。！？・… — this is
+            // the second iPhone path to 。 (7 taps). ゎ is NOT in the cycle:
+            // on iOS the small form is reached via the ゛゜小 key, like every
+            // other row's smalls that have a dedicated transform.
+            tapCycle = listOf("わ", "を", "ん", "ー", "〜", "、", "。", "！", "？", "・", "…")),
     )
+
+    /**
+     * The 、。？！ key (bottom-right of the kana grid) — iPhone stock assignment:
+     * tap=、, left=。, up=？, right=！, down=… (the key's cross order, the same
+     * tap→left→up→right→down rule as the kana rows). The tap cycle follows
+     * that cross order, so 。 is 2 taps from fresh — the primary iPhone path.
+     * ・ is appended at the cycle tail for tap reachability (on iOS it lives
+     * on this key's long-press, which the tap-centric pad has no equivalent of).
+     *
+     * History: this key previously had up/right swapped (up=！, right=？),
+     * down=・, and a tap cycle that started at 。 while tap inserted 、 —
+     * the cycle index of 、 was 1, so 。 only came back around after a full
+     * wrap: 10 taps. See PR "12-key layout and input order to iPhone stock parity".
+     */
+    val punctKey: FlickKey = FlickKey(
+        id = "punct", label = "、。", tap = "、",
+        left = "。", up = "？", right = "！", down = "…",
+        tapCycle = listOf("、", "。", "？", "！", "…", "・"),
+    )
+
+    /**
+     * The effective multi-tap cycle for a key: the explicit [FlickKey.tapCycle]
+     * when present, otherwise the flick cross in tap→left→up→right→down order.
+     * Mirrors the fallback chain in InputEngine.processFlickKana.
+     */
+    fun tapCycleOf(key: FlickKey): List<String> =
+        key.tapCycle ?: listOfNotNull(key.tap, key.left, key.up, key.right, key.down)
+
+    /**
+     * How many taps on [key], starting fresh, until [target] is the current
+     * character — simulating InputEngine's toggle rule exactly (first tap
+     * inserts [FlickKey.tap]; each further tap advances within [tapCycleOf]
+     * from the current character's index, wrapping). Returns -1 when [target]
+     * is unreachable by tapping.
+     */
+    fun tapsToReach(key: FlickKey, target: String): Int {
+        val cycle = tapCycleOf(key)
+        var current = key.tap
+        var taps = 1
+        while (taps <= cycle.size + 1) {
+            if (current == target) return taps
+            val idx = cycle.indexOf(current)
+            if (idx < 0) return -1
+            current = cycle[(idx + 1) % cycle.size]
+            taps++
+        }
+        return -1
+    }
 
     data class SymbolFlickKey(
         val id: String,
@@ -134,3 +187,51 @@ object FlickEngine {
 }
 
 enum class DakutenType { Dakuten, Handakuten, Small }
+
+/**
+ * Multi-tap state for the ABC (alpha) 12-key grid, where characters commit
+ * IMMEDIATELY (iPhone-style: no composing buffer, no 確定 press). A repeated
+ * tap on the same key within [timeoutMs] does not insert again — it asks the
+ * caller to REPLACE the just-committed character with the next cycle entry
+ * (the caller verifies the character before the cursor really is the pending
+ * one before deleting anything). Pure and clock-injected for unit tests.
+ */
+class AlphaTapCycler(private val timeoutMs: Long = 800L) {
+
+    private var keyId: String = ""
+    private var cycle: List<String> = emptyList()
+    private var index: Int = -1
+    private var lastTapMs: Long = 0L
+
+    /**
+     * Register a tap on [keyId] whose cycle is [cycle] and whose first-tap
+     * character sits at [startIndex] within it. Returns the cycle index whose
+     * character should replace the pending one, or null when this tap starts
+     * a fresh character (the cycler is then armed at [startIndex]).
+     */
+    fun tap(keyId: String, cycle: List<String>, startIndex: Int, nowMs: Long): Int? {
+        val armed = index >= 0 && keyId == this.keyId && cycle == this.cycle &&
+            nowMs - lastTapMs < timeoutMs
+        return if (armed) {
+            index = (index + 1) % cycle.size
+            lastTapMs = nowMs
+            index
+        } else {
+            this.keyId = keyId
+            this.cycle = cycle
+            index = startIndex
+            lastTapMs = nowMs
+            null
+        }
+    }
+
+    /** The cycle index of the currently pending (last inserted) character, or -1. */
+    val pendingIndex: Int get() = index
+
+    fun reset() {
+        keyId = ""
+        cycle = emptyList()
+        index = -1
+        lastTapMs = 0L
+    }
+}
