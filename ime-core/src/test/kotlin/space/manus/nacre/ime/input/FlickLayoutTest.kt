@@ -15,9 +15,13 @@ import org.junit.Test
  *     ま や ら
  *     ゛゜小 わ 、。？！   (゛゜小 is the dedicated DakutenKeyView)
  *
- * flanked by the left mode column (☆123 / ABC / あいう / 絵記) and the
- * right strip (⌫ / 空白 / tall 改行). If the data order ever drifts, the
- * rendered grid silently stops being the iPhone grid — this test pins it.
+ * flanked by the left column (☆123 / ◀ / ABC / あいう / 絵記) and the
+ * right strip (⌫ / ▶ / 空白 / 改行). The kana grid and mode keys follow
+ * the iPhone arrangement; the arrow positions follow Gboard's Japanese
+ * 12-key (◀ second in the left column, ▶ second in the right strip,
+ * both flanking the た row — owner's own Gboard, screenshot-verified).
+ * If the data order ever drifts, the rendered pad silently stops being
+ * the stock arrangement — this test pins it.
  * Behavioural parity (cycles, tap counts, dakuten) lives in FlickParityTest.
  */
 class FlickLayoutTest {
@@ -46,5 +50,37 @@ class FlickLayoutTest {
         assertEquals("punct", FlickEngine.punctKey.id)
         assertEquals("、", FlickEngine.punctKey.tap)
         assertEquals("。", FlickEngine.punctKey.left)
+    }
+
+    @Test
+    fun `left column seats cursor-left second like Gboard`() {
+        // Gboard's ◀: left column, second from the top, flanking the
+        // た row. FlickSideColumn renders sideColumnKeys positionally;
+        // the four direct mode keys keep their slots around it.
+        assertEquals(
+            listOf(
+                FlickEngine.SideColumnKey.Numbers,
+                FlickEngine.SideColumnKey.CursorLeft,
+                FlickEngine.SideColumnKey.Alpha,
+                FlickEngine.SideColumnKey.Kana,
+                FlickEngine.SideColumnKey.Emoji,
+            ),
+            FlickEngine.sideColumnKeys,
+        )
+    }
+
+    @Test
+    fun `right strip seats cursor-right second like Gboard`() {
+        // Gboard's ▶: right strip, second from the top, directly under
+        // ⌫. FlickRightStrip renders rightStripKeys positionally.
+        assertEquals(
+            listOf(
+                FlickEngine.RightStripKey.Backspace,
+                FlickEngine.RightStripKey.CursorRight,
+                FlickEngine.RightStripKey.Space,
+                FlickEngine.RightStripKey.Enter,
+            ),
+            FlickEngine.rightStripKeys,
+        )
     }
 }

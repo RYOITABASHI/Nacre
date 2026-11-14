@@ -8,6 +8,39 @@ object FlickEngine {
 
     enum class Direction { Tap, Left, Up, Right, Down }
 
+    /**
+     * Keys of the pad's left column, top to bottom. The four direct mode
+     * keys keep their one-tap jumps; CursorLeft sits SECOND — the slot
+     * Gboard's Japanese 12-key gives its ◀ (left column, flanking the
+     * た row). FlickSideColumn renders this list positionally; the column
+     * divides the grid height into five equal slots (mode keys 50dp →
+     * 40dp at scale 1.0). Pinned by FlickLayoutTest.
+     */
+    enum class SideColumnKey { Numbers, CursorLeft, Alpha, Kana, Emoji }
+
+    val sideColumnKeys: List<SideColumnKey> = listOf(
+        SideColumnKey.Numbers,
+        SideColumnKey.CursorLeft,
+        SideColumnKey.Alpha,
+        SideColumnKey.Kana,
+        SideColumnKey.Emoji,
+    )
+
+    /**
+     * Keys of the pad's right strip, top to bottom — Gboard's strip:
+     * ⌫, ▶ (second, under ⌫, flanking the た row), space, 改行， in four
+     * equal slots. FlickRightStrip renders this list positionally.
+     * Pinned by FlickLayoutTest.
+     */
+    enum class RightStripKey { Backspace, CursorRight, Space, Enter }
+
+    val rightStripKeys: List<RightStripKey> = listOf(
+        RightStripKey.Backspace,
+        RightStripKey.CursorRight,
+        RightStripKey.Space,
+        RightStripKey.Enter,
+    )
+
     data class FlickKey(
         val id: String,
         val label: String,

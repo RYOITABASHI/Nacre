@@ -40,18 +40,26 @@ import kotlin.math.abs
 private enum class FlickMode { Kana, Alpha, Numbers }
 
 /**
- * Main 12-key input pad composable, arranged after the iPhone stock Japanese
- * kana keyboard (verified against real-device references — see the layout PR):
- * a 4-row × 5-column grid whose centre 3 columns are the twelve kana keys,
- * flanked by a left column of direct mode keys (☆123 / ABC / あいう / 絵記 —
- * one tap jumps straight to a mode, no cycling) and a right strip of
- * ⌫ / 空白 / 改行, where 改行 is a tall key spanning rows 3-4 and there is
- * NO separate 変換 key (空白 converts / walks candidates, the tall 改行
- * confirms — exactly the iPhone split). Multi-tap (連打) on the centre keys
- * cycles within a row (か→き→く→け→こ).
- * Below the grid, a slim 44dp row holds only the Nacre-only functions that
- * have no iPhone home: ◀ ▶ (cursor / segment adjustment) and 📋.
- * Layout: candidate bar → 4×5 grid → bottom row (◀ ▶ 📋).
+ * Main 12-key input pad composable. The grid and mode column follow the
+ * iPhone stock Japanese kana keyboard (verified against real-device
+ * references — see the layout PR): a 4-row × 5-column grid whose centre
+ * 3 columns are the twelve kana keys, flanked by a left column of direct
+ * mode keys (☆123 / ABC / あいう / 絵記 — one tap jumps straight to a
+ * mode, no cycling). There is NO separate 変換 key (空白 converts /
+ * walks candidates, 改行 confirms — exactly the iPhone split).
+ * Multi-tap (連打) on the centre keys cycles within a row (か→き→く→け→こ).
+ *
+ * The cursor arrows follow GBOARD's Japanese 12-key instead (owner's own
+ * Gboard, screenshot-verified): ◀ sits in the left column SECOND from
+ * the top and ▶ in the right strip SECOND from the top, both flanking
+ * the た row. The left column therefore holds five equal slots
+ * (☆123 / ◀ / ABC / あいう / 絵記 — mode keys 40dp at scale 1.0) and
+ * the right strip four equal slots (⌫ / ▶ / 空白 / 改行); PR #46's
+ * iPhone-style tall 改行 gave way to Gboard's equal strip.
+ * Below the grid, a slim 44dp row holds only 📋 (clipboard / palette),
+ * the one Nacre-only function with no home in either stock layout.
+ * Layout: candidate bar → [left column | 3-col grid | right strip] →
+ * bottom row (📋).
  */
 @Composable
 fun FlickInputPad(
@@ -125,7 +133,7 @@ fun FlickInputPad(
             )
         }
 
-        // Bottom row (44dp): Nacre-only ◀ ▶ 📋 — see FlickPadBottomRow
+        // Bottom row (44dp): Nacre-only 📋, full width — see FlickPadBottomRow
         FlickPadBottomRow(
             service = service,
             onClipboard = onClipboard,
@@ -170,31 +178,36 @@ private fun FlickKanaGrid(
     val punctKey = FlickEngine.punctKey
 
     Row(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.weight(1f + 1f + 1f + sw)) {
-            // Row 1: ☆123 | あ | か | さ
+        FlickSideColumn(
+            service = service,
+            flickMode = flickMode,
+            onSetMode = onSetMode,
+            onSymbols = onSymbols,
+            onEmoji = onEmoji,
+            rowH = rowH,
+            modifier = Modifier.weight(sw),
+        )
+        Column(modifier = Modifier.weight(1f + 1f + 1f)) {
+            // Row 1: あ | か | さ
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
                 FlickKeyView(flickKey = kanaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
                 FlickKeyView(flickKey = kanaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
                 FlickKeyView(flickKey = kanaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
             }
-            // Row 2: ABC | た | な | は
+            // Row 2: た | な | は
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
                 FlickKeyView(flickKey = kanaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
                 FlickKeyView(flickKey = kanaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
                 FlickKeyView(flickKey = kanaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
             }
-            // Row 3: あいう | ま | や | ら
+            // Row 3: ま | や | ら
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
                 FlickKeyView(flickKey = kanaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
                 FlickKeyView(flickKey = kanaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
                 FlickKeyView(flickKey = kanaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
             }
-            // Row 4: 絵記 | ゛゜小 | わ | 、。？！
+            // Row 4: ゛゜小 | わ | 、。？！
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
                 DakutenKeyView(service = service, modifier = Modifier.weight(1f), row = 3, column = 1)
                 FlickKeyView(flickKey = kanaKeys[9], service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
                 FlickKeyView(flickKey = punctKey, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
@@ -205,15 +218,123 @@ private fun FlickKanaGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Right strip (iPhone stock): ⌫ over 空白 over a TALL 改行.
+// Left column: ☆123 / ◀ / ABC / あいう / 絵記 — five equal slots over
+// the grid's height, rendered positionally from
+// FlickEngine.sideColumnKeys (unit-tested). The four mode keys keep
+// their direct one-tap jumps (Nacre keeps 4 mode keys where Gboard has
+// a single cycling あa1 key); ◀ takes the second slot, Gboard's arrow
+// position. Equal division puts every slot at 40dp at scale 1.0
+// (mode keys were 50dp as grid-row cells).
+// ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun FlickSideColumn(
+    service: NacreInputMethodService,
+    flickMode: FlickMode,
+    onSetMode: (FlickMode) -> Unit,
+    onSymbols: () -> Unit,
+    onEmoji: () -> Unit,
+    rowH: Float,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier = modifier.height((rowH * 4).dp)) {
+        FlickEngine.sideColumnKeys.forEach { key ->
+            when (key) {
+                FlickEngine.SideColumnKey.Numbers ->
+                    ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Numbers) })
+                FlickEngine.SideColumnKey.CursorLeft ->
+                    FlickCursorKey(service = service, direction = SwipeDirection.Left, modifier = Modifier.weight(1f).fillMaxWidth())
+                FlickEngine.SideColumnKey.Alpha ->
+                    ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Alpha) })
+                FlickEngine.SideColumnKey.Kana ->
+                    ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Kana) })
+                FlickEngine.SideColumnKey.Emoji ->
+                    SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onTap = onEmoji, onLongPress = onSymbols)
+            }
+        }
+    }
+}
+
+/**
+ * Cursor key (◀ in the left column, ▶ in the right strip). While a
+ * conversion is active it adjusts the segment boundary — the same
+ * adjustSegmentBoundary call the candidate bar's horizontal swipe
+ * makes, but tappable, which matters for a tap-input user; otherwise
+ * it sends the DPAD keycode (DPAD_RIGHT doubles as the tap-cyclers'
+ * confirm in InputEngine). Styled after ModeSwitchKey.
+ */
+@Composable
+private fun FlickCursorKey(
+    service: NacreInputMethodService,
+    direction: SwipeDirection,
+    modifier: Modifier = Modifier,
+) {
+    val theme = service.currentTheme
+    val keyBg = Color(theme.keyBackground.toInt())
+    val accentColor = Color(theme.accent.toInt())
+    val surfaceColor = Color(theme.surface.toInt())
+    val shape = RoundedCornerShape(6.dp)
+    // Read during composition so the key re-routes the moment a
+    // conversion starts or ends.
+    val isConverting = service.inputEngine.isConverting
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(horizontal = 1.dp, vertical = 1.dp)
+            .clip(shape)
+            .background(surfaceColor)
+            .padding(bottom = 1.5.dp)
+            .clip(shape)
+            .background(keyBg)
+            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
+            .pointerInput(direction) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    while (true) {
+                        val event = withTimeoutOrNull(Long.MAX_VALUE) { awaitPointerEvent() } ?: break
+                        val change = event.changes.firstOrNull() ?: break
+                        if (!change.pressed) { change.consume(); break }
+                        change.consume()
+                    }
+                    if (isConverting) {
+                        service.inputEngine.adjustSegmentBoundary(direction)
+                    } else {
+                        val keyCode = if (direction == SwipeDirection.Left) {
+                            android.view.KeyEvent.KEYCODE_DPAD_LEFT
+                        } else {
+                            android.view.KeyEvent.KEYCODE_DPAD_RIGHT
+                        }
+                        service.inputEngine.processAction(KeyAction.KeyCode(keyCode))
+                    }
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = if (direction == SwipeDirection.Left) "◀" else "▶",
+            color = accentColor,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center,
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Right strip (Gboard): ⌫ / ▶ / 空白 / 改行 in four equal slots,
+// rendered positionally from FlickEngine.rightStripKeys (unit-tested).
 //
-// On the real iPhone kana keyboard the right column holds exactly these
-// three: delete (1 row), 空白 (1 row) and 改行 spanning rows 3-4. While a
-// composition is active the same physical keys become 変換/次候補 (空白 —
+// This was PR #46's iPhone-stock strip (⌫ / 空白 / TALL 改行 spanning
+// rows 3-4). Seating ▶ in Gboard's position — second from the top,
+// directly under ⌫ — takes one slot back, so 改行 is now a normal
+// one-row key (50dp at scale 1.0, the same height as every other key
+// on the pad) instead of the tall iPhone key. While a composition is
+// active the same physical keys become 変換/次候補 (空白 —
 // KeyAction.Space already starts conversion / walks candidates in
 // InputEngine) and 確定 (改行 — the Enter branch commits the selected
-// candidate while converting). There is no separate 変換 key on iPhone;
-// this strip is where conversion lives.
+// candidate while converting); ▶ then adjusts the segment boundary.
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -224,15 +345,27 @@ private fun FlickRightStrip(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
-        // 削除 — KeyView keeps its long-press repeat-delete.
-        KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.fillMaxWidth(), row = 0, column = 4, heightDp = rowH)
-        // 空白 — tap: space / convert / next candidate (engine semantics);
-        // long-press opens the Flex Pointer (iOS space-bar trackpad analogue).
-        Box(modifier = Modifier.fillMaxWidth().height(rowH.dp)) {
-            FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.fillMaxSize())
+        FlickEngine.rightStripKeys.forEach { key ->
+            when (key) {
+                // 削除 — KeyView keeps its long-press repeat-delete.
+                FlickEngine.RightStripKey.Backspace ->
+                    KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.fillMaxWidth(), row = 0, column = 4, heightDp = rowH)
+                // ▶ — segment-extend while converting, toggle-confirm /
+                // cursor-right otherwise (routing inside FlickCursorKey).
+                FlickEngine.RightStripKey.CursorRight ->
+                    FlickCursorKey(service = service, direction = SwipeDirection.Right, modifier = Modifier.fillMaxWidth().height(rowH.dp))
+                // 空白 — tap: space / convert / next candidate (engine
+                // semantics); long-press opens the Flex Pointer (iOS
+                // space-bar trackpad analogue).
+                FlickEngine.RightStripKey.Space ->
+                    Box(modifier = Modifier.fillMaxWidth().height(rowH.dp)) {
+                        FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.fillMaxSize())
+                    }
+                // 改行 — one equal slot (see the deviation note above).
+                FlickEngine.RightStripKey.Enter ->
+                    KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.fillMaxWidth(), row = 3, column = 4, heightDp = rowH)
+            }
         }
-        // 改行 — tall key spanning rows 3-4, as on iPhone.
-        KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.fillMaxWidth(), row = 2, column = 4, heightDp = rowH * 2)
     }
 }
 
@@ -282,31 +415,36 @@ private fun FlickAlphaGrid(
     )
 
     Row(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.weight(1f + 1f + 1f + sw)) {
-            // Row 1: ☆123 | @#& | abc | def
+        FlickSideColumn(
+            service = service,
+            flickMode = flickMode,
+            onSetMode = onSetMode,
+            onSymbols = onSymbols,
+            onEmoji = onEmoji,
+            rowH = rowH,
+            modifier = Modifier.weight(sw),
+        )
+        Column(modifier = Modifier.weight(1f + 1f + 1f)) {
+            // Row 1: @#& | abc | def
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
                 FlickKeyView(flickKey = alphaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3, directAlpha = true)
             }
-            // Row 2: ABC | ghi | jkl | mno
+            // Row 2: ghi | jkl | mno
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
                 FlickKeyView(flickKey = alphaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3, directAlpha = true)
             }
-            // Row 3: あいう | pqrs | tuv | wxyz
+            // Row 3: pqrs | tuv | wxyz
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
                 FlickKeyView(flickKey = alphaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2, directAlpha = true)
                 FlickKeyView(flickKey = alphaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3, directAlpha = true)
             }
-            // Row 4: 絵記 | Shift | - | .,!?
+            // Row 4: Shift | - | .,!?
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
                 KeyView(keyDef = KeyDef("Shift", action = KeyAction.Shift), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = rowH)
                 FlickDirectKey(label = "-", service = service, modifier = Modifier.weight(1f), row = 3, column = 2, swipeUp = "/", swipeDown = "\\")
                 FlickKeyView(flickKey = alphaPunct, service = service, modifier = Modifier.weight(1f), row = 3, column = 3, directAlpha = true)
@@ -334,33 +472,38 @@ private fun FlickNumberGrid(
     val sw = SIDE_WEIGHT
 
     Row(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.weight(1f + 1f + 1f + sw)) {
-            // Row 1: ☆123 | 1 | 2 | 3
+        FlickSideColumn(
+            service = service,
+            flickMode = flickMode,
+            onSetMode = onSetMode,
+            onSymbols = onSymbols,
+            onEmoji = onEmoji,
+            rowH = rowH,
+            modifier = Modifier.weight(sw),
+        )
+        Column(modifier = Modifier.weight(1f + 1f + 1f)) {
+            // Row 1: 1 | 2 | 3
             // Digits commit immediately (iPhone ☆123 page) via FlickDirectKey —
             // they no longer route through the romaji composing buffer.
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
                 FlickDirectKey(label = "1", service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
                 FlickDirectKey(label = "2", service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
                 FlickDirectKey(label = "3", service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
             }
-            // Row 2: ABC | 4 | 5 | 6
+            // Row 2: 4 | 5 | 6
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
                 FlickDirectKey(label = "4", service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
                 FlickDirectKey(label = "5", service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
                 FlickDirectKey(label = "6", service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
             }
-            // Row 3: あいう | 7 | 8 | 9
+            // Row 3: 7 | 8 | 9
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
                 FlickDirectKey(label = "7", service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
                 FlickDirectKey(label = "8", service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
                 FlickDirectKey(label = "9", service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
             }
-            // Row 4: 絵記 | + | 0 | .
+            // Row 4: + | 0 | .
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
                 FlickDirectKey(label = "+", service = service, modifier = Modifier.weight(1f), row = 3, column = 1, swipeUp = "-", swipeDown = "=")
                 FlickDirectKey(label = "0", service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
                 FlickDirectKey(label = ".", service = service, modifier = Modifier.weight(1f), row = 3, column = 3, swipeUp = ",", swipeDown = ":")
@@ -1359,22 +1502,14 @@ private fun FlickModKeyView(
 // ─────────────────────────────────────────────────────────────────
 
 /**
- * Bottom row: [◀(0.8x)] [▶(1.4x)] [📋(1.8x)] at 44dp tall.
+ * Bottom row: 📋 alone, one full-width key at 44dp tall.
  *
- * The iPhone kana keyboard has no in-keyboard bottom row at all (below the
- * grid sits only the iOS system chrome) and NO separate 変換 key: conversion
- * and next-candidate live on the right strip's 空白 key, confirmation on the
- * tall 改行 key. The old 変換 key duplicated 空白's engine semantics, so it
- * is gone. This slim row remains solely for the Nacre-only functions that
- * have no iPhone home:
- * - ◀ ▶: char-level cursor movement; ▶ doubles as the tap-cyclers' confirm
- *   key (DPAD_RIGHT is routed to toggle-confirm in InputEngine). WHILE
- *   CONVERTING they instead adjust the segment boundary — the same
- *   adjustSegmentBoundary call the candidate bar's horizontal swipe makes,
- *   but tappable, which matters for a tap-input user. Finer/2-D movement
- *   lives in the Flex Pointer, which is untouched.
- * - 📋: clipboard (tap) / command palette (long-press), relocated from the
- *   grid's bottom-right cell, which the tall 改行 key now occupies.
+ * The cursor arrows used to live here (◀ ▶ 📋 until the Gboard-arrow
+ * change); they moved to Gboard's positions in the side columns
+ * (◀ second in the left column, ▶ second in the right strip), which
+ * left this row to the one Nacre-only function with no stock home:
+ * - 📋: clipboard (tap) / command palette (long-press). Full width
+ *   keeps it the easiest target on the pad for the tap-input owner.
  */
 @Composable
 private fun FlickPadBottomRow(
@@ -1382,84 +1517,13 @@ private fun FlickPadBottomRow(
     onClipboard: () -> Unit,
     onCommandPalette: () -> Unit,
 ) {
-    val theme = service.currentTheme
-    val keyBg = Color(theme.keyBackground.toInt())
-    val accentColor = Color(theme.accent.toInt())
-    val surfaceColor = Color(theme.surface.toInt())
-    // Read during composition so ◀ ▶ re-route the moment a conversion
-    // starts or ends.
-    val isConverting = service.inputEngine.isConverting
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .height(44.dp)
             .padding(top = 2.dp),
     ) {
-        // ◀ — segment-shrink while converting, cursor-left otherwise
-        BottomKey(label = "◀", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(SIDE_WEIGHT)) {
-            if (isConverting) {
-                service.inputEngine.adjustSegmentBoundary(SwipeDirection.Left)
-            } else {
-                service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_LEFT))
-            }
-        }
-        Spacer(modifier = Modifier.width(3.dp))
-        // ▶ — segment-extend while converting, toggle-confirm / cursor-right otherwise
-        BottomKey(label = "▶", color = accentColor, surfaceColor = surfaceColor, keyBg = keyBg, modifier = Modifier.weight(1.4f)) {
-            if (isConverting) {
-                service.inputEngine.adjustSegmentBoundary(SwipeDirection.Right)
-            } else {
-                service.inputEngine.processAction(KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_RIGHT))
-            }
-        }
-        Spacer(modifier = Modifier.width(3.dp))
         // 📋 — clipboard (tap) / command palette (long-press)
-        FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(1.8f))
-    }
-}
-
-@Composable
-private fun BottomKey(
-    label: String,
-    color: Color,
-    surfaceColor: Color,
-    keyBg: Color,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val shape = RoundedCornerShape(4.dp)
-    Box(
-        modifier = modifier
-            .fillMaxHeight()
-            .clip(shape)
-            .background(surfaceColor)
-            .padding(bottom = 1.dp)
-            .clip(shape)
-            .background(keyBg)
-            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
-            .pointerInput(label) {
-                awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
-                    // Wait for up
-                    while (true) {
-                        val event = withTimeoutOrNull(Long.MAX_VALUE) { awaitPointerEvent() } ?: break
-                        val change = event.changes.firstOrNull() ?: break
-                        if (!change.pressed) { change.consume(); break }
-                        change.consume()
-                    }
-                    onClick()
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = color,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            textAlign = TextAlign.Center,
-        )
+        FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(1f))
     }
 }
