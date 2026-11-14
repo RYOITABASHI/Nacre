@@ -25,7 +25,23 @@ import space.manus.nacre.ai.KenLmScorer
  *   2194..2588=形容詞, 2589..2590=感動詞, 2591..2593=接続詞,
  *   2594..2640=接頭詞, 2641..2656=記号, 2657..2669=連体詞
  */
-class NacreDictionary(private val context: Context) : DictionaryProvider {
+class NacreDictionary internal constructor(
+    private val assetOpener: AssetOpener,
+    private val storeProvider: (String) -> DictionaryKeyValueStore,
+    private val androidContext: Context?,
+) : DictionaryProvider {
+
+    /**
+     * Production constructor: assets and learning data come from the Android
+     * application context — the same AssetManager / SharedPreferences access
+     * the engine always used, now routed through the data-source seam
+     * (see DictionaryDataSource.kt). Behavior is unchanged.
+     */
+    constructor(context: Context) : this(
+        AssetOpener { name -> context.assets.open(name) },
+        { name -> SharedPreferencesStore(context, name) },
+        context,
+    )
 
     // reading → list of entries with POS info (initial capacity smaller to avoid OOM on allocation)
     private val dict = HashMap<String, MutableList<DictEntry>>(400000)
@@ -173,7 +189,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadConnectionMatrix() {
         try {
-            context.assets.open("dict/connection.bin").use { stream ->
+            assetOpener.open("dict/connection.bin").use { stream ->
                 val dis = java.io.DataInputStream(java.io.BufferedInputStream(stream, 65536))
                 // First 4 bytes: uint32 num_ids (little-endian)
                 val b = ByteArray(4)
@@ -206,7 +222,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         try {
             val rows = mutableListOf<IntArray>()
             var n = 14
-            context.assets.open("dict/connection_group.tsv").use { stream ->
+            assetOpener.open("dict/connection_group.tsv").use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     reader.forEachLine { line ->
                         if (line.isBlank() || line.startsWith('#')) return@forEachLine
@@ -239,9 +255,9 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
         try {
             // Try gzip binary first, fall back to plain TSV
             val stream = try {
-                GZIPInputStream(context.assets.open("dict/mozc_dict.bin"))
+                GZIPInputStream(assetOpener.open("dict/mozc_dict.bin"))
             } catch (_: Exception) {
-                context.assets.open("dict/mozc_dict.tsv")
+                assetOpener.open("dict/mozc_dict.tsv")
             }
 
             stream.use { rawStream ->
@@ -283,7 +299,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadSlangDictionary() {
         try {
-            context.assets.open("dict/slang_words.tsv").use { stream ->
+            assetOpener.open("dict/slang_words.tsv").use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     var count = 0
                     reader.forEachLine { line ->
@@ -318,7 +334,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
      */
     private fun loadSupplementaryDict(assetPath: String, label: String) {
         try {
-            context.assets.open(assetPath).use { stream ->
+            assetOpener.open(assetPath).use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     var count = 0
                     reader.forEachLine { line ->
@@ -348,13 +364,13 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // --- DictionaryProvider implementation ---
 
     // #13 native Mozc engine — lazily created on first use, gated by a setting.
-    private val mozcEngine by lazy { NacreMozcEngine(context) }
+    private val mozcEngine by lazy { NacreMozcEngine(androidContext!!) }
 
     // Shelly Bridge — ephemeral terminal context (cwd/repo/branch/technical terms) shared by
     // the Shelly Android terminal IDE while it's the foreground app. Lazily created so it costs
     // nothing (no file stat) until predictEnglish() actually consults it. Independently
     // re-sanitizes everything it reads — see ShellyBridgeContext.kt for the full contract.
-    private val shellyBridge by lazy { ShellyBridgeReader(context) }
+    private val shellyBridge by lazy { ShellyBridgeReader(androidContext!!) }
 
     // #13/M5: single background thread for NacreMozcEngine.learn() — a commit-time
     // SUBMIT_CANDIDATE round-trip through the native session, same per-char JNI cost as
@@ -372,8 +388,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
     // active conversion path — Mozc never consults them, so loading/running them just
     // wastes ~560MB (KenLM) + per-keystroke LLM calls.
     fun useMozcNative(): Boolean =
-        context.getSharedPreferences("nacre_mozc", Context.MODE_PRIVATE)
-            .getBoolean("enabled", false)
+        storeProvider("nacre_mozc").getBoolean("enabled", false)
 
     override fun convert(kana: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
@@ -1259,7 +1274,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadEnglishDict() {
         try {
-            context.assets.open("dict/english_words.tsv").use { stream ->
+            assetOpener.open("dict/english_words.tsv").use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     reader.forEachLine { line ->
                         if (line.isBlank() || line.startsWith('#')) return@forEachLine
@@ -1282,7 +1297,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadEnglishFullDict() {
         try {
-            context.assets.open("dict/english_full.tsv").use { stream ->
+            assetOpener.open("dict/english_full.tsv").use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     reader.forEachLine { line ->
                         if (line.isBlank() || line.startsWith('#')) return@forEachLine
@@ -1310,7 +1325,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
      */
     private fun loadStaticBigrams() {
         try {
-            context.assets.open("dict/bigrams.tsv").use { stream ->
+            assetOpener.open("dict/bigrams.tsv").use { stream ->
                 BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
                     var count = 0
                     reader.forEachLine { line ->
@@ -2151,9 +2166,9 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadUserBoost() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
+            val store = storeProvider("nacre_user_dict")
 
-            val data = prefs.getString("boost", null)
+            val data = store.getString("boost")
             if (data != null) {
                 for (line in data.split('\n')) {
                     val parts = line.split('\t')
@@ -2163,7 +2178,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 }
             }
 
-            val bigramData = prefs.getString("bigram", null)
+            val bigramData = store.getString("bigram")
             if (bigramData != null) {
                 for (line in bigramData.split('\n')) {
                     val parts = line.split('\t')
@@ -2173,7 +2188,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 }
             }
 
-            val trigramData = prefs.getString("trigram", null)
+            val trigramData = store.getString("trigram")
             if (trigramData != null) {
                 for (line in trigramData.split('\n')) {
                     val parts = line.split('\t')
@@ -2183,7 +2198,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 }
             }
 
-            val historyData = prefs.getString("history", null)
+            val historyData = store.getString("history")
             if (historyData != null) {
                 for (line in historyData.split('\n')) {
                     if (line.isBlank()) continue
@@ -2204,7 +2219,7 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun saveUserBoost() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
+            val store = storeProvider("nacre_user_dict")
 
             val data = userBoost.entries
                 .sortedByDescending { it.value }
@@ -2225,12 +2240,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
                 .take(maxHistory)
                 .joinToString("\n") { "${it.surface}\t${it.reading}" }
 
-            prefs.edit()
-                .putString("boost", data)
-                .putString("bigram", bigramData)
-                .putString("trigram", trigramData)
-                .putString("history", historyData)
-                .apply()
+            store.putString("boost", data)
+            store.putString("bigram", bigramData)
+            store.putString("trigram", trigramData)
+            store.putString("history", historyData)
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save user boost", e)
         }
@@ -2240,8 +2253,8 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadUserDictionary() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
-            val data = prefs.getString("user_dictionary", null) ?: return
+            val store = storeProvider("nacre_user_dict")
+            val data = store.getString("user_dictionary") ?: return
             for (line in data.split('\n')) {
                 if (line.isBlank()) continue
                 val parts = line.split('\t')
@@ -2261,10 +2274,10 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun saveUserDictionary() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
+            val store = storeProvider("nacre_user_dict")
             val data = userDictionary.values.flatten()
                 .joinToString("\n") { "${it.reading}\t${it.surface}\t${it.comment}" }
-            prefs.edit().putString("user_dictionary", data).apply()
+            store.putString("user_dictionary", data)
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save user dictionary", e)
         }
@@ -2343,8 +2356,8 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun loadPhraseMemory() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
-            val data = prefs.getString("phrase_memory", null) ?: return
+            val store = storeProvider("nacre_user_dict")
+            val data = store.getString("phrase_memory") ?: return
             for (line in data.split('\n')) {
                 if (line.isBlank()) continue
                 val parts = line.split('\t')
@@ -2366,12 +2379,12 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun savePhraseMemory() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
+            val store = storeProvider("nacre_user_dict")
             val data = phraseMemory.values.flatten()
                 .sortedByDescending { it.count }
                 .take(maxPhrases)
                 .joinToString("\n") { "${it.reading}\t${it.surface}\t${it.count}\t${it.lastEpoch}" }
-            prefs.edit().putString("phrase_memory", data).apply()
+            store.putString("phrase_memory", data)
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save phrase memory", e)
         }
@@ -2453,9 +2466,9 @@ class NacreDictionary(private val context: Context) : DictionaryProvider {
 
     private fun saveEpoch() {
         try {
-            val prefs = context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE)
-            learningEpoch = prefs.getInt("learning_epoch", 0) + 1
-            prefs.edit().putInt("learning_epoch", learningEpoch).apply()
+            val store = storeProvider("nacre_user_dict")
+            learningEpoch = store.getInt("learning_epoch", 0) + 1
+            store.putInt("learning_epoch", learningEpoch)
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save epoch", e)
         }
