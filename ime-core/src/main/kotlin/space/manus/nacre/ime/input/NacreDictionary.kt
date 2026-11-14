@@ -2,7 +2,15 @@ package space.manus.nacre.ime.input
 
 import android.content.Context
 import android.util.Log
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.BufferedReader
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStreamReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -29,6 +37,7 @@ class NacreDictionary internal constructor(
     private val assetOpener: AssetOpener,
     private val storeProvider: (String) -> DictionaryKeyValueStore,
     private val androidContext: Context?,
+    private val snapshotDir: File? = null,
 ) : DictionaryProvider {
 
     /**
@@ -41,6 +50,7 @@ class NacreDictionary internal constructor(
         AssetOpener { name -> context.assets.open(name) },
         { name -> SharedPreferencesStore(context, name) },
         context,
+        File(context.filesDir, "dict_snapshot"),
     )
 
     // reading → list of entries with POS info (initial capacity smaller to avoid OOM on allocation)
@@ -104,8 +114,42 @@ class NacreDictionary internal constructor(
     // KenLM 5-gram language model scorer (optional, loaded from ime-ai)
     @Volatile
     var kenLmScorer: KenLmScorer? = null
+        set(value) {
+            field = value
+            // Viterbi scoring reads the scorer — memoized predict() results
+            // computed without it (or with a previous one) are stale.
+            bumpPredictStateVersion()
+        }
 
     private var loaded = false
+
+    /** True when [load] restored static content from the on-disk snapshot instead of parsing the bundled assets. */
+    var loadedFromSnapshot = false
+        private set
+
+    // --- predict() memoization ---
+    // predict() output depends on mutable learning state (user boosts,
+    // bigram/trigram boosts, recent history, committed context, phrase
+    // memory, the injected user dictionary) in addition to its arguments.
+    // Every mutation of that state funnels through bumpPredictStateVersion(),
+    // which clears the cache — so a cached result is only ever reused while
+    // everything it depended on is unchanged. See predict() for the key.
+    private val predictCacheLock = Any()
+    private val predictCache = object : LinkedHashMap<PredictCacheKey, List<ConversionCandidate>>(16, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<PredictCacheKey, List<ConversionCandidate>>?,
+        ): Boolean = size > PREDICT_CACHE_MAX_ENTRIES
+    }
+
+    private data class PredictCacheKey(
+        val kana: String,
+        val romaji: String,
+        val mozcNative: Boolean,
+    )
+
+    private fun bumpPredictStateVersion() {
+        synchronized(predictCacheLock) { predictCache.clear() }
+    }
     private var savePending = false
     private var lastSaveTime = 0L
 
@@ -136,6 +180,37 @@ class NacreDictionary internal constructor(
     fun load() {
         if (loaded) return
 
+        // Static (asset-derived) content: restore from the on-disk snapshot
+        // when a valid one exists — this skips the gzip TSV parse of the
+        // 1.05M-entry Mozc dictionary, the per-entry sorts and the index
+        // builds on every IME process start. Any doubt about the snapshot
+        // (missing, stale key, corrupt) falls back to the full parse, which
+        // then rewrites the snapshot for the next start. User/learning data
+        // further below is NOT snapshotted — it is re-read from the store
+        // on every load exactly as before.
+        loadedFromSnapshot = tryLoadSnapshot()
+        if (!loadedFromSnapshot) {
+            loadStaticContentFromAssets()
+            writeSnapshotQuietly()
+        }
+
+        loadUserBoost()
+        loadUserDictionary()
+        loadPhraseMemory()
+
+        // Inject user dictionary entries into the main dict for conversion
+        injectUserDictionary()
+
+        // Increment learning epoch and apply frequency decay
+        learningEpoch++
+        applyFrequencyDecay()
+        saveEpoch()
+
+        loaded = true
+    }
+
+    /** Full asset parse of the static dictionary content (see [load]). */
+    private fun loadStaticContentFromAssets() {
         loadConnectionMatrix()
         loadMozcDictionary()
         loadSlangDictionary()
@@ -172,19 +247,189 @@ class NacreDictionary internal constructor(
         buildRomajiEnglishIndex()
         loadEnglishFullDict()
         loadStaticBigrams()
-        loadUserBoost()
-        loadUserDictionary()
-        loadPhraseMemory()
+    }
 
-        // Inject user dictionary entries into the main dict for conversion
-        injectUserDictionary()
+    // --- Dictionary snapshot: fast restore of the static content ---
+    //
+    // The snapshot serializes ONLY the asset-derived structures (main dict,
+    // connection matrix, sorted indexes, English dicts, static bigrams) in
+    // their post-parse state (person-name boost applied, per-reading lists
+    // sorted). Maps are written in live iteration order and read back into
+    // maps with the same initial capacities in the same insertion order, so
+    // even iteration-order-sensitive consumers (romajiEnglishMatch scans
+    // romajiEnglishIndex) observe identical behavior. Learning/user state is
+    // never snapshotted.
 
-        // Increment learning epoch and apply frequency decay
-        learningEpoch++
-        applyFrequencyDecay()
-        saveEpoch()
+    /**
+     * Identity of the content a snapshot was built from. The bundled
+     * dictionary assets only ever change with the app itself, so the app
+     * version code (monotonic across releases: 100 + CI run number) plus the
+     * snapshot format version is a complete invalidation key.
+     */
+    private fun snapshotKey(): String {
+        val appVersion = try {
+            @Suppress("DEPRECATION")
+            androidContext?.packageManager?.getPackageInfo(androidContext.packageName, 0)?.versionCode?.toString()
+        } catch (e: Exception) {
+            null
+        } ?: "dev"
+        return "fmt$SNAPSHOT_FORMAT_VERSION-app$appVersion"
+    }
 
-        loaded = true
+    private fun writeSnapshotQuietly() {
+        val dir = snapshotDir ?: return
+        try {
+            dir.mkdirs()
+            val tmp = File(dir, "$SNAPSHOT_FILE_NAME.tmp")
+            DataOutputStream(BufferedOutputStream(FileOutputStream(tmp), 1 shl 16)).use { out ->
+                out.writeInt(SNAPSHOT_MAGIC)
+                out.writeInt(SNAPSHOT_FORMAT_VERSION)
+                writeSnapshotString(out, snapshotKey())
+                out.writeInt(numIds)
+                val matrixBytes = ByteBuffer.allocate(connectionCostFlat.size * 2)
+                    .order(ByteOrder.LITTLE_ENDIAN)
+                matrixBytes.asShortBuffer().put(connectionCostFlat)
+                out.writeInt(connectionCostFlat.size)
+                out.write(matrixBytes.array())
+                out.writeInt(entryCount)
+                writeEntryMap(out, dict)
+                out.writeInt(sortedReadings.size)
+                for (r in sortedReadings) writeSnapshotString(out, r)
+                writeEntryMap(out, englishDict)
+                writeEntryMap(out, romajiEnglishIndex)
+                writeEntryMap(out, englishFullDict)
+                out.writeInt(englishSortedKeys.size)
+                for (k in englishSortedKeys) writeSnapshotString(out, k)
+                out.writeInt(staticBigrams.size)
+                for ((k, v) in staticBigrams) {
+                    writeSnapshotString(out, k)
+                    out.writeInt(v)
+                }
+                // Trailer: total dict entry count, validated on restore.
+                out.writeInt(dict.values.sumOf { it.size })
+            }
+            val target = File(dir, SNAPSHOT_FILE_NAME)
+            if (!tmp.renameTo(target)) {
+                tmp.copyTo(target, overwrite = true)
+                tmp.delete()
+            }
+            Log.i("NacreDictionary", "Dictionary snapshot written (${target.length() / 1024}KB)")
+        } catch (e: Exception) {
+            // A failed snapshot write must never fail the load itself.
+            Log.w("NacreDictionary", "Dictionary snapshot write failed (ignored)", e)
+        }
+    }
+
+    private fun tryLoadSnapshot(): Boolean {
+        val dir = snapshotDir ?: return false
+        val file = File(dir, SNAPSHOT_FILE_NAME)
+        if (!file.isFile) return false
+        return try {
+            DataInputStream(BufferedInputStream(FileInputStream(file), 1 shl 16)).use { inp ->
+                if (inp.readInt() != SNAPSHOT_MAGIC) return false
+                if (inp.readInt() != SNAPSHOT_FORMAT_VERSION) return false
+                if (readSnapshotString(inp) != snapshotKey()) return false
+                val ids = inp.readInt()
+                if (ids <= 0 || ids > 100_000) return false
+                val flatLen = inp.readInt()
+                if (flatLen != ids * ids) return false
+                val flatBytes = ByteArray(flatLen * 2)
+                inp.readFully(flatBytes)
+                val flat = ShortArray(flatLen)
+                ByteBuffer.wrap(flatBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(flat)
+                val entries = inp.readInt()
+                val newDict = readEntryMap(inp, 400000)
+                val newSorted = Array(inp.readInt()) { readSnapshotString(inp) }
+                if (newSorted.size != newDict.size) return false
+                val newEnglish = readEntryMap(inp, 5000)
+                val newRomajiIndex = readEntryMap(inp, 500)
+                val newEnglishFull = readEntryMap(inp, 25000)
+                val newEnglishKeys = Array(inp.readInt()) { readSnapshotString(inp) }
+                if (newEnglishKeys.size != newEnglishFull.size) return false
+                val bigramCount = inp.readInt()
+                if (bigramCount < 0 || bigramCount > 1_000_000) return false
+                val newBigrams = HashMap<String, Int>(2000)
+                repeat(bigramCount) { newBigrams[readSnapshotString(inp)] = inp.readInt() }
+                if (inp.readInt() != newDict.values.sumOf { it.size }) return false
+
+                // All validation passed — publish into the live fields.
+                numIds = ids
+                connectionCostFlat = flat
+                entryCount = entries
+                dict.clear()
+                dict.putAll(newDict)
+                sortedReadings = newSorted
+                englishDict.clear()
+                englishDict.putAll(newEnglish)
+                romajiEnglishIndex.clear()
+                romajiEnglishIndex.putAll(newRomajiIndex)
+                englishFullDict.clear()
+                englishFullDict.putAll(newEnglishFull)
+                englishSortedKeys = newEnglishKeys
+                staticBigrams.clear()
+                staticBigrams.putAll(newBigrams)
+                Log.i(
+                    "NacreDictionary",
+                    "Dictionary restored from snapshot: ${newDict.size} readings, $entries entries",
+                )
+                true
+            }
+        } catch (e: Exception) {
+            Log.w("NacreDictionary", "Dictionary snapshot unreadable — falling back to full parse", e)
+            false
+        }
+    }
+
+    private fun writeEntryMap(out: DataOutputStream, map: Map<String, List<DictEntry>>) {
+        out.writeInt(map.size)
+        for ((reading, entries) in map) {
+            writeSnapshotString(out, reading)
+            out.writeInt(entries.size)
+            for (e in entries) {
+                writeSnapshotString(out, e.surface)
+                out.writeInt(e.cost)
+                out.writeInt(e.leftGroup)
+                out.writeInt(e.rightGroup)
+            }
+        }
+    }
+
+    private fun readEntryMap(inp: DataInputStream, initialCapacity: Int): HashMap<String, MutableList<DictEntry>> {
+        val readingCount = inp.readInt()
+        if (readingCount < 0 || readingCount > 10_000_000) throw IOException("bad reading count $readingCount")
+        val map = HashMap<String, MutableList<DictEntry>>(initialCapacity)
+        repeat(readingCount) {
+            val reading = readSnapshotString(inp)
+            val n = inp.readInt()
+            if (n < 0 || n > 100_000) throw IOException("bad entry count $n")
+            val list = ArrayList<DictEntry>(n)
+            repeat(n) {
+                list.add(
+                    DictEntry(
+                        readSnapshotString(inp),
+                        inp.readInt(),
+                        inp.readInt(),
+                        inp.readInt(),
+                    ),
+                )
+            }
+            map[reading] = list
+        }
+        return map
+    }
+
+    private fun writeSnapshotString(out: DataOutputStream, s: String) {
+        val bytes = s.toByteArray(Charsets.UTF_8)
+        out.writeInt(bytes.size)
+        out.write(bytes)
+    }
+
+    private fun readSnapshotString(inp: DataInputStream): String {
+        val len = inp.readInt()
+        if (len < 0 || len > MAX_SNAPSHOT_STRING_BYTES) throw IOException("bad string length $len")
+        val bytes = ByteArray(len)
+        inp.readFully(bytes)
+        return String(bytes, Charsets.UTF_8)
     }
 
     private fun loadConnectionMatrix() {
@@ -564,6 +809,25 @@ class NacreDictionary internal constructor(
     override fun predict(kana: String, romaji: String): List<ConversionCandidate> {
         if (!loaded || kana.isEmpty()) return emptyList()
 
+        // Memoized: within a composing session the same (kana, romaji) recurs
+        // constantly (backspace-and-retype, flick toggle cycling, prediction
+        // refreshes after layer switches), and the full pipeline below
+        // (Viterbi + KenLM + prefix/phrase/English passes) is the IME's
+        // per-keystroke hot path. A cached result is reused only while every
+        // input it depended on is unchanged: all learning-state mutations
+        // clear the cache via bumpPredictStateVersion(), and the Mozc toggle
+        // (read live from the store) is part of the key. Callers never mutate
+        // the returned list (InputEngine copies it into its candidate state;
+        // LlmReranker copies before reordering), so sharing the instance is
+        // safe.
+        val key = PredictCacheKey(kana, romaji, useMozcNative())
+        synchronized(predictCacheLock) { predictCache[key] }?.let { return it }
+        val result = predictInternal(kana, romaji)
+        synchronized(predictCacheLock) { predictCache[key] = result }
+        return result
+    }
+
+    private fun predictInternal(kana: String, romaji: String): List<ConversionCandidate> {
         // #13: native Mozc drives the live candidate bar (off the main thread — predict()
         // is dispatched on Dispatchers.Default). Prefer the raw romaji buffer (ASCII → the
         // romaji table composes kana); fall back to the kana reading via AS_IS.
@@ -724,6 +988,7 @@ class NacreDictionary internal constructor(
     }
 
     override fun recordSelection(candidate: ConversionCandidate) {
+        bumpPredictStateVersion()
         val key = "${candidate.reading}:${candidate.surface}"
         userBoost[key] = (userBoost[key] ?: 0) + 1
 
@@ -774,6 +1039,9 @@ class NacreDictionary internal constructor(
             mozcLearnExecutor.execute {
                 runCatching { mozcEngine.learn(reading, surface) }
                     .onFailure { Log.e("NacreDictionary", "mozcEngine.learn failed", it) }
+                // Mozc's session learning just changed what the Mozc path of
+                // predict() would return — invalidate memoized results.
+                bumpPredictStateVersion()
             }
         }
     }
@@ -782,6 +1050,7 @@ class NacreDictionary internal constructor(
         committedContext.addFirst(surface)
         while (committedContext.size > 4) committedContext.removeLast()
         lastRightGroup = 0 // BOS/EOS for raw text
+        bumpPredictStateVersion()
     }
 
     /**
@@ -1835,6 +2104,16 @@ class NacreDictionary internal constructor(
         // conversions, so when a real conversion exists they must not take the
         // top by default. Benchmark-tuned (E3): 1500.
         private const val PASS_THROUGH_PENALTY = 1500
+
+        // Dictionary snapshot (fast restart): magic "NCSP", on-disk layout
+        // version — bump when the serialized layout or DictEntry changes.
+        private const val SNAPSHOT_MAGIC = 0x4E435350
+        private const val SNAPSHOT_FORMAT_VERSION = 1
+        private const val SNAPSHOT_FILE_NAME = "dict_snapshot.bin"
+        private const val MAX_SNAPSHOT_STRING_BYTES = 1 shl 20
+
+        // predict() memoization: bounded LRU over recent composing prefixes.
+        private const val PREDICT_CACHE_MAX_ENTRIES = 64
         // KenLM weight for post-hoc rescoring (high: LM should strongly influence final ranking)
         private const val KENLM_WEIGHT = 5000f
         // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
@@ -2356,6 +2635,7 @@ class NacreDictionary internal constructor(
                 existing.add(DictEntry(surface = surface, cost = 500, leftGroup = 0, rightGroup = 0))
             }
             saveUserDictionary()
+            bumpPredictStateVersion()
         }
     }
 
@@ -2363,6 +2643,7 @@ class NacreDictionary internal constructor(
      * Remove a word from the user dictionary.
      */
     fun removeUserWord(reading: String, surface: String) {
+        bumpPredictStateVersion()
         userDictionary[reading]?.removeAll { it.surface == surface }
         if (userDictionary[reading]?.isEmpty() == true) userDictionary.remove(reading)
         dict[reading]?.removeAll { it.surface == surface && it.cost == 500 }
@@ -2382,6 +2663,7 @@ class NacreDictionary internal constructor(
         userDictionary.clear()
         loadUserDictionary()
         injectUserDictionary()
+        bumpPredictStateVersion()
     }
 
     // --- Phrase memory persistence ---
@@ -2428,6 +2710,7 @@ class NacreDictionary internal constructor(
      */
     fun recordPhrase(reading: String, surface: String) {
         if (surface.length < 4) return
+        bumpPredictStateVersion()
         val key = reading.take(2)
         val entries = phraseMemory.getOrPut(key) { mutableListOf() }
         val existing = entries.find { it.surface == surface }

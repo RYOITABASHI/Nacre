@@ -322,6 +322,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             }
             return
         }
+        // First voice use: start the :whisper / :llm processes now (they used
+        // to be bound at IME onCreate). The Whisper model loads asynchronously
+        // in its connection callback; until whisperService becomes non-null
+        // this session follows the same SpeechRecognizer fallback path that a
+        // mic tap before model-load completion has always taken. The LLM is
+        // bound here too because dictation refinement runs right after a
+        // voice session.
+        ensureWhisperBound()
+        ensureLlmBound()
         if (whisperService == null && !isAvailable()) {
             Log.w(TAG, "Speech recognition not available (no Whisper, no SpeechRecognizer)")
             lastError = "音声認識が利用できません"
@@ -1245,6 +1254,17 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         }
     }
 
+    /**
+     * Lazy-bind entry point: start the :whisper process (and its model load)
+     * on first voice use instead of at IME onCreate. Idempotent — the bind
+     * functions early-return once bound, and the binding stays warm for the
+     * IME's lifetime afterwards.
+     */
+    fun ensureWhisperBound() = bindWhisperService()
+
+    /** See [ensureWhisperBound]. */
+    fun ensureLlmBound() = bindLlmService()
+
     fun bindWhisperService() {
         if (whisperBound) return
         try {
@@ -1307,6 +1327,10 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     private fun tryLlmRefinement(quickCleanText: String) {
         Thread {
             try {
+                // Refinement is an LLM use — make sure the :llm process is on
+                // its way even if this session reached refinement without a
+                // prior predictNextViaLlm (no-op once bound).
+                ensureLlmBound()
                 // Active rewrite preset (整文/英訳/要約/敬語/箇条書き) — applied by
                 // the refiner instead of the fixed cleanup instruction.
                 val instruction = space.manus.nacre.ai.RefinePresets.activeInstruction(service)
@@ -1373,6 +1397,10 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
      * refinement (skips when the model is generating).
      */
     fun predictNextViaLlm(context: String, timeoutMs: Long = 600): List<String>? {
+        // First LLM use starts the :llm process in the background; this call
+        // still returns null until the model is loaded, exactly as an
+        // unbound call did before lazy binding.
+        if (llmService == null) ensureLlmBound()
         val svc = llmService ?: return null
         if (context.isBlank()) return null
         try {
