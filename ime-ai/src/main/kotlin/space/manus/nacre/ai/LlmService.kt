@@ -129,7 +129,7 @@ class LlmService : Service() {
             return if (LlamaJni.isAvailable()) LlamaJni.getZenzLoadError() else "native library unavailable"
         }
 
-        override fun zenzConvert(katakanaReading: String, callback: ILlmCallback?) {
+        override fun zenzConvert(katakanaReading: String, leftContext: String?, callback: ILlmCallback?) {
             if (this@LlmService.isZenzGenerating) {
                 try { callback?.onError("zenz already generating") } catch (_: RemoteException) {}
                 return
@@ -141,10 +141,11 @@ class LlmService : Service() {
             this@LlmService.isZenzGenerating = true
             scope.launch {
                 try {
-                    // zenz input format (azooKey zenzai docs):
-                    // U+EE00 + katakana reading + U+EE01, generate until </s>.
-                    // No left-context (U+EE02) in v1.
-                    val prompt = "\uEE00" + katakanaReading + "\uEE01"
+                    // zenz input format (azooKey zenzai docs): see
+                    // ZenzPrompt — U+EE00 + katakana reading + U+EE01, or
+                    // with left context U+EE02 + context + U+EE00 + reading
+                    // + U+EE01 (zenz-v3 layout). Generate until </s>.
+                    val prompt = ZenzPrompt.build(katakanaReading, leftContext ?: "")
                     val maxTokens = (katakanaReading.length * 2 + 16).coerceIn(16, 192)
                     val result = LlamaJni.generateZenz(prompt, maxTokens)
                     withContext(Dispatchers.Main) {

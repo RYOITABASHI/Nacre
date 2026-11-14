@@ -15,6 +15,7 @@ import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import space.manus.nacre.ai.ZenzContext
 import space.manus.nacre.config.KeyAction
 import space.manus.nacre.config.KeyDef
 import space.manus.nacre.ime.NacreInputMethodService
@@ -763,6 +764,34 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
+     * Left context for zenz: the committed text immediately before the
+     * composing region, extracted and trimmed by [ZenzContext]. Captured
+     * synchronously at request time, so it always belongs to the exact kana
+     * the request is for; the existing seq / composing-equality staleness
+     * guards then cover the (kana, context) pair — a result generated with
+     * a stale context is dropped by the same checks. Empty in password
+     * fields (defense in depth: both call sites already exclude them), at
+     * the start of a field, or when the editor returns nothing.
+     *
+     * [composingDisplay] is what the editor currently shows as the
+     * composing region (the kana while typing, the first candidate's
+     * surface during conversion): editors that include the composing
+     * region in getTextBeforeCursor results get it stripped by the
+     * extractor; editors that exclude it are unaffected.
+     */
+    private fun zenzLeftContext(composingDisplay: String): String {
+        if (isPasswordField) return ""
+        val ic = service.currentInputConnection ?: return ""
+        val fetchChars = ZenzContext.MAX_CHARS + composingDisplay.length + ZENZ_CONTEXT_FETCH_MARGIN
+        val raw = try {
+            ic.getTextBeforeCursor(fetchChars, 0)?.toString()
+        } catch (_: Exception) {
+            null
+        }
+        return ZenzContext.extract(raw, composingDisplay)
+    }
+
+    /**
      * zenz neural conversion (async, non-blocking): the engine candidates are
      * already on screen; when the zenz full-sentence result arrives it is
      * inserted as the FIRST candidate, deduplicated against the engine list.
@@ -777,11 +806,15 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun requestZenzCandidate(kana: String, seq: Int) {
         if (isPasswordField) return // SPEC: no AI features in password fields
         if (kana.length < 2) return
+        // The composing region currently displays the first candidate's
+        // surface (set by startConversion / startFlickConversion just
+        // before this call); the context is the committed text before it.
+        val leftContext = zenzLeftContext(candidates.firstOrNull()?.surface ?: kana)
         zenzJob?.cancel()
         zenzJob = scope.launch {
             val surface = try {
                 withContext(Dispatchers.Default) {
-                    service.voiceInputManager.convertViaZenz(kana, timeoutMs = 2500)
+                    service.voiceInputManager.convertViaZenz(kana, leftContext, timeoutMs = 2500)
                 }
             } catch (_: Exception) {
                 null
@@ -974,11 +1007,16 @@ class InputEngine(private val service: NacreInputMethodService) {
         zenzPredictJob = null
         if (flickAlphaMode || kana.length < ZENZ_PREDICT_MIN_KANA) return
         val seq = ++zenzPredictSeq
+        // While typing, the composing region displays the kana itself.
+        // Captured now (not after the debounce): the committed text before
+        // the composing region cannot change without a commit, and a
+        // commit restarts this schedule with a fresh capture.
+        val leftContext = zenzLeftContext(kana)
         zenzPredictJob = scope.launch {
             kotlinx.coroutines.delay(ZENZ_PREDICT_DEBOUNCE_MS)
             val surface = try {
                 withContext(Dispatchers.Default) {
-                    service.voiceInputManager.convertViaZenz(kana, timeoutMs = 2500)
+                    service.voiceInputManager.convertViaZenz(kana, leftContext, timeoutMs = 2500)
                 }
             } catch (_: Exception) {
                 null
@@ -1319,6 +1357,7 @@ class InputEngine(private val service: NacreInputMethodService) {
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
     private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
     private val ZENZ_PREDICT_DEBOUNCE_MS = 300L // Composing must be stable this long before firing
+    private val ZENZ_CONTEXT_FETCH_MARGIN = 40 // Extra chars fetched before the cursor so ZenzContext can align the cap to a sentence boundary
     private val flickToggle = FlickToggleState(TOGGLE_TIMEOUT_MS)
 
     // ABC-grid immediate-commit cycling (iPhone-style direct insertion)

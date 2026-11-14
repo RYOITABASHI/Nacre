@@ -65,7 +65,8 @@ object LlamaJni {
 
     /**
      * Generate a conversion with zenz. The prompt must already be in zenz
-     * format (U+EE00 + katakana reading + U+EE01); see LlmService.zenzConvert.
+     * format (see ZenzPrompt: U+EE00 + katakana reading + U+EE01, optionally
+     * preceded by U+EE02 + left context); see LlmService.zenzConvert.
      * @return generated text ("" on failure / not loaded)
      */
     external fun generateZenz(prompt: String, maxTokens: Int): String

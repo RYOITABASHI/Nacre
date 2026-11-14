@@ -16,7 +16,7 @@ public interface ILlmService extends android.os.IInterface {
     void loadZenzModel(String modelPath) throws android.os.RemoteException;
     boolean isZenzModelLoaded() throws android.os.RemoteException;
     String getZenzLoadError() throws android.os.RemoteException;
-    void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException;
+    void zenzConvert(String katakanaReading, String leftContext, ILlmCallback callback) throws android.os.RemoteException;
     void cancelZenzGeneration() throws android.os.RemoteException;
 
     public static class Default implements ILlmService {
@@ -29,7 +29,7 @@ public interface ILlmService extends android.os.IInterface {
         @Override public void loadZenzModel(String modelPath) throws android.os.RemoteException {}
         @Override public boolean isZenzModelLoaded() throws android.os.RemoteException { return false; }
         @Override public String getZenzLoadError() throws android.os.RemoteException { return ""; }
-        @Override public void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException {}
+        @Override public void zenzConvert(String katakanaReading, String leftContext, ILlmCallback callback) throws android.os.RemoteException {}
         @Override public void cancelZenzGeneration() throws android.os.RemoteException {}
         @Override public android.os.IBinder asBinder() { return null; }
     }
@@ -127,8 +127,9 @@ public interface ILlmService extends android.os.IInterface {
                 case TRANSACTION_zenzConvert: {
                     data.enforceInterface(DESCRIPTOR);
                     String _arg0 = data.readString();
-                    ILlmCallback _arg1 = ILlmCallback.Stub.asInterface(data.readStrongBinder());
-                    this.zenzConvert(_arg0, _arg1);
+                    String _arg1 = data.readString();
+                    ILlmCallback _arg2 = ILlmCallback.Stub.asInterface(data.readStrongBinder());
+                    this.zenzConvert(_arg0, _arg1, _arg2);
                     reply.writeNoException();
                     return true;
                 }
@@ -256,12 +257,13 @@ public interface ILlmService extends android.os.IInterface {
             }
 
             @Override
-            public void zenzConvert(String katakanaReading, ILlmCallback callback) throws android.os.RemoteException {
+            public void zenzConvert(String katakanaReading, String leftContext, ILlmCallback callback) throws android.os.RemoteException {
                 android.os.Parcel _data = android.os.Parcel.obtain();
                 android.os.Parcel _reply = android.os.Parcel.obtain();
                 try {
                     _data.writeInterfaceToken(DESCRIPTOR);
                     _data.writeString(katakanaReading);
+                    _data.writeString(leftContext);
                     _data.writeStrongBinder(callback != null ? callback.asBinder() : null);
                     mRemote.transact(TRANSACTION_zenzConvert, _data, _reply, 0);
                     _reply.readException();

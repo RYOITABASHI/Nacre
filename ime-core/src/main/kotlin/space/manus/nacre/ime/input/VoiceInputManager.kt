@@ -2338,8 +2338,17 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
      * nothing usable; null always means "engine candidates only", i.e.
      * exactly today's behavior. Failures are recorded in [ZenzStatus].
      * Never logs the input text (user content).
+     *
+     * [leftContext] is the committed text before the composing region
+     * (already trimmed by ZenzContext); when non-blank it is sent as the
+     * zenz-v3 left context (U+EE02) so homophone choice can use the
+     * preceding sentence. Blank reproduces the pre-context prompt exactly.
      */
-    fun convertViaZenz(hiragana: String, timeoutMs: Long = ZENZ_TIMEOUT_MS): String? {
+    fun convertViaZenz(
+        hiragana: String,
+        leftContext: String = "",
+        timeoutMs: Long = ZENZ_TIMEOUT_MS,
+    ): String? {
         if (hiragana.length < 2) return null
         // zenz converts Japanese kana; anything else (e.g. ASCII) is out of scope.
         if (hiragana.none { it in 'ぁ'..'ゖ' || it in 'ァ'..'ヶ' }) return null
@@ -2366,6 +2375,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             try {
                 svc.zenzConvert(
                     katakana,
+                    leftContext,
                     object : ILlmCallback.Stub() {
                         override fun onResult(text: String) {
                             result.set(text)
