@@ -35,13 +35,17 @@ fun VSplitKeyboardScreen(
     service: NacreInputMethodService,
     angle: Float = 4f,
     onFlexPointer: () -> Unit = {},
+    onCommandPalette: () -> Unit = {},
 ) {
     val layerManager = service.layerManager
     val layout = layerManager.currentLayout()
     val rows = layout.rows
+    // The angle comes from the user's V-Split Angle setting (config range
+    // 0-30°); rendering stays clamped to 15° so extreme values cannot break
+    // the rotated layout.
     val clampedAngle = angle.coerceIn(0f, 15f)
 
-    val keyRowHeight = 48.dp
+    val keyRowHeight = 48.dp * keyboardHeightScale(service.configRepository)
 
     Column(
         modifier = Modifier
@@ -56,7 +60,16 @@ fun VSplitKeyboardScreen(
                 .fillMaxWidth()
                 .padding(horizontal = 8.dp),
             horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Explicit command-palette entry (previously Fn+Space only).
+            Text(
+                text = "⌘",
+                color = Color(service.currentTheme.accent.toInt()),
+                fontSize = 10.sp,
+                modifier = Modifier.clickable { onCommandPalette() },
+            )
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = "Ptr",
                 color = Color(service.currentTheme.accent.toInt()),
