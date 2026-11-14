@@ -273,7 +273,7 @@ fun KeyView(
                         }
                         else -> {
                             feedback.onKeyPress(keyDef.action)
-                            lighting.onKeyPress(keyDef.primary, column)
+                            service.keyLighting.onKeyPress(keyDef.primary, column)
                             service.inputEngine.processKey(keyDef)
                         }
                     }
