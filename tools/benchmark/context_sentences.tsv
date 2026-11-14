@@ -1,0 +1,34 @@
+# Nacre zenz left-context benchmark set.
+# Columns: context (committed surface text before the composing region, as
+# ZenzContext.extract returns it) <TAB> reading (full-sentence hiragana, as
+# composed) <TAB> expected surface <TAB> category
+# Surfaces carry no sentence punctuation (、。), matching sentences.tsv.
+# "pair" rows share one reading across two contexts with different expected
+# surfaces — the cases a context-free conversion cannot decide.
+# A/B runner: tools/benchmark/zenz_context_ab.py (desktop llama-server).
+彼は物理学者だ。	かがくにきょうみがある	科学に興味がある	pair
+実験室で薬品を扱う。	かがくにきょうみがある	化学に興味がある	pair
+彼は美容師だ。	かみをきった	髪を切った	pair
+印刷所で働いている。	かみをきった	紙を切った	pair
+新しいスマホを買った。	きのうがすごい	機能がすごい	pair
+カレンダーを見た。	きのうはあめだった	昨日は雨だった	pair
+工場のラインが止まった。	きかいをしゅうりした	機械を修理した	homophone
+今回の商談は大事だ。	このきかいをのがすな	この機会を逃すな	homophone
+奈良公園に行った。	しかにえさをやった	鹿に餌をやった	homophone
+虫歯が痛む。	しかにかようことにした	歯科に通うことにした	homophone
+週末は家族で過ごした。	こうえんであそんだ	公園で遊んだ	homophone
+彼は有名な教授だ。	こうえんをたのまれた	講演を頼まれた	homophone
+彼は会社員だ。	いどうがきまった	異動が決まった	homophone
+電車で通勤している。	いどうにじかんがかかる	移動に時間がかかる	homophone
+彼の仕事ぶりは評判だ。	せいかくなさぎょう	正確な作業	homophone
+彼は優しい人だ。	せいかくがやさしい	性格が優しい	homophone
+川にかかっている。	はしをわたった	橋を渡った	homophone
+食事の時間だ。	はしをもった	箸を持った	homophone
+空を見上げた。	くもがながれている	雲が流れている	homophone
+部屋の隅に巣がある。	くもがすをつくった	蜘蛛が巣を作った	homophone
+池のほとりにいる。	かえるがないている	蛙が鳴いている	homophone
+ラジオを買った。	おんがくをきく	音楽を聴く	homophone
+先生に質問がある。	せんせいにきく	先生に聞く	homophone
+特に理由はない。	おはようございます	おはようございます	control
+昨日の話の続きだ。	ありがとうございます	ありがとうございます	control
+メモを残した。	あしたはあめがふるらしい	明日は雨が降るらしい	control
