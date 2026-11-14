@@ -158,6 +158,16 @@ class InputEngine(private val service: NacreInputMethodService) {
     private var zenzJob: Job? = null
     private var conversionSeq = 0
 
+    // Typing-time zenz (debounced, azooKey-style): conversion-time zenz alone
+    // almost never reached the user — it fires only on 空白 and dies with the
+    // next key tap, while the candidate bar during composing is 100% engine
+    // predict(). This job requests a zenz candidate for the composing kana
+    // after a short idle pause and inserts it at the head of the prediction
+    // list. Its own sequence invalidates on every keystroke (conversionSeq
+    // does not move on keystrokes).
+    private var zenzPredictJob: Job? = null
+    private var zenzPredictSeq = 0
+
     // LLM-based candidate reranking (optional, async)
     val llmReranker = LlmReranker(service)
 
@@ -721,6 +731,16 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun startConversion(ic: InputConnection) {
+        // A still-in-flight prediction job (50ms debounce + background lookup
+        // from the last keystroke) would otherwise land AFTER this conversion
+        // starts, overwrite the conversion candidates and reset isConverting —
+        // clobbering the conversion and guaranteeing the zenz result below is
+        // dropped as "not converting". Conversion supersedes prediction.
+        predictionJob?.cancel()
+        predictionJob = null
+        zenzPredictSeq++
+        zenzPredictJob?.cancel()
+        zenzPredictJob = null
         val seq = ++conversionSeq
         val kana = japaneseEngine.romajiToHiragana(composingText, finalize = true)
         fullKana = kana
@@ -933,6 +953,45 @@ class InputEngine(private val service: NacreInputMethodService) {
                 }
             }
         }
+
+        scheduleZenzPredict(kana)
+    }
+
+    /**
+     * Debounced typing-time zenz: after the composing kana has been stable
+     * for [ZENZ_PREDICT_DEBOUNCE_MS] and is at least [ZENZ_PREDICT_MIN_KANA]
+     * long, ask zenz for a full-sentence candidate and prepend it to the
+     * prediction list. The result is inserted ONLY if the composing text is
+     * byte-identical to the request and the user is still typing (not
+     * converting) — any keystroke bumps [zenzPredictSeq] and cancels the job,
+     * so a stale surface can never land. Never touches the composing text or
+     * the selection: this only reorders what the candidate bar offers.
+     * Password fields never reach here ([updatePredictions] returns early)
+     * and ABC mode is excluded, matching the conversion-time path.
+     */
+    private fun scheduleZenzPredict(kana: String) {
+        zenzPredictJob?.cancel()
+        zenzPredictJob = null
+        if (flickAlphaMode || kana.length < ZENZ_PREDICT_MIN_KANA) return
+        val seq = ++zenzPredictSeq
+        zenzPredictJob = scope.launch {
+            kotlinx.coroutines.delay(ZENZ_PREDICT_DEBOUNCE_MS)
+            val surface = try {
+                withContext(Dispatchers.Default) {
+                    service.voiceInputManager.convertViaZenz(kana, timeoutMs = 2500)
+                }
+            } catch (_: Exception) {
+                null
+            } ?: return@launch
+            if (seq != zenzPredictSeq || isConverting) return@launch
+            if (composingKana != kana) return@launch
+            androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+                if (isConverting || composingKana != kana) return@withMutableSnapshot
+                val existingIdx = candidates.indexOfFirst { it.surface == surface }
+                if (existingIdx >= 0) candidates.removeAt(existingIdx)
+                candidates.add(0, ConversionCandidate(surface = surface, reading = kana, cost = -100))
+            }
+        }
     }
 
     /**
@@ -1061,6 +1120,9 @@ class InputEngine(private val service: NacreInputMethodService) {
         conversionSeq++
         zenzJob?.cancel()
         zenzJob = null
+        zenzPredictSeq++
+        zenzPredictJob?.cancel()
+        zenzPredictJob = null
         candidates.clear()
         selectedCandidateIndex = -1
         isConverting = false
@@ -1260,6 +1322,8 @@ class InputEngine(private val service: NacreInputMethodService) {
     private var lastFlickTapTime: Long = 0L
     private var lastFlickTapCycle: List<String>? = null
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
+    private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
+    private val ZENZ_PREDICT_DEBOUNCE_MS = 300L // Composing must be stable this long before firing
 
     // ABC-grid immediate-commit cycling (iPhone-style direct insertion)
     private val alphaCycler = AlphaTapCycler(TOGGLE_TIMEOUT_MS)
@@ -1503,6 +1567,14 @@ class InputEngine(private val service: NacreInputMethodService) {
      * Flick-mode conversion. Uses composingFlickKana directly (no romaji).
      */
     private fun startFlickConversion(ic: android.view.inputmethod.InputConnection) {
+        // See startConversion: an in-flight prediction job must not land on
+        // top of the conversion candidate list (it also resets isConverting,
+        // which silently voids the pending zenz insertion).
+        predictionJob?.cancel()
+        predictionJob = null
+        zenzPredictSeq++
+        zenzPredictJob?.cancel()
+        zenzPredictJob = null
         val seq = ++conversionSeq
         val kana = composingFlickKana
         val dict = dictionary
