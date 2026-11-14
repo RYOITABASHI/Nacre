@@ -606,13 +606,20 @@ private fun LightingSection(config: ConfigRepository, context: Context) {
 @Composable
 private fun LayoutSection(config: ConfigRepository) {
     val context = LocalContext.current
-    // Same process as the IME, so the IME picks this up on the next keyboard open.
-    // This only affects the foldable cover / sub-display — the main display is untouched.
+    // Same process as the IME, so the IME picks these up on the next keyboard open.
+    // The 12-key toggle affects the foldable cover / sub-display only; the layout
+    // switch below it affects the main (wide) display only.
     val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
     var coverFlick12 by remember {
         mutableStateOf(
             layoutPrefs.getString(LayoutSelector.KEY_SUB_DISPLAY_MODE, LayoutMode.FlickInput12Key.name) ==
                 LayoutMode.FlickInput12Key.name,
+        )
+    }
+    var mainVSplit by remember {
+        mutableStateOf(
+            layoutPrefs.getString(LayoutSelector.KEY_MAIN_DISPLAY_MODE, LayoutMode.StandardQwerty.name) ==
+                LayoutMode.FullVSplit.name,
         )
     }
     var vAngle by remember { mutableStateOf(config.vAngle) }
@@ -634,7 +641,7 @@ private fun LayoutSection(config: ConfigRepository) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("\u30AB\u30D0\u30FC\u753B\u9762\u306712\u30AD\u30FC\u5165\u529B\uFF08\u30D5\u30EA\u30C3\u30AF/\u9023\u6253\uFF09", color = NacreText, fontSize = 14.sp)
                     Text(
-                        "\u6298\u308A\u305F\u305F\u307F\u6642\u306E\u30AB\u30D0\u30FC\u753B\u9762\u306E\u307FiOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002\u30E1\u30A4\u30F3\u753B\u9762\u306F\u5909\u66F4\u306A\u3057",
+                        "\u6298\u308A\u305F\u305F\u307F\u6642\u306E\u30AB\u30D0\u30FC\u753B\u9762\u306E\u307FiOS\u98A8\u30C6\u30F3\u30AD\u30FC\u3002",
                         color = NacreTextDim,
                         fontSize = 12.sp,
                     )
@@ -645,6 +652,36 @@ private fun LayoutSection(config: ConfigRepository) {
                         coverFlick12 = it
                         val mode = if (it) LayoutMode.FlickInput12Key.name else LayoutMode.CompactQwerty.name
                         layoutPrefs.edit().putString(LayoutSelector.KEY_SUB_DISPLAY_MODE, mode).apply()
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = NacreAccent,
+                        checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                    ),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Main (wide) display layout: V-Split opt-in, Standard QWERTY default.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("メイン画面のレイアウト（V-Split）", color = NacreText, fontSize = 14.sp)
+                    Text(
+                        "ONでV-Split（回転＋中央トラックボール）、OFFで標準QWERTY。幅の広いメイン画面のみ",
+                        color = NacreTextDim,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = mainVSplit,
+                    onCheckedChange = {
+                        mainVSplit = it
+                        val mode = if (it) LayoutMode.FullVSplit.name else LayoutMode.StandardQwerty.name
+                        layoutPrefs.edit().putString(LayoutSelector.KEY_MAIN_DISPLAY_MODE, mode).apply()
                     },
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = NacreAccent,
