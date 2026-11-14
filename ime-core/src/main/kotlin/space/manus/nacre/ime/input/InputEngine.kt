@@ -222,6 +222,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingKana = ""
         japaneseEngine.reset()
         clearCandidates()
+        alphaCycler.reset()
 
         // Shelly Dev Mode detection — exact package match (isShellyDevModeTarget),
         // gated by a user-facing opt-out that defaults to ON. Recomputed on every
@@ -1260,6 +1261,9 @@ class InputEngine(private val service: NacreInputMethodService) {
     private var lastFlickTapCycle: List<String>? = null
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
 
+    // ABC-grid immediate-commit cycling (iPhone-style direct insertion)
+    private val alphaCycler = AlphaTapCycler(TOGGLE_TIMEOUT_MS)
+
     /**
      * Direct kana input from flick keyboard.
      * Supports toggle input (ガラケー打ち): rapidly tapping the same key
@@ -1272,6 +1276,9 @@ class InputEngine(private val service: NacreInputMethodService) {
         tapCycleOverride: List<String>? = null,
     ) {
         val ic = service.currentInputConnection ?: return
+        // Kana input supersedes any pending ABC replace-cycle: the pending
+        // alpha character stays committed as-is.
+        alphaCycler.reset()
         if (isConverting) commitSelectedCandidate(ic)
 
         val now = System.currentTimeMillis()
@@ -1334,6 +1341,116 @@ class InputEngine(private val service: NacreInputMethodService) {
         lastFlickKeyId = ""
         lastFlickTapTime = 0L
         lastFlickTapCycle = null
+    }
+
+    /**
+     * Finalize whatever composition is active before a direct (immediately
+     * committed) character is inserted — the ☆123 / ABC grids behave like
+     * iPhone: digits and letters are never held in a composing buffer, so a
+     * pending Japanese composition is committed first, exactly as the Enter
+     * and ToggleJapanese paths already do. At most one composition is active
+     * at a time in practice; the when-chain mirrors those precedents.
+     */
+    private fun finalizeComposingForDirectInput(ic: InputConnection) {
+        when {
+            isConverting -> commitSelectedCandidate(ic)
+            composingFlickKana.isNotEmpty() -> {
+                val pending = composingFlickKana
+                ic.commitText(pending, 1)
+                if (flickAlphaMode) dictionary?.recordEnglishSelection(pending)
+                else recordJapanesePhrase(pending, pending)
+                composingFlickKana = ""
+                composingKana = ""
+                clearCandidates()
+            }
+            composingText.isNotEmpty() -> finishComposing(ic)
+            englishComposing.isNotEmpty() -> {
+                val pending = englishComposing
+                ic.commitText(pending, 1)
+                dictionary?.recordEnglishSelection(pending)
+                englishComposing = ""
+                clearCandidates()
+            }
+            symbolReplace != null -> clearCandidates()
+        }
+        confirmFlickToggle()
+    }
+
+    /**
+     * Direct-commit entry for the ☆123 number grid (and other always-literal
+     * keys on the 12-key pad): the character lands in the editor immediately,
+     * iPhone-style — no composing state, no 確定 press.
+     */
+    fun processFlickDirectText(text: String) {
+        val ic = service.currentInputConnection ?: return
+        alphaCycler.reset()
+        finalizeComposingForDirectInput(ic)
+        ic.commitText(text, 1)
+    }
+
+    /**
+     * Direct-commit entry for the ABC alpha grid. Flicks and first taps insert
+     * [kana] immediately. A repeated tap on the same key within the toggle
+     * window replaces the just-committed character with the next [tapCycle]
+     * entry instead of inserting again — the character is already in the
+     * editor, so no 確定 is ever needed, yet garakei-style cycling still
+     * works. The replace only happens when the character actually before the
+     * cursor is the pending cycle entry (guards cursor moves / deletions).
+     *
+     * Trade-off vs the old composing route: ABC flick input no longer feeds
+     * the English word predictor/learner — iPhone's ABC side has no composing
+     * prediction either, and immediate insertion is the requested behavior.
+     */
+    fun processFlickAlpha(
+        kana: String,
+        flickKeyId: String = "",
+        isFlickTap: Boolean = false,
+        tapCycle: List<String>? = null,
+    ) {
+        val ic = service.currentInputConnection ?: return
+        val wasConverting = isConverting
+        if (wasConverting) commitSelectedCandidate(ic)
+
+        // The replace path is only valid when the pending alpha character is
+        // really the last committed text — never right after a conversion
+        // commit, whose last character could coincide with a cycle entry, and
+        // never while a composition is active (the "previous character" would
+        // be composing text, whose deletion would corrupt the composition).
+        val noCompositionActive = composingFlickKana.isEmpty() &&
+            composingText.isEmpty() && englishComposing.isEmpty()
+        if (!wasConverting && noCompositionActive && isFlickTap && !tapCycle.isNullOrEmpty()) {
+            val now = System.currentTimeMillis()
+            val startIndex = tapCycle.indexOfFirst { it.equals(kana, ignoreCase = true) }
+                .coerceAtLeast(0)
+            val replaceIndex = alphaCycler.tap(flickKeyId, tapCycle, startIndex, now)
+            if (replaceIndex != null) {
+                val prev = ic.getTextBeforeCursor(1, 0)?.toString()
+                val expectedPrev = tapCycle[(replaceIndex + tapCycle.size - 1) % tapCycle.size]
+                if (prev != null && prev.equals(expectedPrev, ignoreCase = true)) {
+                    // Keep the case of the character being replaced (a Shift
+                    // first tap produced an uppercase letter; cycling keeps it).
+                    val next = tapCycle[replaceIndex]
+                    val out = if (prev.any { it.isUpperCase() }) next.uppercase() else next
+                    ic.deleteSurroundingText(prev.length, 0)
+                    ic.commitText(out, 1)
+                    return
+                }
+                // Cursor moved or the pending char is gone: re-arm as a fresh
+                // character below instead of deleting unrelated text.
+                alphaCycler.reset()
+                alphaCycler.tap(flickKeyId, tapCycle, startIndex, now)
+            }
+            // A fresh alpha character: any Japanese composition still pending
+            // is committed first, then the letter inserts directly.
+            finalizeComposingForDirectInput(ic)
+            ic.commitText(kana, 1)
+            return
+        }
+
+        // Flick (or a key with no cycle): direct insert, cycle broken.
+        alphaCycler.reset()
+        finalizeComposingForDirectInput(ic)
+        ic.commitText(kana, 1)
     }
 
     /**
@@ -1414,6 +1531,9 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     fun processFlickBackspace() {
         val ic = service.currentInputConnection ?: return
+        // Deleting breaks any pending ABC replace-cycle (its character may be
+        // the one just deleted; the cursor check would catch it, but be safe).
+        alphaCycler.reset()
         if (isConverting) {
             cancelConversion(ic)
         } else if (composingFlickKana.isNotEmpty()) {
@@ -1435,6 +1555,7 @@ class InputEngine(private val service: NacreInputMethodService) {
      * Commit any active flick composition (called when switching away from flick layout).
      */
     fun commitFlickIfNeeded() {
+        alphaCycler.reset()
         if (composingFlickKana.isNotEmpty()) {
             val ic = service.currentInputConnection ?: return
             if (isConverting) {
