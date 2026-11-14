@@ -25,7 +25,9 @@ class ConfigRepository(context: Context) {
         private const val DEFAULT_SOUND_PROFILE = "soft"
         private const val DEFAULT_SOUND_VOLUME = 50
         private const val DEFAULT_KEYBOARD_HEIGHT = 280
-        private const val DEFAULT_V_ANGLE = 3f
+        // 4f matches the angle the V-Split renderer historically hardcoded, so
+        // wiring this setting through does not change the unset default look.
+        private const val DEFAULT_V_ANGLE = 4f
         private const val DEFAULT_AUTO_CONVERT = true
         private const val DEFAULT_LIGHTING_MODE = "none"
     }
