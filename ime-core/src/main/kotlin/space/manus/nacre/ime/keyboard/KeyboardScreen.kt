@@ -8,7 +8,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -167,8 +166,6 @@ private fun StandardKeyboardScreen(
     val accentColor = Color(theme.accent.toInt())
     val heightScale = keyboardHeightScale(service.configRepository)
 
-    val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
-    val isLargeScreen = screenWidthDp > 500.dp
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -187,15 +184,17 @@ private fun StandardKeyboardScreen(
         )
 
         // Keyboard rows (row 2 carries the centre trackball unless plainRows)
+        // Base heights target the 48dp touch-target guidance for letter rows
+        // on every branch: the old large-screen branch (34dp) made keys on
+        // the unfolded main screen SHORTER than on phones, and the mod rows
+        // (26/28dp) were far below any guideline. The user's Keyboard Height
+        // slider (heightScale, 0.75–1.35) still multiplies on top.
         val rows = layout.rows
         for ((rowIndex, row) in rows.withIndex()) {
             val isModRow = rowIndex == rows.lastIndex
             val baseKeyHeight = when {
-                isModRow && compactBase -> 28f
-                isModRow -> 26f
-                compactBase -> 44f
-                isLargeScreen -> 34f
-                else -> 40f
+                isModRow -> 40f
+                else -> 48f
             }
             val keyHeight = baseKeyHeight * heightScale
 
@@ -326,7 +325,9 @@ fun KeyRowWithTrackball(
     val leftKeys = keys.subList(0, mid)
     val rightKeys = keys.subList(mid, keys.size)
 
-    val rowHeight = if (showTrackball) 42.dp else (keyHeightDp + 3).dp
+    // Row height always derives from the caller-passed key height (same
+    // formula as KeyRow) so taller keys are never clipped by a fixed row.
+    val rowHeight = (keyHeightDp + 3).dp
 
     Row(
         modifier = Modifier

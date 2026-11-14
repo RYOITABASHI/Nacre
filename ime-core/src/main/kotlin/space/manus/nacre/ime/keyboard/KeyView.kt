@@ -111,55 +111,50 @@ fun KeyView(
 
     val shape = RoundedCornerShape(6.dp)
 
+    // Label exactly as rendered on the key face. Hoisted out of the Box
+    // content so the press-preview popup below shows the same character the
+    // key face shows (including Japanese-mode and Shift upper-casing).
+    val displayLabel = if (service.layerManager.isJapanese) {
+        when (keyDef.label) {
+            "," -> "、"
+            "." -> "。"
+            // かな入力時: アルファベットキーを大文字表示（モード判別用）
+            else -> if (keyDef.primary.length == 1 && keyDef.primary[0] in 'a'..'z') {
+                keyDef.label.uppercase()
+            } else if (service.layerManager.isShifted && keyDef.primary.length == 1) {
+                keyDef.label.uppercase()
+            } else {
+                keyDef.label
+            }
+        }
+    } else if (service.layerManager.isShifted && keyDef.primary.length == 1) {
+        keyDef.label.uppercase()
+    } else {
+        keyDef.label
+    }
+    // The pointerInput block is keyed only on keyDef and does not restart
+    // when Shift/Japanese state changes, so the gesture code reads the label
+    // through this updated-state holder to avoid a stale popup character.
+    val currentDisplayLabel by rememberUpdatedState(displayLabel)
+    // Press preview applies to single-character keys (letters, digits,
+    // punctuation). Mod/special keys (Shift, Space, Fn, …) get none.
+    val isCharacterKey = keyDef.action is KeyAction.Text && keyDef.primary.length == 1
+    var pressPopupChar by remember { mutableStateOf<String?>(null) }
+
     Box(
         modifier = modifier
             .then(if (heightDp > 0f) Modifier.height(heightDp.dp) else Modifier.fillMaxHeight())
-            .padding(horizontal = 2.dp, vertical = 1.5.dp)
-            .scale(scale)
-            .clip(shape)
-            // Outer shell — bottom edge highlight for mechanical depth
-            .background(if (isPressed) KeyBgPressed else KeyEdgeLight)
-            .padding(bottom = 1.5.dp) // Creates the "keycap edge" effect
-            .clip(shape)
-            .background(bgColor)
-            .then(
-                if (borderColor != Color.Transparent) {
-                    Modifier.border(
-                        width = 1.dp,
-                        color = borderColor,
-                        shape = shape,
-                    )
-                } else {
-                    // Subtle edge border for non-glowing keys
-                    Modifier.border(
-                        width = 0.5.dp,
-                        color = KeyEdgeLight.copy(alpha = 0.5f),
-                        shape = shape,
-                    )
-                }
-            )
-            .semantics {
-                contentDescription = when (keyDef.action) {
-                    is KeyAction.Backspace -> "Backspace"
-                    is KeyAction.Enter -> "Enter"
-                    is KeyAction.Space -> "Space"
-                    is KeyAction.Tab -> "Tab"
-                    is KeyAction.Escape -> "Escape"
-                    is KeyAction.Fn -> "Function"
-                    is KeyAction.FnPage2 -> "Function page 2"
-                    is KeyAction.SwitchIme -> "Switch keyboard"
-                    is KeyAction.Shift -> "Shift"
-                    is KeyAction.ToggleJapanese -> "Toggle Japanese"
-                    is KeyAction.Emoji -> "Emoji"
-                    is KeyAction.Alt -> "Alt"
-                    is KeyAction.Henkan -> "Henkan"
-                    else -> keyDef.label
-                }
-            }
+            // Gesture handling wraps the FULL cell, before the visual
+            // padding below: the entire cell is the hit area, so there
+            // are no dead gaps between keys (previously the padding
+            // shrank the touch target to the keycap face).
             .pointerInput(keyDef) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     isPressed = true
+                    if (isCharacterKey) {
+                        pressPopupChar = currentDisplayLabel
+                    }
                     val downTime = System.currentTimeMillis()
 
                     val isFnAction = keyDef.action is KeyAction.Fn
@@ -185,6 +180,7 @@ fun KeyView(
                                 // Timeout = long press threshold reached while finger is still down
                                 if (!wasDragged && !longPressHandled) {
                                     longPressHandled = true
+                                    pressPopupChar = null
                                     val feedback = service.feedbackManager
                                     feedback.onLongPress()
                                     if (keyDef.action is KeyAction.Fn) {
@@ -220,6 +216,7 @@ fun KeyView(
                                     abs(totalDragY) > swipeThresholdPx
                                 ) {
                                     wasDragged = true
+                                    pressPopupChar = null
                                 }
                                 change.consume()
                             } else {
@@ -231,6 +228,7 @@ fun KeyView(
                         isPressed = false
                         bsRepeating = false
                         showLongPressPopup = false
+                        pressPopupChar = null
                     }
 
                     val feedback = service.feedbackManager
@@ -278,6 +276,48 @@ fun KeyView(
                         }
                     }
                 }
+            }
+            .padding(horizontal = 2.dp, vertical = 1.5.dp)
+            .scale(scale)
+            .clip(shape)
+            // Outer shell — bottom edge highlight for mechanical depth
+            .background(if (isPressed) KeyBgPressed else KeyEdgeLight)
+            .padding(bottom = 1.5.dp) // Creates the "keycap edge" effect
+            .clip(shape)
+            .background(bgColor)
+            .then(
+                if (borderColor != Color.Transparent) {
+                    Modifier.border(
+                        width = 1.dp,
+                        color = borderColor,
+                        shape = shape,
+                    )
+                } else {
+                    // Subtle edge border for non-glowing keys
+                    Modifier.border(
+                        width = 0.5.dp,
+                        color = KeyEdgeLight.copy(alpha = 0.5f),
+                        shape = shape,
+                    )
+                }
+            )
+            .semantics {
+                contentDescription = when (keyDef.action) {
+                    is KeyAction.Backspace -> "Backspace"
+                    is KeyAction.Enter -> "Enter"
+                    is KeyAction.Space -> "Space"
+                    is KeyAction.Tab -> "Tab"
+                    is KeyAction.Escape -> "Escape"
+                    is KeyAction.Fn -> "Function"
+                    is KeyAction.FnPage2 -> "Function page 2"
+                    is KeyAction.SwitchIme -> "Switch keyboard"
+                    is KeyAction.Shift -> "Shift"
+                    is KeyAction.ToggleJapanese -> "Toggle Japanese"
+                    is KeyAction.Emoji -> "Emoji"
+                    is KeyAction.Alt -> "Alt"
+                    is KeyAction.Henkan -> "Henkan"
+                    else -> keyDef.label
+                }
             },
         contentAlignment = Alignment.Center,
     ) {
@@ -299,24 +339,6 @@ fun KeyView(
                 textAlign = TextAlign.Center,
             )
         } else {
-            val displayLabel = if (service.layerManager.isJapanese) {
-                when (keyDef.label) {
-                    "," -> "、"
-                    "." -> "。"
-                    // かな入力時: アルファベットキーを大文字表示（モード判別用）
-                    else -> if (keyDef.primary.length == 1 && keyDef.primary[0] in 'a'..'z') {
-                        keyDef.label.uppercase()
-                    } else if (service.layerManager.isShifted && keyDef.primary.length == 1) {
-                        keyDef.label.uppercase()
-                    } else {
-                        keyDef.label
-                    }
-                }
-            } else if (service.layerManager.isShifted && keyDef.primary.length == 1) {
-                keyDef.label.uppercase()
-            } else {
-                keyDef.label
-            }
             Text(
                 text = displayLabel,
                 color = textColor,
@@ -335,6 +357,32 @@ fun KeyView(
                     androidx.compose.ui.text.TextStyle.Default
                 },
             )
+        }
+
+        // Press preview popup, mirroring the flick pad's popup (48dp bubble,
+        // accent background, bold black character) so QWERTY typists can see
+        // which key they actually hit while the finger covers it.
+        pressPopupChar?.let { ch ->
+            Popup(
+                alignment = Alignment.TopCenter,
+                offset = androidx.compose.ui.unit.IntOffset(0, with(LocalDensity.current) { -56.dp.roundToPx() }),
+                properties = PopupProperties(focusable = false),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp, 48.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(GlowColor.copy(alpha = 0.9f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = ch,
+                        color = Color.Black,
+                        fontSize = 22.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
         }
 
         // SPEC: Gboard-style popup bubble for long-press characters
