@@ -34,6 +34,12 @@ import java.util.concurrent.atomic.AtomicReference
 /** zenz readiness as shown by the keyboard's candidate bar indicator. */
 enum class ZenzUiState { OFF, NOT_DOWNLOADED, LOADING, READY, ERROR }
 
+/** ASR source/health as shown in the voice panel (candidate bar / QuickInputPad). */
+enum class VoiceAsrUiState { LOADING, ON_DEVICE, MODEL_MISSING, EXTERNAL, ERROR }
+
+/** Refinement (整文) availability as shown in the voice panel. */
+enum class VoiceRefineUiState { LOADING, READY_LOCAL, READY_CLOUD, UNAVAILABLE }
+
 /**
  * Typeless-level voice input manager.
  *
@@ -106,6 +112,62 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     var zenzUiState by mutableStateOf(ZenzUiState.LOADING)
         private set
 
+    // ── Voice engine state (no silent degradation) ─────────────────────
+    // Surfaced live in the voice panel and recorded via VoiceStatus, the
+    // same pattern zenz uses: a dead ASR model or a dead refiner must be
+    // diagnosable from the keyboard, not discovered weeks later.
+
+    var voiceAsrUiState by mutableStateOf(VoiceAsrUiState.LOADING)
+        private set
+    var voiceRefineUiState by mutableStateOf(VoiceRefineUiState.LOADING)
+        private set
+
+    fun asrStateLabel(): String = when (voiceAsrUiState) {
+        VoiceAsrUiState.LOADING -> "モデル読込中"
+        VoiceAsrUiState.ON_DEVICE -> "端末内認識"
+        VoiceAsrUiState.MODEL_MISSING -> "ASRモデル未DL"
+        VoiceAsrUiState.EXTERNAL -> "外部認識で代用中"
+        VoiceAsrUiState.ERROR -> "認識エラー"
+    }
+
+    fun refineStateLabel(): String = when (voiceRefineUiState) {
+        VoiceRefineUiState.LOADING -> "準備中"
+        VoiceRefineUiState.READY_LOCAL -> "端末内"
+        VoiceRefineUiState.READY_CLOUD -> "クラウド"
+        VoiceRefineUiState.UNAVAILABLE -> "不可"
+    }
+
+    /** One-line engine summary for the voice panel (QuickInputPad). */
+    val voiceStateSummary: String
+        get() = "認識: ${asrStateLabel()} / 整文: ${refineStateLabel()}"
+
+    // ── Whisper live-preview / incremental-commit session state ────────
+    // Fed by VoiceSegmentFinalizer decisions on the main thread only.
+
+    // lazy: postProcessor is declared further down in this class.
+    private val whisperFinalizer by lazy { VoiceSegmentFinalizer(postProcessor) }
+    @Volatile private var whisperSessionActive = false
+    /** Cloud ASR (opt-in) replaces the whole transcript at stop, so those
+     *  sessions preview only and never commit incrementally. */
+    private var whisperCloudSession = false
+    /** Editor-composing preview disabled when the user was mid-composition
+     *  (kana conversion) when dictation started — the preview must not
+     *  hijack an in-progress conversion. partialText still shows it. */
+    private var whisperEditorPreviewEnabled = true
+    private var whisperPreviewInEditor = false
+    private var whisperPreviewDisplay = ""
+    /** Committed chunks of the current voice session, in order. The
+     *  refinement replace guard only ever touches the latest chunk. */
+    private val voiceSessionChunks = mutableListOf<String>()
+    /** Why the SpeechRecognizer fallback engaged (for the status record). */
+    private var asrFallbackDetail = ""
+
+    // Local LLM load retry: the ILlmService binder is kept even when the
+    // model load failed, so the next voice session can retry instead of
+    // refinement staying silently dead for the IME's whole lifetime.
+    @Volatile private var llmServiceAny: ILlmService? = null
+    private val llmLoadInFlight = AtomicBoolean(false)
+
     // Deterministic, instant (no LLM round-trip) post-processing: hallucination
     // filtering and self-correction ("じゃなくて" / "no wait") resolution. Runs
     // before quickClean/LLM refinement on every recognition path so disfluency
@@ -121,6 +183,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             Thread {
                 try {
                     if (!svc.isModelLoaded) {
+                        voiceAsrUiState = VoiceAsrUiState.LOADING
                         val downloader = space.manus.nacre.ai.ModelDownloader(service)
                         // Prefer the ja-specialized ReazonSpeech transducer; fall back
                         // to SenseVoice until ReazonSpeech finishes downloading.
@@ -135,20 +198,36 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                             }
                             if (!svc.isModelLoaded) {
                                 writeDiagnostic("onServiceConnected: model load TIMEOUT after 60s")
+                                voiceAsrUiState = VoiceAsrUiState.ERROR
+                                space.manus.nacre.ai.VoiceStatus.recordAsr(
+                                    service, space.manus.nacre.ai.VoiceStatus.AsrState.LOAD_ERROR,
+                                    "ASRモデルの読み込みが60秒で完了しませんでした",
+                                )
                             }
                         } else {
                             writeDiagnostic("onServiceConnected: model NOT FOUND (dir=$modelDir, vad=$vadPath)")
+                            voiceAsrUiState = VoiceAsrUiState.MODEL_MISSING
+                            space.manus.nacre.ai.VoiceStatus.recordAsr(
+                                service, space.manus.nacre.ai.VoiceStatus.AsrState.NOT_DOWNLOADED,
+                                "ASRモデル（ReazonSpeech/SenseVoice + VAD）が見つかりません",
+                            )
                         }
                     } else {
                         writeDiagnostic("onServiceConnected: model already loaded")
                     }
                     if (svc.isModelLoaded) {
                         whisperService = svc
+                        markAsrOnDevice()
                         writeDiagnostic("onServiceConnected: SUCCESS, whisperService set")
                     } else {
                         writeDiagnostic("onServiceConnected: FAIL, model not loaded, fallback to SpeechRecognizer")
                     }
                 } catch (e: Exception) {
+                    voiceAsrUiState = VoiceAsrUiState.ERROR
+                    space.manus.nacre.ai.VoiceStatus.recordAsr(
+                        service, space.manus.nacre.ai.VoiceStatus.AsrState.LOAD_ERROR,
+                        "ASRモデル読み込み例外: ${e.message}",
+                    )
                     writeDiagnostic("onServiceConnected EXCEPTION: ${e.message}")
                 }
             }.start()
@@ -159,6 +238,11 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             whisperBound = false
             if (isWhisperContinuousMode) {
                 isWhisperContinuousMode = false
+                whisperSessionActive = false
+                whisperFinalizer.reset()
+                whisperPreviewInEditor = false
+                whisperPreviewDisplay = ""
+                asrFallbackDetail = "Whisperサービスが切断されたため、端末標準の音声認識で代用"
                 // Clear composing text left from the dead Whisper session
                 mainHandler.post {
                     service.currentInputConnection?.finishComposingText()
@@ -187,60 +271,17 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             // already use it; if it is not ready yet, conversions simply
             // fall back to engine candidates until it is.
             ensureZenzLoaded()
-            Thread {
-                try {
-                    // Cloud-first: when a cloud refiner key is configured, do NOT load
-                    // the ~1GB local LLM. Kept resident it pressures memory enough that
-                    // the OS kills other apps (and the IME itself — observed as a
-                    // "vis BFGS" process death). The cloud handles refinement; the local
-                    // model is only an offline fallback used when no cloud key is set.
-                    if (space.manus.nacre.ai.cloud.CloudLlmConfig.anyConfigured(service)) {
-                        writeDiagnostic("llmConnection: cloud refiner configured — skipping local LLM load (frees ~1GB RAM)")
-                        return@Thread
-                    }
-                    if (!svc.isModelLoaded) {
-                        val downloader = space.manus.nacre.ai.ModelDownloader(service)
-                        // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
-                        // Qwen 2.5 1.5B is the default (Gemma 4 E2B was retired: it never
-                        // loads on the pinned llama.cpp b3500 — see ModelDownloader).
-                        val modelPaths = downloader.getPreferredLlmModelPaths()
-                        if (modelPaths.isNotEmpty()) {
-                            var loadedPath: String? = null
-                            for (modelPath in modelPaths) {
-                                if (tryLoadLlmModel(svc, modelPath)) {
-                                    loadedPath = modelPath
-                                    break
-                                }
-                                try {
-                                    svc.unloadModel()
-                                } catch (_: Exception) {
-                                }
-                            }
-                            if (loadedPath == null) {
-                                writeDiagnostic("llmConnection: no local LLM could be loaded — refinement disabled for this session")
-                                return@Thread
-                            }
-                            llmService = svc
-                            val modelFile = java.io.File(loadedPath)
-                            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
-                        } else {
-                            downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
-                            writeDiagnostic("llmConnection: LLM model not found — Qwen 2.5 1.5B download requested, refinement disabled for this session")
-                            return@Thread
-                        }
-                    } else {
-                        llmService = svc
-                        writeDiagnostic("llmConnection: model already loaded")
-                    }
-                } catch (e: Exception) {
-                    writeDiagnostic("llmConnection EXCEPTION: ${e.message}")
-                }
-            }.start()
+            // Keep the binder even if the model load below fails, so the
+            // next voice session can retry via maybeRetryLocalLlmLoad().
+            llmServiceAny = svc
+            Thread { attemptLocalLlmLoad(svc) }.start()
         }
         override fun onServiceDisconnected(name: android.content.ComponentName?) {
             Log.w(TAG, "LlmService disconnected")
             llmService = null
+            llmServiceAny = null
             llmBound = false
+            voiceRefineUiState = VoiceRefineUiState.LOADING
             zenzService = null
             synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_IDLE }
             zenzUiState = ZenzUiState.LOADING
@@ -267,37 +308,194 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         return false
     }
 
+    /**
+     * Local LLM load sequence, extracted from the connection callback so a
+     * failed attempt can be retried on the next voice session (previously a
+     * single failure disabled refinement for the IME's whole lifetime, with
+     * only a line in the diagnostic file saying so). Every outcome updates
+     * [voiceRefineUiState] and the [space.manus.nacre.ai.VoiceStatus] record.
+     * Runs on a background thread; single-flight via [llmLoadInFlight].
+     */
+    private fun attemptLocalLlmLoad(svc: ILlmService) {
+        if (!llmLoadInFlight.compareAndSet(false, true)) return
+        try {
+            // Cloud-first: when a cloud refiner key is configured, do NOT load
+            // the ~1GB local LLM. Kept resident it pressures memory enough that
+            // the OS kills other apps (and the IME itself — observed as a
+            // "vis BFGS" process death). The cloud handles refinement; the local
+            // model is only an offline fallback used when no cloud key is set.
+            if (space.manus.nacre.ai.cloud.CloudLlmConfig.anyConfigured(service)) {
+                voiceRefineUiState = VoiceRefineUiState.READY_CLOUD
+                space.manus.nacre.ai.VoiceStatus.recordRefine(
+                    service, space.manus.nacre.ai.VoiceStatus.RefineState.READY_CLOUD,
+                    "cloud refiner configured — local LLM not loaded",
+                )
+                writeDiagnostic("llmConnection: cloud refiner configured — skipping local LLM load (frees ~1GB RAM)")
+                return
+            }
+            if (svc.isModelLoaded) {
+                llmService = svc
+                voiceRefineUiState = VoiceRefineUiState.READY_LOCAL
+                space.manus.nacre.ai.VoiceStatus.recordRefine(
+                    service, space.manus.nacre.ai.VoiceStatus.RefineState.READY_LOCAL,
+                    "model already loaded",
+                )
+                writeDiagnostic("llmConnection: model already loaded")
+                return
+            }
+            val downloader = space.manus.nacre.ai.ModelDownloader(service)
+            // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
+            // Qwen 2.5 1.5B is the default (Gemma 4 E2B was retired: it never
+            // loads on the pinned llama.cpp b3500 — see ModelDownloader).
+            val modelPaths = downloader.getPreferredLlmModelPaths()
+            if (modelPaths.isEmpty()) {
+                downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
+                voiceRefineUiState = VoiceRefineUiState.UNAVAILABLE
+                space.manus.nacre.ai.VoiceStatus.recordRefine(
+                    service, space.manus.nacre.ai.VoiceStatus.RefineState.UNAVAILABLE,
+                    "LLMモデル未ダウンロード（ダウンロードを要求済み）。次回音声セッションで再試行します",
+                )
+                writeDiagnostic("llmConnection: LLM model not found — Qwen 2.5 1.5B download requested, refinement unavailable (retry next session)")
+                return
+            }
+            var loadedPath: String? = null
+            for (modelPath in modelPaths) {
+                if (tryLoadLlmModel(svc, modelPath)) {
+                    loadedPath = modelPath
+                    break
+                }
+                try {
+                    svc.unloadModel()
+                } catch (_: Exception) {
+                }
+            }
+            if (loadedPath == null) {
+                voiceRefineUiState = VoiceRefineUiState.UNAVAILABLE
+                space.manus.nacre.ai.VoiceStatus.recordRefine(
+                    service, space.manus.nacre.ai.VoiceStatus.RefineState.UNAVAILABLE,
+                    "LLMモデルを読み込めませんでした。次回音声セッションで再試行します",
+                )
+                writeDiagnostic("llmConnection: no local LLM could be loaded — refinement unavailable (retry next session)")
+                return
+            }
+            llmService = svc
+            voiceRefineUiState = VoiceRefineUiState.READY_LOCAL
+            val modelFile = java.io.File(loadedPath)
+            space.manus.nacre.ai.VoiceStatus.recordRefine(
+                service, space.manus.nacre.ai.VoiceStatus.RefineState.READY_LOCAL,
+                modelFile.name,
+            )
+            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
+        } catch (e: Exception) {
+            voiceRefineUiState = VoiceRefineUiState.UNAVAILABLE
+            space.manus.nacre.ai.VoiceStatus.recordRefine(
+                service, space.manus.nacre.ai.VoiceStatus.RefineState.UNAVAILABLE,
+                "LLM読み込み例外: ${e.message}",
+            )
+            writeDiagnostic("llmConnection EXCEPTION: ${e.message}")
+        } finally {
+            llmLoadInFlight.set(false)
+        }
+    }
+
+    /** Retry a failed local LLM load at the start of a voice session. */
+    private fun maybeRetryLocalLlmLoad() {
+        if (voiceRefineUiState != VoiceRefineUiState.UNAVAILABLE) return
+        val svc = llmServiceAny ?: return
+        Thread { attemptLocalLlmLoad(svc) }.start()
+    }
+
     private val whisperCallback = object : IWhisperCallback.Stub() {
         override fun onResult(text: String) {
             writeDiagnostic("whisperCallback.onResult: text='${text.take(80)}' (${text.length} chars)")
             android.os.Handler(android.os.Looper.getMainLooper()).post {
+                val wasSession = whisperSessionActive
+                whisperSessionActive = false
                 isWhisperContinuousMode = false
                 isListening = false
                 partialText = ""
                 rmsLevel = 0f
                 releaseAudioFocus()
 
+                if (wasSession && !whisperCloudSession) {
+                    // On-device session: segments were committed incrementally
+                    // during recording; only the finalizer's pending tail is
+                    // left. A blank/hallucinated-looking final transcript must
+                    // not erase it, so the tail flushes regardless — the
+                    // service already filtered hallucinations per segment.
+                    val rest = whisperFinalizer.onFinal(text)
+                    if (rest.isNotBlank()) {
+                        finalizeWhisperSegment(rest)
+                    } else {
+                        discardWhisperPreview()
+                    }
+                    whisperCloudSession = false
+                    return@post
+                }
+
+                // Cloud-ASR sessions (opt-in) and any non-session result: the
+                // final text replaces the never-committed preview wholesale,
+                // as before — provisional preview text is not user content,
+                // so this is not a rewrite of committed text.
+                whisperFinalizer.reset()
+                whisperCloudSession = false
                 if (text.isBlank()) {
+                    discardWhisperPreview()
                     writeDiagnostic("whisperCallback.onResult: text is BLANK, skipping")
                 } else if (postProcessor.isHallucination(text)) {
                     // SenseVoice/whisper-style ASR can hallucinate a whole utterance
                     // during silence (e.g. "ご視聴ありがとうございました") — never commit it.
+                    discardWhisperPreview()
                     writeDiagnostic("whisperCallback.onResult: HALLUCINATION filtered, discarding: '${text.take(80)}'")
                 } else {
                     // Deterministic self-correction resolution before quickClean/LLM —
                     // instant, and doesn't depend on the LLM refiner being available.
                     val corrected = postProcessor.resolveCorrections(text)
-                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(corrected)
+                    val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(
+                        applyVoiceNumberNormalization(corrected)
+                    )
                     writeDiagnostic("whisperCallback.onResult: quickClean='${cleaned.take(80)}'")
-                    service.currentInputConnection?.commitText(cleaned, 1)
-                    // Stage 2: LLM refinement in background, replace quickClean result if better
-                    tryLlmRefinement(cleaned)
+                    if (cleaned.isBlank()) {
+                        discardWhisperPreview()
+                    } else {
+                        // commitText replaces the composing preview if one is
+                        // showing; otherwise it simply inserts.
+                        service.currentInputConnection?.commitText(cleaned, 1)
+                        whisperPreviewInEditor = false
+                        whisperPreviewDisplay = ""
+                        committedInSession.append(cleaned)
+                        voiceSessionChunks.add(cleaned)
+                        // Stage 2: LLM refinement in background, replace
+                        // quickClean result if better (guarded: never touch
+                        // text the user has since edited).
+                        tryLlmRefinement(cleaned, guarded = true)
+                    }
                 }
             }
         }
 
         override fun onPartialResult(text: String) {
-            // Typeless-style: no preview during recording.
+            // Live preview: WhisperService invokes this with the accumulated
+            // transcript every time a VAD segment completes during recording.
+            // (It used to be a deliberate no-op — "no preview during
+            // recording" — which is why dictation felt dead until stop.)
+            if (!whisperSessionActive || text.isBlank()) return
+            mainHandler.post {
+                if (!whisperSessionActive) return@post
+                if (whisperCloudSession) {
+                    // Cloud ASR will replace the whole transcript at stop, so
+                    // the on-device segments are preview-only here.
+                    showWhisperPreview(
+                        space.manus.nacre.ai.LlmPostProcessor.quickClean(
+                            postProcessor.resolveCorrections(text)
+                        )
+                    )
+                    return@post
+                }
+                val step = whisperFinalizer.onBuffer(text)
+                step.finalizeText?.let { finalizeWhisperSegment(it) }
+                showWhisperPreview(space.manus.nacre.ai.LlmPostProcessor.quickClean(step.previewText))
+            }
         }
 
         override fun onError(message: String) {
@@ -305,14 +503,123 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             android.os.Handler(android.os.Looper.getMainLooper()).post {
                 Log.w(TAG, "Whisper error: $message")
                 isWhisperContinuousMode = false
+                whisperSessionActive = false
+                whisperFinalizer.reset()
+                // Keep whatever was already spoken: finish the composing
+                // preview as-is rather than dropping it with the error.
+                if (whisperPreviewInEditor) {
+                    service.currentInputConnection?.finishComposingText()
+                    whisperPreviewInEditor = false
+                    whisperPreviewDisplay = ""
+                }
                 isListening = false
                 partialText = ""
                 rmsLevel = 0f
                 lastError = "Whisper: $message"
+                voiceAsrUiState = VoiceAsrUiState.ERROR
+                space.manus.nacre.ai.VoiceStatus.recordAsr(
+                    service, space.manus.nacre.ai.VoiceStatus.AsrState.ERROR,
+                    "認識エラー: $message",
+                )
                 releaseAudioFocus()
                 // Don't auto-fallback to SpeechRecognizer — let user see the error and retry
             }
         }
+    }
+
+    // ── Whisper live preview / incremental commit helpers (main thread) ──
+
+    private fun markAsrOnDevice() {
+        voiceAsrUiState = VoiceAsrUiState.ON_DEVICE
+        space.manus.nacre.ai.VoiceStatus.recordAsr(
+            service, space.manus.nacre.ai.VoiceStatus.AsrState.READY,
+            "sherpa-onnx on-device model loaded",
+        )
+    }
+
+    /**
+     * The deterministic, LLM-free part of PostProcessor that is safe to run
+     * on raw ASR output: kanji-numeral normalization (dates, counters,
+     * standalone numbers). PostProcessor.process() as a whole is deliberately
+     * NOT wired in: it extracts voice commands (an utterance that is exactly
+     * 「消して」 or ends with 「送信」 would be swallowed/stripped unless the
+     * caller executes the command), and its clause-comma/punctuation stages
+     * duplicate this manager's existing smartPunctuation pipeline.
+     */
+    private fun applyVoiceNumberNormalization(text: String): String {
+        var result = postProcessor.normalizeDates(text)
+        result = postProcessor.normalizeCounters(result)
+        result = postProcessor.normalizeStandaloneNumbers(result)
+        return result
+    }
+
+    /** Show [display] as the live preview: composing text in the editor
+     *  (unless disabled for this session) and always as [partialText]. */
+    private fun showWhisperPreview(display: String) {
+        partialText = display
+        if (!whisperEditorPreviewEnabled) return
+        val ic = service.currentInputConnection ?: return
+        if (display.isEmpty()) {
+            discardWhisperPreview()
+            return
+        }
+        ic.setComposingText(display, 1)
+        whisperPreviewInEditor = true
+        whisperPreviewDisplay = display
+    }
+
+    /** Drop the editor preview without committing it (cancel / resolved away). */
+    private fun discardWhisperPreview() {
+        if (!whisperPreviewInEditor) return
+        val ic = service.currentInputConnection
+        ic?.setComposingText("", 1)
+        ic?.finishComposingText()
+        whisperPreviewInEditor = false
+        whisperPreviewDisplay = ""
+    }
+
+    /**
+     * Finalize one segment: deterministic cleanup (self-correction already
+     * resolved by the finalizer, then kanji-numeral normalization, then
+     * quickClean) and commit. If the segment's raw form is currently the
+     * editor's composing preview, commitText replaces exactly that region —
+     * the user never sees a delete+retype of text that was already final.
+     * Then stage-2 LLM refinement runs guarded (see [isSessionTailIntact]).
+     */
+    private fun finalizeWhisperSegment(correctedText: String) {
+        val cleaned = space.manus.nacre.ai.LlmPostProcessor.quickClean(
+            applyVoiceNumberNormalization(correctedText)
+        )
+        if (cleaned.isBlank()) {
+            discardWhisperPreview()
+            return
+        }
+        service.currentInputConnection?.commitText(cleaned, 1)
+        whisperPreviewInEditor = false
+        whisperPreviewDisplay = ""
+        committedInSession.append(cleaned)
+        voiceSessionChunks.add(cleaned)
+        tryLlmRefinement(cleaned, guarded = true)
+    }
+
+    /**
+     * Guard for refinement replacement in the incremental-commit world: the
+     * chunk must still be the session's latest committed chunk AND the text
+     * immediately before the cursor must be exactly that chunk plus the
+     * current preview (if any). If the user typed, deleted, or moved the
+     * cursor since, the refined text is dropped instead of fighting them.
+     */
+    private fun isSessionTailIntact(committed: String): Boolean {
+        if (voiceSessionChunks.lastOrNull() != committed) return false
+        val ic = service.currentInputConnection ?: return false
+        val preview = if (whisperPreviewInEditor) whisperPreviewDisplay else ""
+        val expected = committed + preview
+        val before = try {
+            ic.getTextBeforeCursor(expected.length, 0)?.toString()
+        } catch (_: Exception) {
+            null
+        }
+        return before == expected
     }
 
     // Deferred commit: hold results during pauses instead of committing immediately.
@@ -392,6 +699,31 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         deferredText.clear()
         cancelDeferredCommit()
 
+        // Voice session state for live preview + degradation visibility.
+        whisperFinalizer.reset()
+        voiceSessionChunks.clear()
+        whisperSessionActive = false
+        whisperPreviewInEditor = false
+        whisperPreviewDisplay = ""
+        // Cloud ASR (opt-in, key configured) replaces the transcript at
+        // stop; those sessions preview only, never commit incrementally.
+        whisperCloudSession =
+            space.manus.nacre.ai.cloud.CloudAsrConfig.isEnabled(service)
+        // Don't hijack an in-progress kana conversion with the preview.
+        whisperEditorPreviewEnabled =
+            service.inputEngine.composingKana.isEmpty() && !service.inputEngine.isConverting
+        asrFallbackDetail = ""
+        // A refinement load failure must not persist silently: retry the
+        // load now (no-op unless the state is UNAVAILABLE).
+        maybeRetryLocalLlmLoad()
+        // Refresh the ASR state for this session.
+        val whisperReady = try { whisperService?.isModelLoaded == true } catch (_: Exception) { false }
+        if (whisperReady) {
+            markAsrOnDevice()
+        } else if (voiceAsrUiState != VoiceAsrUiState.MODEL_MISSING) {
+            voiceAsrUiState = VoiceAsrUiState.LOADING
+        }
+
         // Whisper priority — use continuous mode if model loaded
         Log.i(TAG, "startListening: whisperService=${whisperService != null}, whisperBound=$whisperBound, isWhisperContinuousMode=$isWhisperContinuousMode")
         writeDiagnostic("startListening: whisperService=${whisperService != null}, whisperBound=$whisperBound")
@@ -409,6 +741,8 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     // pass the session locale rather than a misleading "auto".
                     whisperService!!.startContinuousRecognition(currentLanguage, whisperCallback)
                     isWhisperContinuousMode = true  // Set AFTER successful IPC
+                    whisperSessionActive = true
+                    markAsrOnDevice()
                     Log.i(TAG, "startListening: Whisper continuous mode STARTED")
                     writeDiagnostic("WHISPER STARTED: continuous mode active")
                     return
@@ -420,6 +754,17 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             }
         }
 
+        // Falling back to Android SpeechRecognizer. This may be NETWORK
+        // recognition depending on the device — the substitution is always
+        // labeled in the voice panel and recorded, never silent.
+        asrFallbackDetail = when (voiceAsrUiState) {
+            VoiceAsrUiState.MODEL_MISSING ->
+                "ASRモデル未ダウンロードのため、端末標準の音声認識（外部認識の場合あり）で代用"
+            VoiceAsrUiState.ERROR ->
+                "オンデバイス認識でエラーのため、端末標準の音声認識（外部認識の場合あり）で代用"
+            else ->
+                "オンデバイスモデル読込中のため、端末標準の音声認識（外部認識の場合あり）で代用"
+        }
         startRecognizer()
     }
 
@@ -475,6 +820,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 recognizer.setRecognitionListener(listener)
                 speechRecognizer = recognizer
                 recognizer.startListening(createRecognizerIntent())
+                if (isListening) {
+                    // The external recognizer is now the active engine for
+                    // this session — surface it (see startListening).
+                    voiceAsrUiState = VoiceAsrUiState.EXTERNAL
+                    space.manus.nacre.ai.VoiceStatus.recordAsr(
+                        service, space.manus.nacre.ai.VoiceStatus.AsrState.EXTERNAL_FALLBACK,
+                        asrFallbackDetail.ifBlank { "端末標準の音声認識（外部認識の場合あり）で代用" },
+                    )
+                }
                 Log.i(TAG, "SpeechRecognizer started (lang=$currentLanguage, utterance=$utteranceCount)")
                 writeDiagnostic("FALLBACK: SpeechRecognizer started (NOT Whisper)")
             } catch (e: Exception) {
@@ -544,11 +898,19 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 Log.w(TAG, "Whisper cancelContinuousRecognition IPC failed", e)
             }
             isWhisperContinuousMode = false
+            whisperSessionActive = false
+            whisperFinalizer.reset()
             isListening = false
             partialText = ""
             rmsLevel = 0f
             releaseAudioFocus()
-            service.currentInputConnection?.finishComposingText()
+            // Cancel discards the unfinalized preview (already-committed
+            // segments stay — they were final when committed).
+            if (whisperPreviewInEditor) {
+                discardWhisperPreview()
+            } else {
+                service.currentInputConnection?.finishComposingText()
+            }
             return
         }
         continuousMode = false
@@ -1348,6 +1710,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             service.unbindService(llmConnection)
             llmBound = false
             llmService = null
+            llmServiceAny = null
             zenzService = null
             synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_IDLE }
         }
@@ -1365,7 +1728,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
      *   2. Local in-process LlmService (Qwen 1.5B) as offline fallback
      * First success wins; otherwise the quickClean output stays committed.
      */
-    private fun tryLlmRefinement(quickCleanText: String) {
+    private fun tryLlmRefinement(quickCleanText: String, guarded: Boolean = false) {
         Thread {
             try {
                 // Refinement is an LLM use — make sure the :llm process is on
@@ -1385,7 +1748,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     if (result.isSuccess) {
                         val refined = result.getOrNull()?.trim().orEmpty()
                         writeDiagnostic("tryLlmRefinement[cloud:${refiner.name}]: ${elapsed}ms, refined='${refined.take(80)}'")
-                        applyRefinedIfDifferent(quickCleanText, refined, refiner.name)
+                        applyRefinedIfDifferent(quickCleanText, refined, refiner.name, guarded)
                         return@Thread
                     } else {
                         writeDiagnostic("tryLlmRefinement[cloud:${refiner.name}]: FAIL (${elapsed}ms) ${result.exceptionOrNull()?.message}")
@@ -1406,21 +1769,55 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 val refined = refineViaAidl(svc, quickCleanText, LLM_REFINE_TIMEOUT_MS, instruction)
                 val elapsed = System.currentTimeMillis() - start
                 writeDiagnostic("tryLlmRefinement[local]: ${elapsed}ms, refined='${refined?.take(80)}'")
-                applyRefinedIfDifferent(quickCleanText, refined.orEmpty(), "local-qwen")
+                applyRefinedIfDifferent(quickCleanText, refined.orEmpty(), "local-qwen", guarded)
             } catch (e: Exception) {
                 writeDiagnostic("tryLlmRefinement: error ${e.javaClass.simpleName}: ${e.message}")
             }
         }.start()
     }
 
-    /** If [refined] differs from the committed quickClean result, delete-and-replace on the UI thread. */
-    private fun applyRefinedIfDifferent(committed: String, refined: String, source: String) {
+    /**
+     * If [refined] differs from the committed quickClean result, delete-and-replace
+     * on the UI thread.
+     *
+     * With [guarded] (incremental voice commits), the replacement happens only
+     * when [isSessionTailIntact] proves the chunk is still the untouched tail
+     * of the session text; otherwise the quickClean text stays. This is what
+     * keeps refinement from visibly rewriting text the user already saw as
+     * final — or worse, text they have since edited — while dictating.
+     */
+    private fun applyRefinedIfDifferent(
+        committed: String,
+        refined: String,
+        source: String,
+        guarded: Boolean = false,
+    ) {
         if (refined.isBlank() || refined == committed) {
             writeDiagnostic("tryLlmRefinement[$source]: no improvement, keeping quickClean")
             return
         }
         Handler(Looper.getMainLooper()).post {
             val ic = service.currentInputConnection ?: return@post
+            if (guarded) {
+                if (!isSessionTailIntact(committed)) {
+                    writeDiagnostic("tryLlmRefinement[$source]: replace SKIPPED (session tail edited or superseded)")
+                    return@post
+                }
+                val preview = if (whisperPreviewInEditor) whisperPreviewDisplay else ""
+                ic.deleteSurroundingText(committed.length + preview.length, 0)
+                ic.commitText(refined, 1)
+                if (preview.isNotEmpty()) {
+                    ic.setComposingText(preview, 1)
+                }
+                val idx = voiceSessionChunks.lastIndexOf(committed)
+                if (idx >= 0) voiceSessionChunks[idx] = refined
+                if (committedInSession.toString().endsWith(committed)) {
+                    committedInSession.setLength(committedInSession.length - committed.length)
+                    committedInSession.append(refined)
+                }
+                writeDiagnostic("tryLlmRefinement[$source]: replaced quickClean with LLM result (guarded)")
+                return@post
+            }
             ic.deleteSurroundingText(committed.length, 0)
             ic.commitText(refined, 1)
             writeDiagnostic("tryLlmRefinement[$source]: replaced quickClean with LLM result")

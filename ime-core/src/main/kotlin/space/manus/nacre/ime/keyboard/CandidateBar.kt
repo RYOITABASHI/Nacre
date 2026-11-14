@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.sp
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.ConversionCandidate
 import space.manus.nacre.ime.input.SwipeDirection
+import space.manus.nacre.ime.input.VoiceAsrUiState
+import space.manus.nacre.ime.input.VoiceRefineUiState
 import space.manus.nacre.ime.input.ZenzUiState
 import kotlin.math.abs
 
@@ -48,6 +50,8 @@ fun CandidateBar(
     val voicePartial = service.voiceInputManager.partialText
     val voiceListening = service.voiceInputManager.isListening
     val voiceError = service.voiceInputManager.lastError
+    val voiceAsrState = service.voiceInputManager.voiceAsrUiState
+    val voiceRefineState = service.voiceInputManager.voiceRefineUiState
 
     // SPEC: hide candidate bar in password fields
     if (service.inputEngine.isPasswordField) {
@@ -142,15 +146,28 @@ fun CandidateBar(
             verticalAlignment = Alignment.CenterVertically,
         ) {
         if (voiceListening || voicePartial == "Thinking...") {
+            // While dictating, the bar names the ACTIVE recognition engine
+            // and flags a dead refiner — the SpeechRecognizer fallback and
+            // LLM failures used to be completely invisible here.
             Text(
                 text = when {
                     voicePartial == "Thinking..." -> "🤔 Thinking..."
                     voiceError.isNotEmpty() -> "⚠ $voiceError"
-                    else -> "🎤 音声入力中..."
+                    else -> buildString {
+                        append("🎤 音声入力中（")
+                        append(service.voiceInputManager.asrStateLabel())
+                        append("）")
+                        if (voiceRefineState == VoiceRefineUiState.UNAVAILABLE) {
+                            append(" 整文不可")
+                        }
+                    }
                 },
                 color = when {
                     voicePartial == "Thinking..." -> Color(0xFFAADDFF)
                     voiceError.isNotEmpty() -> Color(0xFFFF6666)
+                    voiceAsrState == VoiceAsrUiState.EXTERNAL ||
+                        voiceAsrState == VoiceAsrUiState.MODEL_MISSING ->
+                        Color(0xFFFFAA33)
                     else -> Color(0xFFFF8888)
                 },
                 fontSize = 12.sp,

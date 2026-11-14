@@ -149,7 +149,12 @@ class WhisperService : Service() {
                         if (rec != null) {
                             val flushed = rec.flush()
                             if (flushed.isNotEmpty()) {
-                                buf.append(flushed.joinToString(""))
+                                // Same hallucination filter as the recording
+                                // loop — the flushed tail used to skip it.
+                                buf.append(
+                                    flushed.filterNot { postProcessor.isHallucination(it) }
+                                        .joinToString("")
+                                )
                             }
                             rec.reset()
                         }
