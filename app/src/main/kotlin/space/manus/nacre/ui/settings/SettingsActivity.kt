@@ -611,7 +611,7 @@ private fun LayoutSection(config: ConfigRepository) {
     val layoutPrefs = context.getSharedPreferences("nacre_layout", Context.MODE_PRIVATE)
     var coverFlick12 by remember {
         mutableStateOf(
-            layoutPrefs.getString(LayoutSelector.KEY_SUB_DISPLAY_MODE, null) ==
+            layoutPrefs.getString(LayoutSelector.KEY_SUB_DISPLAY_MODE, LayoutMode.FlickInput12Key.name) ==
                 LayoutMode.FlickInput12Key.name,
         )
     }

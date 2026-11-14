@@ -41,7 +41,7 @@ class LayoutSelector(private val detector: FoldableDetector) {
      *
      * Decision tree:
      *  - widthDp >= 500  -> FullVSplit (tablet / unfolded main display)
-     *  - foldable sub    -> user preference (default CompactQwerty)
+     *  - foldable sub    -> user preference (default FlickInput12Key)
      *  - widthDp >= 380  -> StandardQwerty (normal phone)
      *  - widthDp >= 200  -> QuickInputPad (very small sub-display)
      *  - else            -> QuickInputPad (fallback)
@@ -62,11 +62,14 @@ class LayoutSelector(private val detector: FoldableDetector) {
     }
 
     private fun loadSubDisplayMode(): LayoutMode {
-        val name = prefs.getString(KEY_SUB_DISPLAY_MODE, LayoutMode.CompactQwerty.name)
+        // Default is the 12-key pad: the cover display is where quick Japanese
+        // replies happen, and the 12-key (flick / tap-cycle) pad is the layout
+        // users expect there. CompactQwerty stays one toggle away in Settings.
+        val name = prefs.getString(KEY_SUB_DISPLAY_MODE, LayoutMode.FlickInput12Key.name)
         return try {
-            LayoutMode.valueOf(name ?: LayoutMode.CompactQwerty.name)
+            LayoutMode.valueOf(name ?: LayoutMode.FlickInput12Key.name)
         } catch (_: IllegalArgumentException) {
-            LayoutMode.CompactQwerty
+            LayoutMode.FlickInput12Key
         }
     }
 }
