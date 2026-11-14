@@ -63,15 +63,21 @@ object FlickEngine {
         FlickKey("な", "な", "な", "に", "ぬ", "ね", "の"),
         FlickKey("は", "は", "は", "ひ", "ふ", "へ", "ほ"),
         FlickKey("ま", "ま", "ま", "み", "む", "め", "も"),
-        // iOS: up=ゆ, down=よ (や row has no i/e forms); left/right are repurposed
-        // for the corner-bracket shortcut iOS added in iOS 8 (flick left = 「, right = 」).
+        // iOS flick map: up=ゆ, down=よ (や row has no i/e forms); left/right are
+        // repurposed for the corner-bracket shortcut (flick left = 「, right = 」).
         // Previously left=ゆ/up=よ, which put both vowels on the wrong direction
         // and dropped the bracket shortcut entirely.
-        // The tap cycle follows the same cross order (tap→left→up→right→down),
-        // so the brackets sit at their flick positions — a tap-only user can
-        // still reach 「/」 by tapping through (や→「→ゆ→」→よ), then the smalls.
+        // The TAP cycle is a different list from the flick cross: like every
+        // other row it follows the row's KANA order (や→ゆ→よ, then the smalls),
+        // because iOS multi-tap steps through the kana, not the flick positions —
+        // tapping や twice yields ゆ on iOS, never 「. An earlier version of this
+        // key interleaved the brackets at their flick positions, which made や
+        // the only row where a double-tap produced punctuation, ゆ cost 3 taps
+        // and よ cost 5. The brackets stay at the cycle tail so a tap-only user
+        // can still reach them (7/8 taps) — the same tail-appendix precedent as
+        // the 、。？！ key's ・.
         FlickKey("や", "や", "や", "「", "ゆ", "」", "よ",
-            tapCycle = listOf("や", "「", "ゆ", "」", "よ", "ゃ", "ゅ", "ょ")),
+            tapCycle = listOf("や", "ゆ", "よ", "ゃ", "ゅ", "ょ", "「", "」")),
         FlickKey("ら", "ら", "ら", "り", "る", "れ", "ろ"),
         FlickKey("わ", "わ", "わ", "を", "ん", "ー", "〜",
             // iOS / feature-phone multi-tap order: after the 5 cross slots the

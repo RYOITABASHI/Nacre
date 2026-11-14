@@ -6,6 +6,7 @@ import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import androidx.core.content.getSystemService
 
 class HapticManager(private val context: Context) {
@@ -21,13 +22,18 @@ class HapticManager(private val context: Context) {
         private const val PREFS_NAME = "nacre_haptic"
         private const val KEY_STRENGTH = "strength"
 
-        private const val BASE_AMPLITUDE_TAP = 60
+        // Key tap: a full-amplitude one-shot tick (scaled by Strength below).
+        // The tap used to be amplitude 60/255 for 20ms, and on API 29+ it was
+        // routed to EFFECT_CLICK / PRIMITIVE_CLICK, which ignore the amplitude
+        // entirely — and the composition path clamps Strength.STRONG to the
+        // same 1.0 scale as MEDIUM, so no setting could make taps stronger.
+        private const val BASE_AMPLITUDE_TAP = 255
         private const val BASE_AMPLITUDE_LONG_PRESS = 100
         private const val BASE_AMPLITUDE_LAYER = 80
         private const val BASE_AMPLITUDE_ERROR = 180
         private const val BASE_AMPLITUDE_TRACKBALL = 30
 
-        private const val DURATION_TAP_MS = 20L
+        private const val DURATION_TAP_MS = 25L
         private const val DURATION_LONG_PRESS_MS = 50L
         private const val DURATION_LAYER_MS = 30L
         private const val DURATION_ERROR_MS = 100L
@@ -73,14 +79,52 @@ class HapticManager(private val context: Context) {
     private val isAvailable: Boolean
         get() = strength != Strength.OFF &&
                 vibrator?.hasVibrator() == true &&
-                !isBatterySaverActive()
+                !isBatterySaverActive() &&
+                isSystemHapticEnabled()
 
     private fun isBatterySaverActive(): Boolean {
         return powerManager?.isPowerSaveMode == true
     }
 
+    /** Respect the system-wide touch-feedback switch (default: on). */
+    @Suppress("DEPRECATION") // HAPTIC_FEEDBACK_ENABLED is the documented switch
+    private fun isSystemHapticEnabled(): Boolean = try {
+        Settings.System.getInt(
+            context.contentResolver,
+            Settings.System.HAPTIC_FEEDBACK_ENABLED,
+            1,
+        ) == 1
+    } catch (_: Exception) {
+        true
+    }
+
     fun onKeyTap() {
-        vibrate(BASE_AMPLITUDE_TAP, DURATION_TAP_MS)
+        vibrateTap()
+    }
+
+    /**
+     * The key-press tick: one short one-shot at (strength-scaled) full
+     * amplitude, on every API level — deliberately NOT the predefined
+     * EFFECT_CLICK / PRIMITIVE_CLICK path used elsewhere, because those
+     * ignore amplitude and cap out at a mild, vendor-defined click.
+     * Strength ladder: WEAK ≈ 127 amplitude / ~12ms, MEDIUM = 255 / 25ms,
+     * STRONG = 255 / ~37ms (amplitude saturates, duration still grows).
+     */
+    private fun vibrateTap() {
+        if (!isAvailable) return
+        val vib = vibrator ?: return
+        val scaledAmplitude = if (vib.hasAmplitudeControl()) {
+            (BASE_AMPLITUDE_TAP * strength.multiplier).toInt().coerceIn(1, 255)
+        } else {
+            VibrationEffect.DEFAULT_AMPLITUDE
+        }
+        val durationMs = (DURATION_TAP_MS * strength.multiplier).toLong().coerceIn(10L, 40L)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vib.vibrate(VibrationEffect.createOneShot(durationMs, scaledAmplitude))
+        } else {
+            @Suppress("DEPRECATION")
+            vib.vibrate(durationMs)
+        }
     }
 
     fun onLongPress() {
