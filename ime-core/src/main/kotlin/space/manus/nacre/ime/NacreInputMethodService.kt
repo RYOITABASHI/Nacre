@@ -333,6 +333,15 @@ class NacreInputMethodService :
             inputEngine.reloadUserDictionary()
             udPrefs.edit().putBoolean("dirty", false).apply()
         }
+        // zenz warm-up: the :llm binding is lazy (first voice/LLM use), which
+        // left the neural converter unloaded until well into a typing session
+        // — the first conversions were always engine-only and the load only
+        // started when something else happened to bind the service. Bind at
+        // keyboard show instead (idempotent; stays bound for the IME's
+        // lifetime, and rebinds after the :llm process dies). The connection
+        // callback checks the zenz toggle + model presence before loading;
+        // the :whisper/ASR binding stays lazy as before.
+        voiceInputManager.ensureLlmBound()
         inputEngine.onStartInput(info)
     }
 

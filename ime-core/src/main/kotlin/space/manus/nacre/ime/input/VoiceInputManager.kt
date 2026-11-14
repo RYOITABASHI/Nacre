@@ -28,7 +28,11 @@ import space.manus.nacre.ai.ZenzStatus
 import space.manus.nacre.ime.NacreInputMethodService
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+
+/** zenz readiness as shown by the keyboard's candidate bar indicator. */
+enum class ZenzUiState { OFF, NOT_DOWNLOADED, LOADING, READY, ERROR }
 
 /**
  * Typeless-level voice input manager.
@@ -88,6 +92,19 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     private val zenzLoadLock = Any()
     @Volatile private var zenzLoadState = ZENZ_LOAD_IDLE
     @Volatile private var zenzLoadFailedAt = 0L
+    /** Single-flight guard: the :llm service serializes zenz generation and
+     * errors any concurrent request; skipping early keeps the ZenzStatus log
+     * (and the IPC) free of "already generating" noise. */
+    private val zenzBusy = AtomicBoolean(false)
+
+    /**
+     * Compose-observable zenz readiness for the candidate-bar indicator, so a
+     * dead/loading converter is diagnosable from the keyboard itself instead
+     * of only in Settings. Load-level states only — a single generation
+     * timeout does not flap this to ERROR (it is still recorded in ZenzStatus).
+     */
+    var zenzUiState by mutableStateOf(ZenzUiState.LOADING)
+        private set
 
     // Deterministic, instant (no LLM round-trip) post-processing: hallucination
     // filtering and self-correction ("じゃなくて" / "no wait") resolution. Runs
@@ -226,6 +243,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             llmBound = false
             zenzService = null
             synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_IDLE }
+            zenzUiState = ZenzUiState.LOADING
         }
     }
 
@@ -1485,7 +1503,21 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         val svc = zenzService ?: return
         if (!ZenzStatus.isEnabled(service)) {
             ZenzStatus.record(service, ZenzStatus.State.DISABLED)
+            zenzUiState = ZenzUiState.OFF
             return
+        }
+        // Desync guard: LlmService unloads the zenz model under memory
+        // pressure (onTrimMemory >= RUNNING_LOW) without notifying us, so a
+        // cached READY can be a lie — and previously every later conversion
+        // then returned null (engine-only) for the rest of the session,
+        // silently. Verify READY against the service; if the model is gone,
+        // fall through and reload.
+        if (zenzLoadState == ZENZ_LOAD_READY) {
+            val loaded = try { svc.isZenzModelLoaded } catch (_: Exception) { false }
+            if (loaded) return
+            synchronized(zenzLoadLock) {
+                if (zenzLoadState == ZENZ_LOAD_READY) zenzLoadState = ZENZ_LOAD_IDLE
+            }
         }
         synchronized(zenzLoadLock) {
             if (zenzLoadState == ZENZ_LOAD_LOADING || zenzLoadState == ZENZ_LOAD_READY) return
@@ -1494,11 +1526,13 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             ) return
             zenzLoadState = ZENZ_LOAD_LOADING
         }
+        zenzUiState = ZenzUiState.LOADING
         Thread {
             try {
                 if (svc.isZenzModelLoaded) {
                     synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_READY }
                     ZenzStatus.record(service, ZenzStatus.State.READY)
+                    zenzUiState = ZenzUiState.READY
                     return@Thread
                 }
                 val downloader = space.manus.nacre.ai.ModelDownloader(service)
@@ -1512,6 +1546,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                         service, ZenzStatus.State.NOT_DOWNLOADED,
                         "zenz-v3.2-small is not downloaded yet",
                     )
+                    zenzUiState = ZenzUiState.NOT_DOWNLOADED
                     writeDiagnostic("zenz: model file not found — conversion stays engine-only")
                     return@Thread
                 }
@@ -1524,6 +1559,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 if (svc.isZenzModelLoaded) {
                     synchronized(zenzLoadLock) { zenzLoadState = ZENZ_LOAD_READY }
                     ZenzStatus.record(service, ZenzStatus.State.READY, java.io.File(path).name)
+                    zenzUiState = ZenzUiState.READY
                     writeDiagnostic("zenz: model ready")
                 } else {
                     val err = try { svc.zenzLoadError } catch (_: Exception) { "" }
@@ -1535,6 +1571,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                         service, ZenzStatus.State.LOAD_ERROR,
                         err.ifBlank { "model did not become ready after 30s" },
                     )
+                    zenzUiState = ZenzUiState.ERROR
                     writeDiagnostic("zenz: LOAD FAILED: $err")
                 }
             } catch (e: Exception) {
@@ -1543,6 +1580,7 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     zenzLoadFailedAt = System.currentTimeMillis()
                 }
                 ZenzStatus.record(service, ZenzStatus.State.LOAD_ERROR, e.message ?: "load exception")
+                zenzUiState = ZenzUiState.ERROR
                 writeDiagnostic("zenz: load exception ${e.message}")
             }
         }.start()
@@ -1571,40 +1609,50 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         val ready = try { svc.isZenzModelLoaded } catch (_: Exception) { false }
         if (!ready) return null
 
-        val katakana = KanaUtils.hiraganaToKatakana(hiragana)
-        val latch = CountDownLatch(1)
-        val result = AtomicReference<String?>(null)
-        val error = AtomicReference<String?>(null)
+        // Single-flight: typing-time and conversion-time requests can race;
+        // the service would error the second one ("zenz already generating").
+        // Skipping is free — the in-flight result serves the same composing.
+        if (!zenzBusy.compareAndSet(false, true)) return null
         try {
-            svc.zenzConvert(
-                katakana,
-                object : ILlmCallback.Stub() {
-                    override fun onResult(text: String) {
-                        result.set(text)
-                        latch.countDown()
-                    }
-                    override fun onPartialResult(text: String) { /* not used */ }
-                    override fun onError(message: String) {
-                        error.set(message)
-                        latch.countDown()
-                    }
-                },
-            )
-        } catch (e: Exception) {
-            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, e.message ?: "IPC failed")
-            return null
+            val katakana = KanaUtils.hiraganaToKatakana(hiragana)
+            val latch = CountDownLatch(1)
+            val result = AtomicReference<String?>(null)
+            val error = AtomicReference<String?>(null)
+            try {
+                svc.zenzConvert(
+                    katakana,
+                    object : ILlmCallback.Stub() {
+                        override fun onResult(text: String) {
+                            result.set(text)
+                            latch.countDown()
+                        }
+                        override fun onPartialResult(text: String) { /* not used */ }
+                        override fun onError(message: String) {
+                            error.set(message)
+                            latch.countDown()
+                        }
+                    },
+                )
+            } catch (e: Exception) {
+                ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, e.message ?: "IPC failed")
+                return null
+            }
+            val finished = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!finished) {
+                try { svc.cancelZenzGeneration() } catch (_: Exception) {}
+                ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, "timeout after ${timeoutMs}ms")
+                return null
+            }
+            error.get()?.let {
+                ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, it)
+                return null
+            }
+            val out = ZenzOutput.sanitize(result.get(), katakana, hiragana)
+            if (out != null) zenzUiState = ZenzUiState.READY
+            return out
+        } finally {
+            zenzBusy.set(false)
         }
-        val finished = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-        if (!finished) {
-            try { svc.cancelZenzGeneration() } catch (_: Exception) {}
-            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, "timeout after ${timeoutMs}ms")
-            return null
-        }
-        error.get()?.let {
-            ZenzStatus.record(service, ZenzStatus.State.GENERATION_ERROR, it)
-            return null
-        }
-        return ZenzOutput.sanitize(result.get(), katakana, hiragana)
     }
 
     /**
