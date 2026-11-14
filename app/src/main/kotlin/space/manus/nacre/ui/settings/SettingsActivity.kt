@@ -61,6 +61,7 @@ private data class ModelDiscovery(
     val kenLmPath: String? = null,
     val compactKenLmPath: String? = null,
     val llmPath: String? = null,
+    val zenzPath: String? = null,
     val senseVoiceDir: String? = null,
     val vadPath: String? = null,
 )
@@ -73,6 +74,7 @@ private fun rememberModelDiscovery(downloader: space.manus.nacre.ai.ModelDownloa
                 kenLmPath = downloader.getKenLmModelPath(),
                 compactKenLmPath = downloader.getCompactKenLmModelPath(),
                 llmPath = downloader.getLlmModelPath(),
+                zenzPath = downloader.getZenzModelPath(),
                 senseVoiceDir = downloader.getPreferredAsrModelDir(),
                 vadPath = downloader.getVadModelPath(),
             )
@@ -239,6 +241,8 @@ fun NacreSettingsScreen() {
         KenLmModelSection()
         Spacer(modifier = Modifier.height(8.dp))
         LlmModelSection()
+        Spacer(modifier = Modifier.height(8.dp))
+        ZenzModelSection()
         Spacer(modifier = Modifier.height(8.dp))
         WhisperModelSection()
 
@@ -1325,6 +1329,194 @@ private fun LlmModelSection() {
                     else "Download Qwen 2.5"
                 )
             }
+        }
+    }
+}
+
+/**
+ * zenz-v3.2-small — neural kana-kanji conversion (hybrid: zenz generates the
+ * first full-sentence candidate, the dictionary engine's candidates follow).
+ * Shows the enable toggle, download state, and the runtime status recorded
+ * by the IME/:llm processes (ZenzStatus) — load failures are visible here,
+ * never silent.
+ */
+@Composable
+private fun ZenzModelSection() {
+    val context = LocalContext.current
+    val downloader = remember { space.manus.nacre.ai.ModelDownloader(context) }
+    val discovery by rememberModelDiscovery(downloader)
+    var modelPath by remember { mutableStateOf<String?>(null) }
+    var modelSize by remember { mutableStateOf(0L) }
+    var downloading by remember { mutableStateOf(false) }
+    var progressPct by remember { mutableStateOf(0) }
+    var progressBytes by remember { mutableStateOf(0L to 0L) }
+    var enabled by remember { mutableStateOf(space.manus.nacre.ai.ZenzStatus.isEnabled(context)) }
+    var status by remember { mutableStateOf<space.manus.nacre.ai.ZenzStatus.Snapshot?>(null) }
+
+    fun refresh() {
+        status = space.manus.nacre.ai.ZenzStatus.read(context)
+        val found = downloader.getZenzModelPath()
+        if (found != null) {
+            modelPath = found
+            modelSize = java.io.File(found).length() / 1024 / 1024
+        }
+    }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refresh()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(discovery.zenzPath) {
+        if (modelPath == null && discovery.zenzPath != null) {
+            modelPath = discovery.zenzPath
+            modelSize = java.io.File(discovery.zenzPath!!).length() / 1024 / 1024
+        }
+        status = space.manus.nacre.ai.ZenzStatus.read(context)
+    }
+
+    val statusText: String
+    val statusColor: Color
+    when {
+        !enabled -> {
+            statusText = "Disabled"
+            statusColor = NacreTextDim
+        }
+        modelPath == null -> {
+            statusText = "Not found"
+            statusColor = Color(0xFFFF6666)
+        }
+        else -> when (status?.state) {
+            space.manus.nacre.ai.ZenzStatus.State.READY -> {
+                statusText = "Ready"
+                statusColor = Color(0xFF4CAF50)
+            }
+            space.manus.nacre.ai.ZenzStatus.State.LOADING -> {
+                statusText = "Loading..."
+                statusColor = NacreTextDim
+            }
+            space.manus.nacre.ai.ZenzStatus.State.LOAD_ERROR -> {
+                statusText = "Load error: ${status?.detail ?: ""}"
+                statusColor = Color(0xFFFF6666)
+            }
+            space.manus.nacre.ai.ZenzStatus.State.GENERATION_ERROR -> {
+                statusText = "Generation error: ${status?.detail ?: ""}"
+                statusColor = Color(0xFFFFAA00)
+            }
+            else -> {
+                statusText = "Downloaded"
+                statusColor = Color(0xFF4CAF50)
+            }
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("ニューラル変換 (Zenz)", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(statusText, color = statusColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "変換時に文全体をニューラル変換し第1候補に表示（従来エンジンの候補も続きます）。OFFで従来動作のみ。",
+                        color = NacreTextDim,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = {
+                        enabled = it
+                        space.manus.nacre.ai.ZenzStatus.setEnabled(context, it)
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = NacreAccent,
+                        checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                    ),
+                )
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            if (modelPath != null) {
+                Text("zenz-v3.2-small (${modelSize}MB)", color = NacreTextDim, fontSize = 12.sp)
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(modelPath!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
+            } else {
+                Text(
+                    "未ダウンロード。デフォルトで自動取得します（約74MB）。",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            if (downloading) {
+                Spacer(modifier = Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { progressPct / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                    trackColor = NacreTextDim.copy(alpha = 0.3f),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "${progressPct}% (${progressBytes.first / 1024 / 1024}/${progressBytes.second / 1024 / 1024}MB)",
+                    color = NacreTextDim, fontSize = 11.sp,
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    downloading = true
+                    progressPct = 0
+                    downloader.onProgress = { p ->
+                        progressPct = p.percent
+                        progressBytes = p.bytesDownloaded to p.totalBytes
+                    }
+                    downloader.downloadZenz { ok ->
+                        downloading = false
+                        downloader.onProgress = null
+                        if (ok) {
+                            refresh()
+                            Toast.makeText(context, "zenz model downloaded (${modelSize}MB). Restart keyboard.", Toast.LENGTH_LONG).show()
+                        } else {
+                            Toast.makeText(context, "Download failed.", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                },
+                enabled = !downloading,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = NacreAccent,
+                    contentColor = Color.Black,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (downloading) "Downloading..."
+                    else if (modelPath != null) "Re-download"
+                    else "Download zenz"
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Model: zenz-v3.2-small by Miwa-Keita (Zenzai), CC-BY-SA-4.0. " +
+                    "Base model: ku-nlp/gpt2-small-japanese-char (Kyoto University), CC-BY-SA-4.0. " +
+                    "モデルは端末へダウンロードされ、APKには含まれません。",
+                color = NacreTextDim.copy(alpha = 0.7f),
+                fontSize = 10.sp,
+            )
         }
     }
 }

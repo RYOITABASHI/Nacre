@@ -95,3 +95,25 @@ your option) any later version.
 Repository: https://github.com/kpu/kenlm
 
 Usage in Nacre: N-gram language model scoring for conversion candidate ranking.
+
+---
+
+## zenz - Neural Kana-Kanji Conversion Model (user-downloaded, not bundled)
+
+Model: zenz-v3.2-small (GGUF, Q5_K_M)
+Author: Miwa-Keita (Zenzai project)
+License: CC-BY-SA-4.0 (Creative Commons Attribution-ShareAlike 4.0 International)
+
+Base model: ku-nlp/gpt2-small-japanese-char — a character-level Japanese
+GPT-2 from Kyoto University (also CC-BY-SA-4.0), fine-tuned for kana-kanji
+conversion.
+
+Source: https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf
+Project: https://github.com/Miwa-Keita/zenz (Zenzai)
+
+Usage in Nacre: Neural full-sentence kana-kanji conversion. When the user
+invokes conversion, zenz generates a candidate that is shown first, ahead of
+the built-in dictionary engine's candidates (hybrid conversion). The model
+file is downloaded by the user at runtime (Settings → AI Models, or the
+first-run auto-provisioning); it is NOT distributed inside the APK. This
+attribution is also shown in the Settings AI Models section.
