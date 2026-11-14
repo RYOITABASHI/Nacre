@@ -98,19 +98,16 @@ fun KeyView(
         else -> KeyText
     }
 
-    // Mechanical glow effect — combines press glow + lighting engine
-    val lighting = service.keyLighting
-    val lightingColor = lighting.getKeyColor(keyDef.primary, row, column)
-
+    // Mechanical glow effect — press glow here; the lighting-engine border is
+    // drawn by KeyLightingBorder in the Box content (its own recomposition
+    // scope), so the lighting ticker no longer recomposes this whole key.
     val glowAlpha by animateFloatAsState(
         targetValue = if (isPressed) 0.8f else 0f,
         animationSpec = tween(durationMillis = if (isPressed) 30 else 200),
         label = "glow",
     )
     val pressGlow = if (isPressed) GlowColor.copy(alpha = glowAlpha) else Color.Transparent
-    val borderColor = if (pressGlow != Color.Transparent) pressGlow
-        else if (lightingColor != Color.Transparent) lightingColor
-        else Color.Transparent
+    val borderColor = pressGlow
 
     val shape = RoundedCornerShape(6.dp)
 
@@ -276,7 +273,7 @@ fun KeyView(
                         }
                         else -> {
                             feedback.onKeyPress(keyDef.action)
-                            lighting.onKeyPress(keyDef.primary, column)
+                            service.keyLighting.onKeyPress(keyDef.primary, column)
                             service.inputEngine.processKey(keyDef)
                         }
                     }
@@ -363,6 +360,18 @@ fun KeyView(
                 }
             }
         }
+
+        // Lighting border overlay (own recomposition scope; hidden while
+        // pressed, where the press glow above takes precedence)
+        KeyLightingBorder(
+            lighting = service.keyLighting,
+            keyId = keyDef.primary,
+            row = row,
+            column = column,
+            shape = shape,
+            suppressed = isPressed,
+            modifier = Modifier.matchParentSize(),
+        )
 
         // Swipe hints
         if (keyDef.swipeUp != null) {

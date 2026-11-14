@@ -128,7 +128,13 @@ class NacreInputMethodService :
         keyLighting = KeyLighting(this)
 
         clipboardManager.startListening()
-        foldableDetector.startHingeAngleListening()
+        // NOTE: the hinge-angle sensor is intentionally NOT registered.
+        // FoldableDetector.hingeAngle has no consumer in the app (LayoutSelector
+        // decides purely from window width; isTableTopMode() has no callers),
+        // so the old onCreate registration kept the sensor powered for the
+        // IME process's entire lifetime — including while the keyboard was
+        // hidden — in exchange for a value nothing ever read. If a future
+        // feature consumes hinge angle, register then (and unregister on hide).
 
         // When native Mozc is the active conversion engine it owns ranking outright, so the
         // Kotlin-engine helpers are dead weight: the local-LLM reranker (skip its server probe)
