@@ -2,7 +2,7 @@
 
 Developer-focused Japanese keyboard IME for Android.
 
-Current release: **0.2.0**
+Current release: **0.4.1** — CI publishes signed builds to the [Releases](https://github.com/RYOITABASHI/Nacre/releases) page (tags `build-<versionCode>`), and the in-app updater follows them automatically.
 
 ## Features
 

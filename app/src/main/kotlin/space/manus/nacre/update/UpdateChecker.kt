@@ -1,7 +1,7 @@
 package space.manus.nacre.update
 
 import android.util.Log
-import org.json.JSONObject
+import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -19,12 +19,18 @@ data class UpdateInfo(
  * Checks the public GitHub Releases of RYOITABASHI/Nacre for a build whose
  * versionCode is higher than the running app. The signed APK is published by CI
  * as an asset named `nacre-<versionCode>.apk`; the versionCode is parsed from
- * that name. Unauthenticated GitHub API (60 req/h/IP) — fine for manual checks.
+ * that name.
+ *
+ * Scans the release list instead of /releases/latest on purpose: "latest" is
+ * simply the most recently created release, so a non-APK release (e.g. a model
+ * bundle) published after the newest build would silently hide that build and
+ * the updater would report "up to date" forever. Unauthenticated GitHub API
+ * (60 req/h/IP) — fine for manual checks.
  */
 object UpdateChecker {
     private const val TAG = "NacreUpdate"
     private const val RELEASES_API =
-        "https://api.github.com/repos/RYOITABASHI/Nacre/releases/latest"
+        "https://api.github.com/repos/RYOITABASHI/Nacre/releases?per_page=30"
     private val ASSET_RE = Regex("""^nacre-(\d+)\.apk$""")
 
     /** Returns the newer build, or null when already up to date. Throws on network/parse errors. */
@@ -39,24 +45,32 @@ object UpdateChecker {
         try {
             val status = conn.responseCode
             if (status != HttpURLConnection.HTTP_OK) {
-                Log.w(TAG, "releases/latest HTTP $status")
+                Log.w(TAG, "releases HTTP $status")
                 return null
             }
-            val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-            val notes = json.optString("body", "")
-            val htmlUrl = json.optString("html_url", "")
-            val tag = json.optString("tag_name", "")
-            val assets = json.optJSONArray("assets") ?: return null
+            val releases = JSONArray(conn.inputStream.bufferedReader().use { it.readText() })
 
             var best: UpdateInfo? = null
-            for (i in 0 until assets.length()) {
-                val a = assets.getJSONObject(i)
-                val match = ASSET_RE.find(a.optString("name")) ?: continue
-                val vc = match.groupValues[1].toIntOrNull() ?: continue
-                val url = a.optString("browser_download_url")
-                if (url.isBlank()) continue
-                if (best == null || vc > best.versionCode) {
-                    best = UpdateInfo(vc, tag.ifBlank { "build-$vc" }, url, a.optLong("size", 0L), notes, htmlUrl)
+            for (i in 0 until releases.length()) {
+                val rel = releases.getJSONObject(i)
+                if (rel.optBoolean("draft")) continue
+                val assets = rel.optJSONArray("assets") ?: continue
+                val tag = rel.optString("tag_name", "")
+                for (j in 0 until assets.length()) {
+                    val a = assets.getJSONObject(j)
+                    val match = ASSET_RE.find(a.optString("name")) ?: continue
+                    val vc = match.groupValues[1].toIntOrNull() ?: continue
+                    if (best != null && vc <= best.versionCode) continue
+                    val url = a.optString("browser_download_url")
+                    if (url.isBlank()) continue
+                    best = UpdateInfo(
+                        vc,
+                        tag.ifBlank { "build-$vc" },
+                        url,
+                        a.optLong("size", 0L),
+                        rel.optString("body", ""),
+                        rel.optString("html_url", ""),
+                    )
                 }
             }
             val candidate = best ?: return null
