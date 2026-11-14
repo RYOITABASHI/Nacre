@@ -12,9 +12,18 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import space.manus.nacre.config.ConfigRepository
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.Layer
 import space.manus.nacre.ime.trackball.TrackballView
+
+/**
+ * Row-height scale derived from the user's Keyboard Height setting
+ * ([ConfigRepository.keyboardHeight], default 280dp = scale 1.0).
+ * Clamped so no layout becomes unusable at the slider extremes.
+ */
+fun keyboardHeightScale(config: ConfigRepository): Float =
+    (config.keyboardHeight / 280f).coerceIn(0.75f, 1.35f)
 
 @Composable
 fun KeyboardScreen(service: NacreInputMethodService) {
@@ -95,14 +104,16 @@ fun KeyboardScreen(service: NacreInputMethodService) {
         space.manus.nacre.ime.foldable.LayoutMode.FullVSplit ->
             VSplitKeyboardScreen(
                 service = service,
-                angle = 4f,
+                angle = service.configRepository.vAngle,
                 onFlexPointer = { showFlexPointer = true },
+                onCommandPalette = { showCommandPalette = true },
             )
         space.manus.nacre.ime.foldable.LayoutMode.FlickInput12Key ->
             FlickInputPad(
                 service = service,
                 onFlexPointer = { showFlexPointer = true },
                 onClipboard = { showClipboard = true },
+                onCommandPalette = { showCommandPalette = true },
             )
         space.manus.nacre.ime.foldable.LayoutMode.StandardQwerty,
         space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
@@ -110,6 +121,9 @@ fun KeyboardScreen(service: NacreInputMethodService) {
             StandardKeyboardScreen(
                 service = service,
                 compactBase = layoutMode == space.manus.nacre.ime.foldable.LayoutMode.CompactQwerty,
+                // Standard QWERTY means standard: no trackball splitting row 2.
+                // The trackball remains in V-Split mode and via Flex Pointer.
+                plainRows = layoutMode == space.manus.nacre.ime.foldable.LayoutMode.StandardQwerty,
                 onFlexPointer = { showFlexPointer = true },
             )
     }
@@ -119,6 +133,7 @@ fun KeyboardScreen(service: NacreInputMethodService) {
 private fun StandardKeyboardScreen(
     service: NacreInputMethodService,
     compactBase: Boolean = false,
+    plainRows: Boolean = false,
     onFlexPointer: () -> Unit,
 ) {
     val layerManager = service.layerManager
@@ -126,6 +141,7 @@ private fun StandardKeyboardScreen(
     val theme = service.currentTheme
     val bgColor = Color(theme.background.toInt())
     val accentColor = Color(theme.accent.toInt())
+    val heightScale = keyboardHeightScale(service.configRepository)
 
     val screenWidthDp = LocalConfiguration.current.screenWidthDp.dp
     val isLargeScreen = screenWidthDp > 500.dp
@@ -146,23 +162,24 @@ private fun StandardKeyboardScreen(
             onFlexPointer = onFlexPointer,
         )
 
-        // Keyboard rows with trackball in the middle
+        // Keyboard rows (row 2 carries the centre trackball unless plainRows)
         val rows = layout.rows
         for ((rowIndex, row) in rows.withIndex()) {
             val isModRow = rowIndex == rows.lastIndex
-            val keyHeight = when {
+            val baseKeyHeight = when {
                 isModRow && compactBase -> 28f
                 isModRow -> 26f
                 compactBase -> 44f
                 isLargeScreen -> 34f
                 else -> 40f
             }
+            val keyHeight = baseKeyHeight * heightScale
 
-            if (rowIndex == 2) {
+            if (rowIndex == 2 && !plainRows) {
                 KeyRowWithTrackball(
                     keys = row,
                     service = service,
-                    showTrackball = rowIndex == 2,
+                    showTrackball = true,
                     rowIndex = rowIndex,
                     keyHeightDp = keyHeight,
                 )
@@ -207,6 +224,16 @@ private fun StatusBar(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Explicit command-palette entry (same request flag Fn+Space sets,
+            // so the palette no longer needs the hidden Fn-layer gesture).
+            Text(
+                text = "⌘",
+                color = accentColor,
+                fontSize = 10.sp,
+                modifier = Modifier.clickable {
+                    service.layerManager.isCommandPaletteRequested = true
+                },
+            )
             Text(
                 text = "Ptr",
                 color = accentColor,
