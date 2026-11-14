@@ -519,6 +519,22 @@ class NacreDictionary internal constructor(
             boosted.removeAll { it.cost > bestCost + 10000 && it.cost > bestCost * 3 }
         }
 
+        // Pass-through penalty: demote the unconverted hiragana form and its
+        // katakana transliteration when a genuinely converted candidate exists.
+        // They stay in the list (sometimes kana IS the intent), just not on top
+        // by default. Applies to every source merged above — exactMatch ties at
+        // the boost floor and all-kana Viterbi paths both produced these at
+        // rank 1 in the baseline benchmark.
+        val katakanaForm = hiraganaToKatakana(kana)
+        if (boosted.any { it.surface != kana && it.surface != katakanaForm }) {
+            for (i in boosted.indices) {
+                val c = boosted[i]
+                if (c.surface == kana || c.surface == katakanaForm) {
+                    boosted[i] = c.copy(cost = c.cost + PASS_THROUGH_PENALTY)
+                }
+            }
+        }
+
         return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 30)
     }
 
@@ -978,8 +994,12 @@ class NacreDictionary internal constructor(
         val l = currLeftId.coerceIn(0, numIds - 1)
         val idx = r * numIds + l
         if (idx >= connectionCostFlat.size) return DEFAULT_CONNECTION_COST
-        // Mozc connection costs range roughly -1000..32000; /3 scaling lets the matrix guide more
-        return connectionCostFlat[idx].toInt() / 3
+        // Connection-cost scale: Mozc's matrix is used at /2, not the original
+        // /3 and not full /1. Benchmark-driven (see PR): /3 made boundaries too
+        // cheap (over-segmentation); /1 let POS-smooth nonsense paths dominate
+        // long inputs in this engine's beam search and cratered top-3. /2 was
+        // the measured optimum of the three for overall top-1/top-3.
+        return connectionCostFlat[idx].toInt() / 2
     }
 
     // --- Boost calculation ---
@@ -1070,7 +1090,12 @@ class NacreDictionary internal constructor(
         if (lastRightGroup == 0) return baseCost
         val entries = dict[reading]
         val entry = entries?.firstOrNull { it.surface == surface } ?: return baseCost
-        val connCost = getConnectionCost(lastRightGroup, entry.leftGroup)
+        // This heuristic's neutral point (800) and ranges in the doc comment
+        // above were calibrated on the old /3 connection scale. Keep consuming
+        // that scale ((x*2)/3 of the new /2 value) so this context adjustment —
+        // which the sentence benchmark cannot measure (it runs context-free) —
+        // behaves exactly as before this change.
+        val connCost = getConnectionCost(lastRightGroup, entry.leftGroup) * 2 / 3
         val delta = connCost - 800
         return if (delta <= 0) {
             // Good transition: mild bonus
@@ -1805,6 +1830,11 @@ class NacreDictionary internal constructor(
 
     companion object {
         private const val DEFAULT_CONNECTION_COST = 2000
+        // Penalty for unconverted pass-through candidates (the reading itself in
+        // hiragana, or its katakana transliteration) in convert(): they are not
+        // conversions, so when a real conversion exists they must not take the
+        // top by default. Benchmark-tuned (E3): 1500.
+        private const val PASS_THROUGH_PENALTY = 1500
         // KenLM weight for post-hoc rescoring (high: LM should strongly influence final ranking)
         private const val KENLM_WEIGHT = 5000f
         // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
@@ -1855,6 +1885,8 @@ class NacreDictionary internal constructor(
     private fun lengthBonus(segLen: Int): Int {
         // Strongly prefer longer segments — key for matching Google IME quality.
         // Longer segments = fewer word boundaries = less ambiguity.
+        // (Kept at full strength: benchmark E2 showed halving/removing it
+        // regresses top-1/top-3 even with the connection-cost divisor at 2.)
         return when {
             segLen >= 10 -> -4000
             segLen >= 8 -> -3200
