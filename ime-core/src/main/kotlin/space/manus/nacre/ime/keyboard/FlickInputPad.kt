@@ -158,14 +158,12 @@ private fun FlickKanaGrid(
     val h = rowH.dp
     val sw = SIDE_WEIGHT
 
-    // iOS flick assignment for this key: tap=、, left=。, up=！, right=？, down=・
-    // (verified against real-device references; previously up/right were swapped
-    // and down was … instead of ・).
-    val punctKey = FlickEngine.FlickKey(
-        id = "punct", label = "、。",
-        tap = "、", left = "。", up = "！", right = "？", down = "・",
-        tapCycle = listOf("。", "、", "！", "？", "ー", "〜", "…", "「", "」", "・"),
-    )
+    // The 、。？！ key is defined in FlickEngine (pure data, unit-tested):
+    // iPhone cross order tap=、, left=。, up=？, right=！, down=…, and a tap
+    // cycle in that same order so 。 takes 2 taps (it previously took 10 —
+    // the cycle started at 。 while tap inserted 、, and up/right/down did
+    // not match the iPhone key).
+    val punctKey = FlickEngine.punctKey
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // Row 1: ☆123 | あ | か | さ | ⌫
@@ -254,33 +252,33 @@ private fun FlickAlphaGrid(
         // Row 1: ☆123 | @#& | abc | def | ⌫
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
-            FlickKeyView(flickKey = alphaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
-            FlickKeyView(flickKey = alphaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
-            FlickKeyView(flickKey = alphaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
+            FlickKeyView(flickKey = alphaKeys[0], service = service, modifier = Modifier.weight(1f), row = 0, column = 1, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[1], service = service, modifier = Modifier.weight(1f), row = 0, column = 2, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[2], service = service, modifier = Modifier.weight(1f), row = 0, column = 3, directAlpha = true)
             KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.weight(sw), row = 0, column = 4, heightDp = rowH)
         }
         // Row 2: ABC | ghi | jkl | mno | 空白
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
-            FlickKeyView(flickKey = alphaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
-            FlickKeyView(flickKey = alphaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
-            FlickKeyView(flickKey = alphaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
+            FlickKeyView(flickKey = alphaKeys[3], service = service, modifier = Modifier.weight(1f), row = 1, column = 1, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[4], service = service, modifier = Modifier.weight(1f), row = 1, column = 2, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[5], service = service, modifier = Modifier.weight(1f), row = 1, column = 3, directAlpha = true)
             FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
         }
         // Row 3: あいう | pqrs | tuv | wxyz | 改行
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
-            FlickKeyView(flickKey = alphaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
-            FlickKeyView(flickKey = alphaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
-            FlickKeyView(flickKey = alphaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
+            FlickKeyView(flickKey = alphaKeys[6], service = service, modifier = Modifier.weight(1f), row = 2, column = 1, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[7], service = service, modifier = Modifier.weight(1f), row = 2, column = 2, directAlpha = true)
+            FlickKeyView(flickKey = alphaKeys[8], service = service, modifier = Modifier.weight(1f), row = 2, column = 3, directAlpha = true)
             KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = rowH)
         }
         // Row 4: 絵記 | Shift | - | .,!? | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
             KeyView(keyDef = KeyDef("Shift", action = KeyAction.Shift), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = rowH)
-            KeyView(keyDef = KeyDef("-", swipeUp = "/", swipeDown = "\\"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = rowH)
-            FlickKeyView(flickKey = alphaPunct, service = service, modifier = Modifier.weight(1f), row = 3, column = 3)
+            FlickDirectKey(label = "-", service = service, modifier = Modifier.weight(1f), row = 3, column = 2, swipeUp = "/", swipeDown = "\\")
+            FlickKeyView(flickKey = alphaPunct, service = service, modifier = Modifier.weight(1f), row = 3, column = 3, directAlpha = true)
             FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(sw))
         }
     }
@@ -307,36 +305,167 @@ private fun FlickNumberGrid(
 
     Column(modifier = Modifier.fillMaxWidth()) {
         // Row 1: ☆123 | 1 | 2 | 3 | ⌫
+        // Digits commit immediately (iPhone ☆123 page) via FlickDirectKey —
+        // they no longer route through the romaji composing buffer.
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Numbers) })
-            KeyView(keyDef = KeyDef("1"), service = service, modifier = Modifier.weight(1f), row = 0, column = 1, heightDp = rowH)
-            KeyView(keyDef = KeyDef("2"), service = service, modifier = Modifier.weight(1f), row = 0, column = 2, heightDp = rowH)
-            KeyView(keyDef = KeyDef("3"), service = service, modifier = Modifier.weight(1f), row = 0, column = 3, heightDp = rowH)
+            FlickDirectKey(label = "1", service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
+            FlickDirectKey(label = "2", service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
+            FlickDirectKey(label = "3", service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
             KeyView(keyDef = KeyDef("⌫", action = KeyAction.Backspace), service = service, modifier = Modifier.weight(sw), row = 0, column = 4, heightDp = rowH)
         }
         // Row 2: ABC | 4 | 5 | 6 | 空白
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Alpha) })
-            KeyView(keyDef = KeyDef("4"), service = service, modifier = Modifier.weight(1f), row = 1, column = 1, heightDp = rowH)
-            KeyView(keyDef = KeyDef("5"), service = service, modifier = Modifier.weight(1f), row = 1, column = 2, heightDp = rowH)
-            KeyView(keyDef = KeyDef("6"), service = service, modifier = Modifier.weight(1f), row = 1, column = 3, heightDp = rowH)
+            FlickDirectKey(label = "4", service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
+            FlickDirectKey(label = "5", service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
+            FlickDirectKey(label = "6", service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
             FlickSpaceKey(service = service, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
         }
         // Row 3: あいう | 7 | 8 | 9 | 改行
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(sw), service = service, onClick = { onSetMode(FlickMode.Kana) })
-            KeyView(keyDef = KeyDef("7"), service = service, modifier = Modifier.weight(1f), row = 2, column = 1, heightDp = rowH)
-            KeyView(keyDef = KeyDef("8"), service = service, modifier = Modifier.weight(1f), row = 2, column = 2, heightDp = rowH)
-            KeyView(keyDef = KeyDef("9"), service = service, modifier = Modifier.weight(1f), row = 2, column = 3, heightDp = rowH)
+            FlickDirectKey(label = "7", service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
+            FlickDirectKey(label = "8", service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
+            FlickDirectKey(label = "9", service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
             KeyView(keyDef = KeyDef("改行", action = KeyAction.Enter), service = service, modifier = Modifier.weight(sw), row = 2, column = 4, heightDp = rowH)
         }
         // Row 4: 絵記 | + | 0 | . | 📋 (clipboard)
         Row(modifier = Modifier.fillMaxWidth().height(h)) {
             SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(sw), service = service, onTap = onEmoji, onLongPress = onSymbols)
-            KeyView(keyDef = KeyDef("+", swipeUp = "-", swipeDown = "="), service = service, modifier = Modifier.weight(1f), row = 3, column = 1, heightDp = rowH)
-            KeyView(keyDef = KeyDef("0"), service = service, modifier = Modifier.weight(1f), row = 3, column = 2, heightDp = rowH)
-            KeyView(keyDef = KeyDef(".", swipeUp = ",", swipeDown = ":"), service = service, modifier = Modifier.weight(1f), row = 3, column = 3, heightDp = rowH)
+            FlickDirectKey(label = "+", service = service, modifier = Modifier.weight(1f), row = 3, column = 1, swipeUp = "-", swipeDown = "=")
+            FlickDirectKey(label = "0", service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
+            FlickDirectKey(label = ".", service = service, modifier = Modifier.weight(1f), row = 3, column = 3, swipeUp = ",", swipeDown = ":")
             FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(sw))
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Direct-commit key (☆123 digits, alpha "-"): tap / swipe-up / swipe-down
+// insert IMMEDIATELY via InputEngine.processFlickDirectText — iPhone-style,
+// never the romaji/flick composing buffer, so no 確定 press is needed.
+// Visuals mirror FlickKeyView; vertical swipes use the shared threshold.
+// ─────────────────────────────────────────────────────────────────
+
+@Composable
+private fun FlickDirectKey(
+    label: String,
+    service: NacreInputMethodService,
+    modifier: Modifier = Modifier,
+    row: Int = 0,
+    column: Int = 0,
+    swipeUp: String? = null,
+    swipeDown: String? = null,
+) {
+    var isPressed by remember { mutableStateOf(false) }
+
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.95f else 1f,
+        animationSpec = tween(durationMillis = 30),
+        label = "flickDirectScale",
+    )
+
+    val theme = service.currentTheme
+    val keyBg = Color(theme.keyBackground.toInt())
+    val keyBgPressed = Color(theme.keyBackgroundPressed.toInt())
+    val keyText = Color(theme.keyText.toInt())
+    val accentColor = Color(theme.accent.toInt())
+    val surfaceColor = Color(theme.surface.toInt())
+
+    val lighting = service.keyLighting
+    @Suppress("UNUSED_VARIABLE")
+    val tick = lighting.animationTick
+    val lightingColor = lighting.getKeyColor(label, row, column)
+
+    val glowAlpha by animateFloatAsState(
+        targetValue = if (isPressed) 0.8f else 0f,
+        animationSpec = tween(durationMillis = if (isPressed) 30 else 200),
+        label = "flickDirectGlow",
+    )
+    val pressGlow = if (isPressed) accentColor.copy(alpha = glowAlpha) else Color.Transparent
+    val borderColor = when {
+        pressGlow != Color.Transparent -> pressGlow
+        lightingColor != Color.Transparent -> lightingColor
+        else -> Color.Transparent
+    }
+
+    val shape = RoundedCornerShape(6.dp)
+    val flickThresholdPx = with(LocalDensity.current) { FLICK_THRESHOLD_DP.dp.toPx() }
+
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .padding(horizontal = 1.dp, vertical = 1.dp)
+            .scale(scale)
+            .clip(shape)
+            .background(if (isPressed) keyBgPressed else surfaceColor)
+            .padding(bottom = 1.5.dp)
+            .clip(shape)
+            .background(if (isPressed) keyBgPressed else keyBg)
+            .then(
+                if (borderColor != Color.Transparent) {
+                    Modifier.border(width = 1.dp, color = borderColor, shape = shape)
+                } else {
+                    Modifier.border(
+                        width = 0.5.dp,
+                        color = surfaceColor.copy(alpha = 0.5f),
+                        shape = shape,
+                    )
+                }
+            )
+            .pointerInput(label, swipeUp, swipeDown) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    isPressed = true
+                    var totalY = 0f
+                    var resolved = label
+                    try {
+                        while (true) {
+                            val event = withTimeoutOrNull(Long.MAX_VALUE) {
+                                awaitPointerEvent()
+                            } ?: break
+                            val change = event.changes.firstOrNull() ?: break
+                            if (change.pressed) {
+                                totalY += change.positionChange().y
+                                resolved = when {
+                                    totalY < -flickThresholdPx -> swipeUp ?: label
+                                    totalY > flickThresholdPx -> swipeDown ?: label
+                                    else -> label
+                                }
+                                change.consume()
+                            } else {
+                                change.consume()
+                                break
+                            }
+                        }
+                    } finally {
+                        isPressed = false
+                    }
+                    service.inputEngine.processFlickDirectText(resolved)
+                    service.feedbackManager.onKeyPress(KeyAction.Text(resolved))
+                    lighting.onKeyPress(label, column)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (isPressed) accentColor else keyText,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Medium,
+            fontFamily = FontFamily.Default,
+            textAlign = TextAlign.Center,
+        )
+        swipeUp?.let { hint ->
+            Text(
+                text = hint,
+                color = keyText.copy(alpha = 0.5f),
+                fontSize = 8.sp,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 2.dp),
+            )
         }
     }
 }
@@ -642,6 +771,8 @@ private fun FlickKeyView(
     modifier: Modifier = Modifier,
     row: Int = 0,
     column: Int = 0,
+    /** ABC grid only: commit immediately (iPhone-style) instead of composing. */
+    directAlpha: Boolean = false,
 ) {
     var isPressed by remember { mutableStateOf(false) }
     var flickDir by remember { mutableStateOf(FlickEngine.Direction.Tap) }
@@ -757,12 +888,21 @@ private fun FlickKeyView(
                             service.layerManager.toggleShift() // auto-reset after one char
                         }
                         val isTap = resolved == FlickEngine.Direction.Tap
-                        service.inputEngine.processFlickKana(
-                            kana,
-                            flickKeyId = flickKey.id,
-                            isFlickTap = isTap,
-                            tapCycleOverride = flickKey.tapCycle,
-                        )
+                        if (directAlpha) {
+                            service.inputEngine.processFlickAlpha(
+                                kana,
+                                flickKeyId = flickKey.id,
+                                isFlickTap = isTap,
+                                tapCycle = flickKey.tapCycle,
+                            )
+                        } else {
+                            service.inputEngine.processFlickKana(
+                                kana,
+                                flickKeyId = flickKey.id,
+                                isFlickTap = isTap,
+                                tapCycleOverride = flickKey.tapCycle,
+                            )
+                        }
                         service.feedbackManager.onKeyPress(KeyAction.Text(kana))
                         lighting.onKeyPress(flickKey.id, column)
                     }
