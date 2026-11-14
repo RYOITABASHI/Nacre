@@ -216,4 +216,116 @@ class FlickParityTest {
         assertEquals(-1, cycler.pendingIndex)
         assertNull(cycler.tap("abc", abc, startIndex = 0, nowMs = 200L))
     }
+
+    // ── ゛゜小 transform seals the pending toggle ────────────────────
+    //
+    // The bug: a ゛゜小 transform rewrote the last composing character but
+    // left the multi-tap toggle armed from the row taps that produced it,
+    // so the next same-row tap within the window REPLACED the transformed
+    // character (っ→た, が→か) and 「って」 lost its っ. The fix seals the
+    // character on transform (InputEngine calls confirmFlickToggle(),
+    // i.e. FlickToggleState.disarm(), after every successful transform).
+
+    /** Minimal stand-in mirroring InputEngine.processFlickKana's tap contract. */
+    private class FakeKanaPad {
+        val toggle = FlickToggleState(timeoutMs = 800L)
+        var composing: String = ""
+            private set
+
+        fun tap(key: FlickEngine.FlickKey, nowMs: Long) {
+            if (toggle.isArmedFor(key.id, nowMs) && composing.isNotEmpty()) {
+                // Engine cycle resolution: pad override → stored → key cycle.
+                val cycle = key.tapCycle ?: toggle.cycle ?: FlickEngine.tapCycleOf(key)
+                val last = composing.last().toString()
+                val idx = cycle.indexOf(last)
+                val next = cycle[if (idx >= 0) (idx + 1) % cycle.size else 0]
+                composing = composing.dropLast(1) + next
+                toggle.touch(nowMs)
+                return
+            }
+            composing += key.tap
+            toggle.arm(key.id, nowMs, key.tapCycle)
+        }
+
+        /** Mirrors processFlickDakutenCycle AFTER the fix: transform, then seal. */
+        fun dakutenKey() {
+            if (composing.isEmpty()) return
+            val replaced = FlickEngine.cycleKanaForm(composing.last()) ?: return
+            composing = composing.dropLast(1) + replaced
+            toggle.disarm()
+        }
+    }
+
+    @Test
+    fun `tte types end to end with taps only`() {
+        val pad = FakeKanaPad()
+        val ta = key("た")
+        pad.tap(ta, 0L); pad.tap(ta, 100L); pad.tap(ta, 200L)
+        assertEquals("つ", pad.composing)
+        pad.dakutenKey() // つ → っ, sealed
+        assertEquals("っ", pad.composing)
+        // て is on the SAME row: without the seal, the next tap (still
+        // inside the window from t=200) would replace っ with た.
+        pad.tap(ta, 300L)
+        assertEquals("った", pad.composing)
+        pad.tap(ta, 400L); pad.tap(ta, 500L); pad.tap(ta, 600L)
+        assertEquals("って", pad.composing)
+    }
+
+    @Test
+    fun `dakuten form is sealed the same way as small kana`() {
+        val pad = FakeKanaPad()
+        val ka = key("か")
+        pad.tap(ka, 0L)
+        pad.dakutenKey() // か → が, sealed
+        assertEquals("が", pad.composing)
+        // Without the seal this tap would replace が with か
+        // (が is not in the か tap cycle, so the toggle wrapped to its head).
+        pad.tap(ka, 100L)
+        assertEquals("がか", pad.composing)
+        pad.tap(ka, 200L)
+        assertEquals("がき", pad.composing)
+    }
+
+    @Test
+    fun `handakuten form is sealed the same way`() {
+        val pad = FakeKanaPad()
+        val ha = key("は")
+        pad.tap(ha, 0L)
+        pad.dakutenKey(); pad.dakutenKey() // は → ば → ぱ
+        assertEquals("ぱ", pad.composing)
+        pad.tap(ha, 100L) // would replace ぱ with は without the seal
+        assertEquals("ぱは", pad.composing)
+    }
+
+    @Test
+    fun `dakuten key keeps cycling after sealing`() {
+        // Sealing must not break the transform cycle itself: repeated
+        // ゛゜小 presses edit the composing string directly.
+        val pad = FakeKanaPad()
+        val ta = key("た")
+        pad.tap(ta, 0L); pad.tap(ta, 100L); pad.tap(ta, 200L)
+        pad.dakutenKey()
+        assertEquals("っ", pad.composing)
+        pad.dakutenKey()
+        assertEquals("づ", pad.composing)
+        pad.dakutenKey()
+        assertEquals("つ", pad.composing)
+    }
+
+    @Test
+    fun `toggle state arms expires and disarms`() {
+        val state = FlickToggleState(timeoutMs = 800L)
+        assertEquals(false, state.isArmed)
+        state.arm("た", nowMs = 1000L, cycle = null)
+        assertEquals(true, state.isArmed)
+        assertEquals(true, state.isArmedFor("た", nowMs = 1799L))
+        assertEquals(false, state.isArmedFor("た", nowMs = 1800L)) // window is [arm, arm+800)
+        assertEquals(false, state.isArmedFor("か", nowMs = 1100L)) // different key
+        state.touch(nowMs = 1500L)
+        assertEquals(true, state.isArmedFor("た", nowMs = 2000L))
+        state.disarm()
+        assertEquals(false, state.isArmed)
+        assertEquals(false, state.isArmedFor("た", nowMs = 1600L))
+    }
 }

@@ -643,7 +643,7 @@ class InputEngine(private val service: NacreInputMethodService) {
 
             is KeyAction.KeyCode -> {
                 // In flick mode, ▶ (DPAD_RIGHT) confirms current toggle input
-                if (action.code == KeyEvent.KEYCODE_DPAD_RIGHT && lastFlickKeyId.isNotEmpty()) {
+                if (action.code == KeyEvent.KEYCODE_DPAD_RIGHT && flickToggle.isArmed) {
                     confirmFlickToggle()
                     return
                 }
@@ -1066,9 +1066,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         isConverting = false
         symbolReplace = null
         composingFlickKana = ""
-        lastFlickKeyId = ""
-        lastFlickTapTime = 0L
-        lastFlickTapCycle = null
+        flickToggle.disarm()
     }
 
     // Symbol candidate state: when non-null, tapping a candidate replaces the last committed symbol
@@ -1256,10 +1254,8 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     // Track last flick tap for toggle input (ガラケー打ち)
-    private var lastFlickKeyId: String = ""
-    private var lastFlickTapTime: Long = 0L
-    private var lastFlickTapCycle: List<String>? = null
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
+    private val flickToggle = FlickToggleState(TOGGLE_TIMEOUT_MS)
 
     // ABC-grid immediate-commit cycling (iPhone-style direct insertion)
     private val alphaCycler = AlphaTapCycler(TOGGLE_TIMEOUT_MS)
@@ -1284,14 +1280,13 @@ class InputEngine(private val service: NacreInputMethodService) {
         val now = System.currentTimeMillis()
 
         // Toggle input: same key tapped again within timeout
-        if (isFlickTap && flickKeyId.isNotEmpty() && flickKeyId == lastFlickKeyId
-            && (now - lastFlickTapTime) < TOGGLE_TIMEOUT_MS
+        if (isFlickTap && flickToggle.isArmedFor(flickKeyId, now)
             && composingFlickKana.isNotEmpty()
         ) {
             // Build tap cycle: prefer override, then stored cycle, then FlickKey.tapCycle, then flick directions
             val flickKey = FlickEngine.kanaKeys.find { it.id == flickKeyId }
             val cycle = tapCycleOverride
-                ?: lastFlickTapCycle
+                ?: flickToggle.cycle
                 ?: flickKey?.tapCycle
                 ?: flickKey?.let { listOfNotNull(it.tap, it.left, it.up, it.right, it.down) }
             if (cycle != null && cycle.isNotEmpty()) {
@@ -1304,16 +1299,14 @@ class InputEngine(private val service: NacreInputMethodService) {
                 composingKana = composingFlickKana
                 ic.setComposingText(composingFlickKana, 1)
                 updateFlickPredictions(composingFlickKana)
-                lastFlickTapTime = now
+                flickToggle.touch(now)
                 return
             }
         }
 
         // Reset toggle state when switching to a different key
-        if (isFlickTap && flickKeyId != lastFlickKeyId) {
-            lastFlickKeyId = ""
-            lastFlickTapTime = 0L
-            lastFlickTapCycle = null
+        if (isFlickTap && flickKeyId != flickToggle.keyId) {
+            flickToggle.disarm()
         }
 
         // Normal input (flick or first tap)
@@ -1323,13 +1316,9 @@ class InputEngine(private val service: NacreInputMethodService) {
         updateFlickPredictions(composingFlickKana)
 
         if (isFlickTap) {
-            lastFlickKeyId = flickKeyId
-            lastFlickTapTime = now
-            lastFlickTapCycle = tapCycleOverride
+            flickToggle.arm(flickKeyId, now, tapCycleOverride)
         } else {
-            lastFlickKeyId = ""
-            lastFlickTapTime = 0L
-            lastFlickTapCycle = null
+            flickToggle.disarm()
         }
     }
 
@@ -1338,9 +1327,7 @@ class InputEngine(private val service: NacreInputMethodService) {
      * Resets the toggle state so the next tap on the same key starts a new character.
      */
     fun confirmFlickToggle() {
-        lastFlickKeyId = ""
-        lastFlickTapTime = 0L
-        lastFlickTapCycle = null
+        flickToggle.disarm()
     }
 
     /**
@@ -1463,6 +1450,10 @@ class InputEngine(private val service: NacreInputMethodService) {
      * Falls back to whichever transform IS available if the requested one doesn't
      * apply to lastChar (e.g. left-flick/dakuten on や, which has no dakuten form,
      * still produces ゃ instead of doing nothing).
+     *
+     * Like [processFlickDakutenCycle], a successful transform SEALS the
+     * character (see there): the next same-row tap starts a new character
+     * instead of replacing the transformed one.
      */
     fun processFlickDakuten(type: DakutenType) {
         if (composingFlickKana.isEmpty()) return
@@ -1482,11 +1473,23 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
         updatePredictions(composingFlickKana)
+        confirmFlickToggle()
     }
 
     /**
      * iOS-style ゛小゜ tap: cycle the last kana through base → small → dakuten →
      * handakuten (small first, dakuten next).
+     *
+     * A successful transform also SEALS the character: pressing ゛゜小 is an
+     * explicit decision about the character's final form, so it leaves the
+     * pending multi-tap state (the garakei convention — the dakuten key
+     * decides the character). Without the seal, the toggle stayed armed from
+     * the row taps that produced the character, and the next same-row tap
+     * within the window replaced the transformed character (っ→た, が→か):
+     * 「って」 lost its っ the moment て's row was tapped. The character stays
+     * in the composing string, so conversion candidates are unaffected.
+     * Repeated ゛゜小 presses keep cycling — they edit the composing string
+     * directly and never consult the toggle state.
      */
     fun processFlickDakutenCycle() {
         if (composingFlickKana.isEmpty()) return
@@ -1497,6 +1500,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
         updatePredictions(composingFlickKana)
+        confirmFlickToggle()
     }
 
     /**

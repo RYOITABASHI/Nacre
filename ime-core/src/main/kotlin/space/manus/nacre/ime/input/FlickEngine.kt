@@ -189,6 +189,58 @@ object FlickEngine {
 enum class DakutenType { Dakuten, Handakuten, Small }
 
 /**
+ * Multi-tap (toggle / ガラケー打ち） state for the kana 12-key grid: which key
+ * produced the still-pending last character, when, and with which tap cycle.
+ * While armed for a key, another tap on that key within [timeoutMs] REPLACES
+ * the pending character with the next cycle entry instead of appending.
+ *
+ * Anything that settles the pending character must [disarm]: the ▶ key, a
+ * direct-commit input — and the ゛゜小 key. A ゛゜小 transform is an explicit
+ * decision about the character's final form, so the transformed character
+ * (small kana, dakuten, handakuten alike) leaves the pending state;
+ * otherwise the next same-row tap would silently replace it (っ→た,
+ * が→か, …), which made 「って」 untypable at a natural pace. Repeated
+ * ゛゜小 presses still cycle, because they edit the composing string
+ * directly and never consult this state. Pure and clock-injected, like
+ * [AlphaTapCycler], for unit tests.
+ */
+class FlickToggleState(private val timeoutMs: Long = 800L) {
+
+    var keyId: String = ""
+        private set
+    var lastTapMs: Long = 0L
+        private set
+    var cycle: List<String>? = null
+        private set
+
+    /** True while some character is still pending replacement. */
+    val isArmed: Boolean get() = keyId.isNotEmpty()
+
+    /** True when a tap on [keyId] at [nowMs] continues the pending toggle. */
+    fun isArmedFor(keyId: String, nowMs: Long): Boolean =
+        keyId.isNotEmpty() && keyId == this.keyId && nowMs - lastTapMs < timeoutMs
+
+    /** Arm after a fresh character was appended by tapping [keyId]. */
+    fun arm(keyId: String, nowMs: Long, cycle: List<String>?) {
+        this.keyId = keyId
+        this.lastTapMs = nowMs
+        this.cycle = cycle
+    }
+
+    /** Re-stamp the window after a successful toggle replacement. */
+    fun touch(nowMs: Long) {
+        lastTapMs = nowMs
+    }
+
+    /** Settle the pending character: the next tap starts a new character. */
+    fun disarm() {
+        keyId = ""
+        lastTapMs = 0L
+        cycle = null
+    }
+}
+
+/**
  * Multi-tap state for the ABC (alpha) 12-key grid, where characters commit
  * IMMEDIATELY (iPhone-style: no composing buffer, no 確定 press). A repeated
  * tap on the same key within [timeoutMs] does not insert again — it asks the
