@@ -244,6 +244,7 @@ class NacreDictionary internal constructor(
         Log.i("NacreDictionary", "Index built: ${dict.size} readings, ${sortedReadings.size} sorted")
 
         loadEnglishDict()
+        loadLoanwords()
         buildRomajiEnglishIndex()
         loadEnglishFullDict()
         loadStaticBigrams()
@@ -615,7 +616,9 @@ class NacreDictionary internal constructor(
     // the Shelly Android terminal IDE while it's the foreground app. Lazily created so it costs
     // nothing (no file stat) until predictEnglish() actually consults it. Independently
     // re-sanitizes everything it reads — see ShellyBridgeContext.kt for the full contract.
-    private val shellyBridge by lazy { ShellyBridgeReader(androidContext!!) }
+    private val shellyBridge: ShellyBridgeReader? by lazy {
+        androidContext?.let { ShellyBridgeReader(it) }
+    }
 
     // #13/M5: single background thread for NacreMozcEngine.learn() — a commit-time
     // SUBMIT_CANDIDATE round-trip through the native session, same per-char JNI cost as
@@ -730,6 +733,11 @@ class NacreDictionary internal constructor(
             }
         }
 
+        // 4.5 English loanword candidates (exact reading match, e.g.
+        // こんぴゅーたー → "computer"). Mirrors predict() step 6 so the
+        // explicit conversion list offers the English spelling too.
+        addUnique(englishMatch(kana, limit = 5))
+
         // 5. Katakana / Hiragana / Half-width katakana as-is
         val katakana = hiraganaToKatakana(kana)
         if (katakana != kana && seen.add(katakana)) {
@@ -780,7 +788,30 @@ class NacreDictionary internal constructor(
             }
         }
 
-        return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 30)
+        val sorted = boosted.sortedBy { it.cost }.toMutableList()
+        promoteLoanwordCandidate(sorted, kana)
+        return sorted.take(if (kana.length <= 3) 40 else 30)
+    }
+
+    /**
+     * Guarantee the English loanword candidate for an exact reading match
+     * (e.g. "computer" for こんぴゅーたー) a top-5 slot. Cost alone cannot do
+     * this: loanword readings attract long tails of emoji/compound entries
+     * that sort above any sane English cost, which left the English
+     * candidate at rank 10+ (effectively buried). Only the single best
+     * exact-match English candidate is promoted, and never to rank 1, so
+     * the Japanese candidates keep their relative order and the primary
+     * Japanese surface stays on top.
+     */
+    private fun promoteLoanwordCandidate(sorted: MutableList<ConversionCandidate>, kana: String) {
+        if (kana.length < 2) return
+        val surfaces = englishDict[kana]?.map { it.surface }?.toSet() ?: return
+        if (surfaces.isEmpty()) return
+        val idx = sorted.indexOfFirst { it.surface in surfaces }
+        if (idx > LOANWORD_PROMOTE_INDEX) {
+            val c = sorted.removeAt(idx)
+            sorted.add(LOANWORD_PROMOTE_INDEX, c)
+        }
     }
 
     /**
@@ -846,11 +877,18 @@ class NacreDictionary internal constructor(
                 // history hits the same way the legacy engine's own path (section 0 below) does,
                 // so recently-converted text still resurfaces regardless of which engine is active.
                 val historyMatches = historyMatchesFor(kana)
-                if (historyMatches.isEmpty()) return mozc
                 val seen = mutableSetOf<String>()
-                val merged = ArrayList<ConversionCandidate>(historyMatches.size + mozc.size)
+                val merged = ArrayList<ConversionCandidate>(historyMatches.size + mozc.size + 5)
                 for (h in historyMatches) if (seen.add(h.surface)) merged.add(h)
                 for (c in mozc) if (seen.add(c.surface)) merged.add(c)
+                // English loanword candidates are Nacre-side data Mozc knows
+                // nothing about; merge them here too so the live candidate
+                // bar offers e.g. "computer" for こんぴゅーたー on this path
+                // as well, with the same top-5 promotion as the legacy path.
+                for (c in englishMatch(kana, limit = 5)) {
+                    if (seen.add(c.surface)) merged.add(c)
+                }
+                promoteLoanwordCandidate(merged, kana)
                 return merged
             }
         }
@@ -984,7 +1022,9 @@ class NacreDictionary internal constructor(
 
         kenLmRescore(boosted)
 
-        return boosted.sortedBy { it.cost }.take(if (kana.length <= 3) 40 else 25)
+        val sorted = boosted.sortedBy { it.cost }.toMutableList()
+        promoteLoanwordCandidate(sorted, kana)
+        return sorted.take(if (kana.length <= 3) 40 else 25)
     }
 
     override fun recordSelection(candidate: ConversionCandidate) {
@@ -1589,6 +1629,40 @@ class NacreDictionary internal constructor(
         }
     }
 
+    /**
+     * Loanword mapping (JMdict-derived, see dict/loanwords_en.tsv header):
+     * thousands of common katakana loanwords merged into [englishDict] so
+     * englishMatch() surfaces the English spelling (e.g. かめら → camera).
+     * The hand-curated english_words.tsv wins on duplicates — generated
+     * entries whose surface already exists for the reading are skipped.
+     */
+    private fun loadLoanwords() {
+        try {
+            assetOpener.open("dict/loanwords_en.tsv").use { stream ->
+                BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).use { reader ->
+                    var added = 0
+                    reader.forEachLine { line ->
+                        if (line.isBlank() || line.startsWith('#')) return@forEachLine
+                        val parts = line.split('\t')
+                        if (parts.size >= 2) {
+                            val reading = parts[0]
+                            val english = parts[1]
+                            val cost = if (parts.size >= 3) parts[2].toIntOrNull() ?: 2300 else 2300
+                            val list = englishDict.getOrPut(reading) { mutableListOf() }
+                            if (list.none { it.surface.equals(english, ignoreCase = true) }) {
+                                list.add(DictEntry(english, cost))
+                                added++
+                            }
+                        }
+                    }
+                    Log.i("NacreDictionary", "Loanwords loaded: $added entries")
+                }
+            }
+        } catch (e: Exception) {
+            Log.i("NacreDictionary", "No loanword dictionary found (optional)")
+        }
+    }
+
     private fun loadEnglishFullDict() {
         try {
             assetOpener.open("dict/english_full.tsv").use { stream ->
@@ -1664,9 +1738,15 @@ class NacreDictionary internal constructor(
             }
         }
 
-        // 2. Prefix match via binary search on sorted keys
+        // 2. Prefix match via binary search on sorted keys.
+        // The scan window must be much wider than the display limit: keys
+        // are alphabetical, so a narrow window (the old limit*2) fills up
+        // with rare long words (headache, hector, ...) before reaching
+        // short frequent ones (her, here, help) that sort later. Ranking
+        // is by cost afterwards, so collecting a few hundred keys and
+        // sorting beats truncating the scan early.
         val startIdx = englishSortedKeys.binarySearchInsertionPoint(prefixLower)
-        var count = 0
+        var scanned = 0
         for (i in startIdx until englishSortedKeys.size) {
             val key = englishSortedKeys[i]
             if (!key.startsWith(prefixLower)) break
@@ -1680,8 +1760,8 @@ class NacreDictionary internal constructor(
                     cost = entry.cost + lengthPenalty,
                 ))
             }
-            count++
-            if (count >= limit * 2) break
+            scanned++
+            if (scanned >= ENGLISH_PREFIX_SCAN_LIMIT) break
         }
 
         // 3. Spell correction (edit distance 1) for inputs >= 3 chars
@@ -1712,7 +1792,7 @@ class NacreDictionary internal constructor(
         // surfaced the same word. Costed like an ordinary dictionary hit (base cost + a
         // length-proportional penalty for the untyped remainder, mirroring historyMatchesFor())
         // so it nudges the ranking without dominating exactMatch()/prefix-match results.
-        for (term in shellyBridge.matchingTerms(prefix)) {
+        for (term in shellyBridge?.matchingTerms(prefix).orEmpty()) {
             if (results.any { it.surface.equals(term, ignoreCase = true) }) continue
             val lengthPenalty = maxOf(0, term.length - prefixLower.length) * SHELLY_BRIDGE_TERM_PER_CHAR_PENALTY
             results.add(ConversionCandidate(
@@ -1722,7 +1802,74 @@ class NacreDictionary internal constructor(
             ))
         }
 
-        return results.sortedBy { it.cost }.take(limit)
+        // 6. Case adaptation: shape each surface to the case pattern the
+        // user is typing ("th" -> the/that, "Th" -> The/That, "TH" -> THE),
+        // demoting words whose case is intrinsic (iPhone, GitHub, AI) when
+        // it clashes with the typed pattern instead of silently returning
+        // the stored form. Duplicates that adaptation creates (e.g. stored
+        // "the"/"The" pairs) collapse to the cheaper one.
+        val pattern = englishCasePattern(prefix)
+        val adapted = LinkedHashMap<String, ConversionCandidate>()
+        for (c in results) {
+            val (surface, penalty) = adaptEnglishCase(c.surface, pattern)
+            val candidate = if (surface == c.surface && penalty == 0) c
+                else c.copy(surface = surface, cost = c.cost + penalty)
+            val prev = adapted[surface]
+            if (prev == null || candidate.cost < prev.cost) adapted[surface] = candidate
+        }
+
+        return adapted.values.sortedBy { it.cost }.take(limit)
+    }
+
+    private enum class EnglishCasePattern { LOWER, CAPITALIZED, UPPER, MIXED }
+
+    private fun englishCasePattern(s: String): EnglishCasePattern {
+        val letters = s.filter { it.isLetter() }
+        if (letters.isEmpty()) return EnglishCasePattern.LOWER
+        return when {
+            letters.all { it.isLowerCase() } -> EnglishCasePattern.LOWER
+            letters.all { it.isUpperCase() } ->
+                if (letters.length == 1) EnglishCasePattern.CAPITALIZED else EnglishCasePattern.UPPER
+            letters.first().isUpperCase() && letters.drop(1).all { it.isLowerCase() } ->
+                EnglishCasePattern.CAPITALIZED
+            else -> EnglishCasePattern.MIXED
+        }
+    }
+
+    /** True when the case is part of the word itself: iPhone, GitHub, AI, I. */
+    private fun hasIntrinsicCase(surface: String): Boolean {
+        val letters = surface.filter { it.isLetter() }
+        if (letters.length < 2) return surface.any { it.isUpperCase() }
+        return letters.drop(1).any { it.isUpperCase() }
+    }
+
+    /**
+     * Returns the surface to show for [pattern] plus a cost penalty.
+     * Plain words are re-cased freely; intrinsic-case words keep their
+     * stored form and take a penalty when it clashes with the pattern.
+     */
+    private fun adaptEnglishCase(surface: String, pattern: EnglishCasePattern): Pair<String, Int> {
+        if (hasIntrinsicCase(surface)) {
+            val own = englishCasePattern(surface)
+            val clash = when (pattern) {
+                EnglishCasePattern.LOWER ->
+                    own == EnglishCasePattern.CAPITALIZED || own == EnglishCasePattern.UPPER
+                EnglishCasePattern.CAPITALIZED ->
+                    own == EnglishCasePattern.LOWER || own == EnglishCasePattern.UPPER
+                EnglishCasePattern.UPPER ->
+                    own == EnglishCasePattern.LOWER || own == EnglishCasePattern.CAPITALIZED
+                EnglishCasePattern.MIXED -> false
+            }
+            return surface to if (clash) ENGLISH_CASE_MISMATCH_PENALTY else 0
+        }
+        val adapted = when (pattern) {
+            EnglishCasePattern.LOWER -> surface.lowercase()
+            EnglishCasePattern.CAPITALIZED ->
+                surface.lowercase().replaceFirstChar { it.uppercase() }
+            EnglishCasePattern.UPPER -> surface.uppercase()
+            EnglishCasePattern.MIXED -> surface
+        }
+        return adapted to 0
     }
 
     /**
@@ -2104,6 +2251,15 @@ class NacreDictionary internal constructor(
         // conversions, so when a real conversion exists they must not take the
         // top by default. Benchmark-tuned (E3): 1500.
         private const val PASS_THROUGH_PENALTY = 1500
+
+        /** 0-based slot the best exact-match loanword candidate is promoted to. */
+        private const val LOANWORD_PROMOTE_INDEX = 4
+
+        /** Demotion for intrinsic-case words clashing with the typed case. */
+        private const val ENGLISH_CASE_MISMATCH_PENALTY = 1200
+
+        /** Max keys scanned per predictEnglish() prefix query (see step 2). */
+        private const val ENGLISH_PREFIX_SCAN_LIMIT = 500
 
         // Dictionary snapshot (fast restart): magic "NCSP", on-disk layout
         // version — bump when the serialized layout or DictEntry changes.
