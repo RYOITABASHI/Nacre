@@ -34,35 +34,48 @@ class LayoutSelector(private val detector: FoldableDetector) {
         const val KEY_SUB_DISPLAY_MODE = "sub_display_mode"
         /** Layout preference for the main / wide display (>= 500dp) only. */
         const val KEY_MAIN_DISPLAY_MODE = "main_display_mode"
+
+        /**
+         * The pure layout decision (no Android dependencies), split out so the
+         * fold behaviour is JVM-testable. [selectLayout] only gathers the
+         * inputs — current window width, sub-display state, stored
+         * preferences — and delegates here.
+         *
+         * Decision tree:
+         *  - widthDp >= 500  -> main-display preference (default StandardQwerty; V-Split opt-in)
+         *  - foldable sub    -> sub-display preference (default FlickInput12Key)
+         *  - widthDp >= 380  -> StandardQwerty (normal phone)
+         *  - else            -> QuickInputPad (very small sub-display / fallback)
+         */
+        fun decideLayout(
+            widthDp: Float,
+            isSubDisplay: Boolean,
+            mainDisplayMode: LayoutMode,
+            subDisplayMode: LayoutMode,
+        ): LayoutMode = when {
+            widthDp >= 500f -> mainDisplayMode
+            isSubDisplay -> subDisplayMode
+            widthDp >= 380f -> LayoutMode.StandardQwerty
+            else -> LayoutMode.QuickInputPad
+        }
     }
 
     private val prefs = detector.context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     /**
      * Determines the best layout mode for the current screen configuration.
-     *
-     * Decision tree:
-     *  - widthDp >= 500  -> user preference (default StandardQwerty; V-Split opt-in)
-     *  - foldable sub    -> user preference (default FlickInput12Key)
-     *  - widthDp >= 380  -> StandardQwerty (normal phone)
-     *  - widthDp >= 200  -> QuickInputPad (very small sub-display)
-     *  - else            -> QuickInputPad (fallback)
+     * Preferences are read fresh on every call so a Settings change applies
+     * on the next pick; the cover and main displays have separate preferences
+     * and never affect each other.
      */
     fun selectLayout(): LayoutMode {
         val widthDp = detector.getScreenWidthDp()
-
-        return when {
-            // Main / unfolded display: user preference, read fresh so a Settings
-            // change applies on the next keyboard open. The cover display is
-            // unaffected (it has its own preference below).
-            widthDp >= 500f -> loadMainDisplayMode()
-            // Foldable cover / sub-display: user preference, read fresh so a Settings
-            // toggle applies on the next keyboard open. The main display is unaffected.
-            detector.isSubDisplay() -> loadSubDisplayMode()
-            widthDp >= 380f -> LayoutMode.StandardQwerty
-            widthDp >= 200f -> LayoutMode.QuickInputPad
-            else -> LayoutMode.QuickInputPad
-        }
+        return decideLayout(
+            widthDp = widthDp,
+            isSubDisplay = detector.isSubDisplay(),
+            mainDisplayMode = loadMainDisplayMode(),
+            subDisplayMode = loadSubDisplayMode(),
+        )
     }
 
     private fun loadMainDisplayMode(): LayoutMode {

@@ -38,6 +38,7 @@ import space.manus.nacre.ime.pointer.FlexPointerBridge
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -97,9 +98,22 @@ class NacreInputMethodService :
      * Bumped to make [KeyboardScreen] re-pick the layout. The input view is cached
      * (onCreateInputView returns the existing view) and never recomposes on its own,
      * so a layout/settings change — e.g. toggling "12キー入力" — stays invisible until
-     * this epoch advances. Bumped on every keyboard show (onStartInputView).
+     * this epoch advances. Bumped on every keyboard show (onStartInputView) and on
+     * every configuration change (fold/unfold, rotation — see onConfigurationChanged).
      */
     val layoutEpoch = androidx.compose.runtime.mutableStateOf(0)
+
+    /** Pending post-fold layout re-pick; see [onConfigurationChanged]. */
+    private var foldSettleJob: Job? = null
+
+    companion object {
+        /**
+         * Window-metrics settle window after a configuration change before the
+         * layout is re-picked a second time. Same 350ms the old code waited
+         * before recreating the view — now spent with the keyboard on screen.
+         */
+        private const val FOLD_SETTLE_MS = 350L
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -369,15 +383,31 @@ class NacreInputMethodService :
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // SPEC: 300-500ms delay for foldable screen size stabilization
-        serviceScope.launch {
-            delay(350L)
-            inputViewContainer?.let { container ->
-                (container.parent as? ViewGroup)?.removeView(container)
-                container.removeAllViews()
-            }
-            inputViewContainer = null
-            setInputView(onCreateInputView())
+        // Fold/unfold and rotation land here. The input view is NOT recreated:
+        // the old behaviour waited 350ms ("foldable screen size stabilization"),
+        // then detached the view, emptied it and built a brand-new composition.
+        // That blanked the keyboard on every fold and destroyed every piece of
+        // Compose-held state — the flick pad's mode (かな/ABC/123), the candidate
+        // bar's scroll position and expand-all state, and any open panel
+        // (clipboard / emoji / symbols / command palette / flex pointer).
+        // None of it has to die: InputEngine (composing text, candidates,
+        // conversion state) is service-scoped and untouched by view lifecycle,
+        // and the layout re-pick only needs the epoch bump KeyboardScreen
+        // already honours on every keyboard show. The cached view stays
+        // attached and relayouts against the new window size in place, so the
+        // layout still switches (cover 12-key <-> main QWERTY) — just without
+        // the blank gap and the state loss.
+        currentTheme = space.manus.nacre.config.ThemeProvider.loadSelectedTheme(this)
+        layoutEpoch.value++
+        // Window metrics can lag the fold animation, so re-pick once more
+        // after the old stabilization window. This is a pure recomposition
+        // trigger — the view is never detached, and if the layout is already
+        // correct the second pick changes nothing on screen. A further
+        // configuration change supersedes the pending re-pick.
+        foldSettleJob?.cancel()
+        foldSettleJob = serviceScope.launch {
+            delay(FOLD_SETTLE_MS)
+            layoutEpoch.value++
         }
     }
 
