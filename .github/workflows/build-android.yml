@@ -25,8 +25,26 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Setup Android SDK (preinstalled on runner)
+        run: |
+          # android-actions/setup-android@v3 started failing in ~20s on current
+          # runners (runs #267/#268, Nov 2026), before any project code runs, so
+          # no build has completed since build 365 (Aug 2026). The ubuntu runner
+          # image already ships an Android SDK — use it directly instead of
+          # provisioning one through a third-party action.
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "${GITHUB_ENV}"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "${GITHUB_ENV}"
+          echo "${SDK_ROOT}/cmdline-tools/latest/bin" >> "${GITHUB_PATH}"
+          echo "${SDK_ROOT}/platform-tools" >> "${GITHUB_PATH}"
+          SDKMANAGER="${SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "${SDKMANAGER}" ]; then
+            echo "::error::sdkmanager not found at ${SDKMANAGER} — runner image no longer ships an Android SDK"
+            exit 1
+          fi
+          yes | "${SDKMANAGER}" --sdk_root="${SDK_ROOT}" --licenses > /dev/null
+          "${SDKMANAGER}" --sdk_root="${SDK_ROOT}" \
+            "platform-tools" "platforms;android-34" "build-tools;35.0.0"
 
       - name: Install NDK and CMake
         run: |
