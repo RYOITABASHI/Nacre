@@ -37,7 +37,24 @@ object RefinePresets {
 
     private const val PREFS = "nacre_refine"
     private const val KEY_ACTIVE = "active_preset"
+    private const val KEY_AUTO_BY_APP = "auto_by_app"
+    private const val KEY_CATEGORY_PREFIX = "cat_preset_"
     private const val DEFAULT_ID = "clean"
+
+    /**
+     * Generic per-category defaults for the auto (per-app) mode: which
+     * preset a category of app gets until the user remaps it in Settings.
+     * Keys are VoiceAppCategory names (ime-core); kept as plain strings
+     * here so this module needs no dependency on the resolver.
+     */
+    val DEFAULT_CATEGORY_PRESETS: Map<String, String> = mapOf(
+        "MAIL" to "keigo",
+        "CHAT" to "clean",
+        "BROWSER" to "clean",
+        "CODE" to "clean",
+        "NOTES" to "bullets",
+        "OTHER" to "clean",
+    )
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
@@ -46,6 +63,28 @@ object RefinePresets {
     fun setActiveId(ctx: Context, id: String) {
         prefs(ctx).edit().putString(KEY_ACTIVE, id).apply()
     }
+
+    /** Per-app tone: when true, sessions resolve their preset from the
+     *  foreground app's category mapping instead of the manual choice. */
+    fun autoByAppEnabled(ctx: Context): Boolean =
+        prefs(ctx).getBoolean(KEY_AUTO_BY_APP, false)
+
+    fun setAutoByAppEnabled(ctx: Context, enabled: Boolean) {
+        prefs(ctx).edit().putBoolean(KEY_AUTO_BY_APP, enabled).apply()
+    }
+
+    /** Preset id mapped to an app category (generic category name, e.g.
+     *  "MAIL"), falling back to [DEFAULT_CATEGORY_PRESETS]. */
+    fun categoryPresetId(ctx: Context, categoryName: String): String =
+        prefs(ctx).getString(KEY_CATEGORY_PREFIX + categoryName, null)
+            ?: DEFAULT_CATEGORY_PRESETS[categoryName]
+            ?: DEFAULT_ID
+
+    fun setCategoryPresetId(ctx: Context, categoryName: String, presetId: String) {
+        prefs(ctx).edit().putString(KEY_CATEGORY_PREFIX + categoryName, presetId).apply()
+    }
+
+    fun presetById(id: String): Preset = PRESETS.firstOrNull { it.id == id } ?: PRESETS.first()
 
     fun active(ctx: Context): Preset =
         PRESETS.firstOrNull { it.id == activeId(ctx) } ?: PRESETS.first()

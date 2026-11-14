@@ -160,6 +160,9 @@ fun CandidateBar(
                         if (voiceRefineState == VoiceRefineUiState.UNAVAILABLE) {
                             append(" 整文不可")
                         }
+                        if (service.voiceInputManager.isVoiceEditMode) {
+                            append(" ✏️編集モード")
+                        }
                     }
                 },
                 color = when {
