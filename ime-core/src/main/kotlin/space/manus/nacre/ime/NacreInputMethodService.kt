@@ -119,8 +119,12 @@ class NacreInputMethodService :
         layoutSelector = LayoutSelector(foldableDetector)
         physicalKeyboardDetector = PhysicalKeyboardDetector(this)
         voiceInputManager = VoiceInputManager(this)
-        voiceInputManager.bindWhisperService()
-        voiceInputManager.bindLlmService()
+        // NOTE: the :whisper / :llm services are intentionally NOT bound here.
+        // Binding with BIND_AUTO_CREATE would keep two extra processes (and a
+        // ~1GB local LLM) resident for the IME's whole lifetime even when the
+        // user never uses voice or LLM features. VoiceInputManager now binds
+        // lazily on first use (startListening / predictNextViaLlm /
+        // tryLlmRefinement) and stays bound afterwards — see ensure*Bound().
         keyLighting = KeyLighting(this)
 
         clipboardManager.startListening()
