@@ -59,46 +59,23 @@ jobs:
 
       - name: Clone llama.cpp source for native build
         run: |
-          # Pin to b3500 (mid-July 2024) — matches the pre-sampler-chain API in
-          # nacre_llama_jni.cpp (llama_load_model_from_file / llama_batch_add /
-          # llama_sample_token_greedy). At this tag sources live under src/,
-          # ggml/ and include/; CMakeLists expects a flat llama/ dir, so we
-          # find-and-flatten below.
-          git clone --depth 1 --branch b3500 https://github.com/ggerganov/llama.cpp.git /tmp/llama-src
-          echo "--- source tree ---"
-          ls /tmp/llama-src
-          [ -d /tmp/llama-src/src ] && echo "src/:" && ls /tmp/llama-src/src
-          [ -d /tmp/llama-src/ggml ] && echo "ggml/:" && ls /tmp/llama-src/ggml
-
-          DEST=ime-ai/src/main/cpp/llama
-          mkdir -p "$DEST"
-
-          # Flatten llama.cpp core sources (src/ or root) into DEST.
-          # Skip common/ — nacre_llama_jni.cpp only uses core llama APIs
-          # (llama.h), never the helpers in common/.
-          for name in llama.cpp llama-grammar.cpp llama-sampling.cpp llama-vocab.cpp \
-                      unicode.cpp unicode-data.cpp; do
-            f=$(find /tmp/llama-src -maxdepth 3 -name "$name" -type f -not -path "*/examples/*" -not -path "*/tests/*" | head -n1)
-            if [ -n "$f" ]; then cp "$f" "$DEST/"; else echo "::warning::$name not found"; fi
-          done
-
-          # ggml sources (src/ or ggml/src or root). ggml-aarch64.c holds the
-          # ARM64 SIMD kernels (quantize_q4_0_*, ggml_gemv/gemm_q4_0_*x*_q8_0);
-          # without it the link step fails with undefined symbols.
-          for name in ggml.c ggml-alloc.c ggml-backend.c ggml-quants.c ggml-aarch64.c; do
-            f=$(find /tmp/llama-src -maxdepth 4 -name "$name" -type f | head -n1)
-            if [ -n "$f" ]; then cp "$f" "$DEST/"; else echo "::warning::$name not found"; fi
-          done
-
-          # Headers — public ones live in include/ at b3500
-          find /tmp/llama-src/include -maxdepth 2 -name "*.h" -exec cp {} "$DEST/" \; 2>/dev/null || true
-          find /tmp/llama-src/src -maxdepth 2 -name "*.h" -exec cp {} "$DEST/" \; 2>/dev/null || true
-          find /tmp/llama-src/ggml/include -maxdepth 2 -name "*.h" -exec cp {} "$DEST/" \; 2>/dev/null || true
-          find /tmp/llama-src/ggml/src -maxdepth 2 -name "*.h" -exec cp {} "$DEST/" \; 2>/dev/null || true
-          find /tmp/llama-src -maxdepth 1 -name "*.h" -exec cp {} "$DEST/" \; 2>/dev/null || true
-
-          echo "--- llama/ contents ---"
-          ls "$DEST/"
+          # Pin: tools/llama-pin.txt (b12381; was b3500 in-workflow). The
+          # tree is copied whole and built via upstream's own CMake
+          # (add_subdirectory in ime-ai/src/main/cpp/CMakeLists.txt); the
+          # b3500-era flat-file flattening cannot cover the modern
+          # multi-file src/ + ggml layout (ggml-base/ggml-cpu split,
+          # ~40 src/*.cpp files). Bump the pin by editing
+          # tools/llama-pin.txt only — no workflow change needed.
+          LLAMA_TAG="$(tr -d '[:space:]' < tools/llama-pin.txt)"
+          echo "llama.cpp pin: ${LLAMA_TAG}"
+          git clone --depth 1 --branch "${LLAMA_TAG}" https://github.com/ggml-org/llama.cpp.git /tmp/llama-src
+          rm -rf ime-ai/src/main/cpp/llama.cpp
+          mkdir -p ime-ai/src/main/cpp/llama.cpp
+          cp -r /tmp/llama-src/. ime-ai/src/main/cpp/llama.cpp/
+          rm -rf ime-ai/src/main/cpp/llama.cpp/.git
+          echo "--- llama.cpp tree ---"
+          ls ime-ai/src/main/cpp/llama.cpp
+          ls ime-ai/src/main/cpp/llama.cpp/src/llama-vocab.cpp
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4

@@ -6,76 +6,46 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 
 # --- llama.cpp ---
-# Source: https://github.com/ggerganov/llama.cpp
-# Place llama.cpp source in ime-ai/src/main/cpp/llama/
-set(LLAMA_DIR ${CMAKE_SOURCE_DIR}/llama)
-if(EXISTS ${LLAMA_DIR}/llama.cpp)
+# Source: https://github.com/ggml-org/llama.cpp (pinned tag: see
+# tools/llama-pin.txt; the CI step clones the tag and copies the whole
+# tree into ime-ai/src/main/cpp/llama.cpp/). Built via upstream's own
+# CMake (add_subdirectory) — the pre-b12381 flat-file flattening cannot
+# cover the modern multi-file src/ + ggml layout.
+set(LLAMA_SRC_DIR ${CMAKE_SOURCE_DIR}/llama.cpp)
+if(EXISTS ${LLAMA_SRC_DIR}/CMakeLists.txt)
     # --- zenz pre-tokenizer patch (configure-time, additive) ---
-    # The zenz GGUF declares tokenizer pre-type "gpt2-small-japanese-char",
-    # which upstream llama.cpp (any version, incl. the pinned b3500) rejects
-    # with "unknown pre-tokenizer type". The azooKey fork (b4846) supports it
-    # by mapping that string to the standard GPT-2 pre-tokenizer — the fork's
-    # BPE regex for the new type is byte-identical to GPT-2's, and zenz's
-    # tokenizer is char-level GPT-2 BPE, so the mapping is exact (verified on
-    # desktop: token ids and greedy outputs match the fork for reference
-    # sentences). Port ONLY that mapping: read the flattened llama.cpp,
-    # extend the existing "gpt-2" dispatch condition, and compile the patched
-    # copy from the binary dir. The new branch can only trigger for models
-    # whose GGUF pre string is exactly "gpt2-small-japanese-char"; qwen2 /
-    # gpt-2 models never take it. Fail the build loudly if the anchor is
-    # missing (e.g. after a future llama.cpp pin bump) instead of silently
-    # shipping a build where zenz cannot load.
-    set(LLAMA_MAIN_SRC ${LLAMA_DIR}/llama.cpp)
-    file(READ ${LLAMA_DIR}/llama.cpp NACRE_LLAMA_CPP)
+    # Same patch as the b3500 era, retargeted: the pre-tokenizer dispatch
+    # moved from llama.cpp (b3500: src/llama.cpp) to src/llama-vocab.cpp.
+    # The anchor string is byte-identical. Fail loudly if it vanishes.
+    set(NACRE_VOCAB_SRC ${LLAMA_SRC_DIR}/src/llama-vocab.cpp)
+    file(READ ${NACRE_VOCAB_SRC} NACRE_VOCAB_CPP)
     set(NACRE_PRETOK_ANCHOR "                    tokenizer_pre == \"gpt-2\"   ||")
-    string(FIND "${NACRE_LLAMA_CPP}" "${NACRE_PRETOK_ANCHOR}" NACRE_PRETOK_POS)
+    string(FIND "${NACRE_VOCAB_CPP}" "${NACRE_PRETOK_ANCHOR}" NACRE_PRETOK_POS)
     if(NACRE_PRETOK_POS EQUAL -1)
         message(FATAL_ERROR
-            "zenz pre-tokenizer patch: anchor not found in llama.cpp — "
+            "zenz pre-tokenizer patch: anchor not found in llama-vocab.cpp — "
             "the pinned llama.cpp changed its pre-tokenizer dispatch; "
             "re-check the patch against the new source before building.")
     endif()
     string(REPLACE "${NACRE_PRETOK_ANCHOR}"
         "${NACRE_PRETOK_ANCHOR}\n                    tokenizer_pre == \"gpt2-small-japanese-char\" ||"
-        NACRE_LLAMA_CPP_PATCHED "${NACRE_LLAMA_CPP}")
-    set(NACRE_LLAMA_CPP_PATCHED_FILE ${CMAKE_CURRENT_BINARY_DIR}/llama-zenz.cpp)
-    file(WRITE ${NACRE_LLAMA_CPP_PATCHED_FILE} "${NACRE_LLAMA_CPP_PATCHED}")
-    set(LLAMA_MAIN_SRC ${NACRE_LLAMA_CPP_PATCHED_FILE})
-    unset(NACRE_LLAMA_CPP)
-    unset(NACRE_LLAMA_CPP_PATCHED)
+        NACRE_VOCAB_CPP_PATCHED "${NACRE_VOCAB_CPP}")
+    file(WRITE ${NACRE_VOCAB_SRC} "${NACRE_VOCAB_CPP_PATCHED}")
+    unset(NACRE_VOCAB_CPP)
+    unset(NACRE_VOCAB_CPP_PATCHED)
 
-    # Core llama.cpp + ggml only. nacre_llama_jni.cpp does not depend on
-    # common/ (which would pull nlohmann json, a build_info generator, etc.).
-    # If unicode*.cpp were copied by the CI flatten step, include them.
-    set(LLAMA_CORE_SRCS
-        ${LLAMA_MAIN_SRC}
-        ${LLAMA_DIR}/llama-grammar.cpp
-        ${LLAMA_DIR}/llama-sampling.cpp
-        ${LLAMA_DIR}/llama-vocab.cpp
-        ${LLAMA_DIR}/ggml.c
-        ${LLAMA_DIR}/ggml-alloc.c
-        ${LLAMA_DIR}/ggml-backend.c
-        ${LLAMA_DIR}/ggml-quants.c
-    )
-    if(EXISTS ${LLAMA_DIR}/ggml-aarch64.c)
-        # ARM64 SIMD kernels — required on arm64-v8a Android for Q4_0 quantization.
-        list(APPEND LLAMA_CORE_SRCS ${LLAMA_DIR}/ggml-aarch64.c)
-    endif()
-    if(EXISTS ${LLAMA_DIR}/unicode.cpp)
-        list(APPEND LLAMA_CORE_SRCS ${LLAMA_DIR}/unicode.cpp)
-    endif()
-    if(EXISTS ${LLAMA_DIR}/unicode-data.cpp)
-        list(APPEND LLAMA_CORE_SRCS ${LLAMA_DIR}/unicode-data.cpp)
-    endif()
-    add_library(llama STATIC ${LLAMA_CORE_SRCS})
-    target_include_directories(llama PUBLIC ${LLAMA_DIR})
-    target_compile_definitions(llama PRIVATE
-        GGML_USE_CPU
-        NDEBUG
-    )
+    # Static, library-only build of llama.cpp inside libnacre-ai.so.
+    set(BUILD_SHARED_LIBS OFF)
+    set(LLAMA_BUILD_COMMON OFF)
+    set(LLAMA_BUILD_TESTS OFF)
+    set(LLAMA_BUILD_TOOLS OFF)
+    set(LLAMA_BUILD_EXAMPLES OFF)
+    set(LLAMA_BUILD_SERVER OFF)
+    set(LLAMA_BUILD_APP OFF)
+    add_subdirectory(${LLAMA_SRC_DIR} ${CMAKE_CURRENT_BINARY_DIR}/llama.cpp-build EXCLUDE_FROM_ALL)
     set(LLAMA_AVAILABLE TRUE)
 else()
-    message(WARNING "llama.cpp sources not found at ${LLAMA_DIR}. Building stub.")
+    message(WARNING "llama.cpp sources not found at ${LLAMA_SRC_DIR}. Building stub.")
     set(LLAMA_AVAILABLE FALSE)
 endif()
 
