@@ -9,21 +9,28 @@ object FlickEngine {
     enum class Direction { Tap, Left, Up, Right, Down }
 
     /**
-     * Keys of the pad's left column, top to bottom. The four direct mode
-     * keys keep their one-tap jumps; CursorLeft sits SECOND — the slot
-     * Gboard's Japanese 12-key gives its ◀ (left column, flanking the
-     * た row). FlickSideColumn renders this list positionally; the column
-     * divides the grid height into five equal slots (mode keys 50dp →
-     * 40dp at scale 1.0). Pinned by FlickLayoutTest.
+     * Keys of the pad's left column, top to bottom — Gboard's Japanese
+     * 12-key column (owner's own Gboard, screenshot-verified):
+     * ↩ undo / ◀ / ☺記 / あa1. Nacre has no undo implementation, so
+     * the top slot stays an inert [SideColumnKey.UndoSlot] placeholder
+     * reserving Gboard's ↩ position; the real keys keep their Gboard
+     * slots — CursorLeft SECOND (flanking the た row), Emoji THIRD,
+     * and the consolidated ModeCycle key LAST, at the pad's bottom
+     * edge. ModeCycle replaces the former ☆123 / ABC / あいう direct
+     * keys (owner decision, 2026-11-16): one key cycles
+     * kana → alpha → numbers → kana, so mode switching has a single
+     * home and a downward overshoot can no longer land on 絵記.
+     * FlickSideColumn renders this list positionally; the column
+     * divides the grid height into four equal row slots (50dp at
+     * scale 1.0). Pinned by FlickLayoutTest.
      */
-    enum class SideColumnKey { Numbers, CursorLeft, Alpha, Kana, Emoji }
+    enum class SideColumnKey { UndoSlot, CursorLeft, Emoji, ModeCycle }
 
     val sideColumnKeys: List<SideColumnKey> = listOf(
-        SideColumnKey.Numbers,
+        SideColumnKey.UndoSlot,
         SideColumnKey.CursorLeft,
-        SideColumnKey.Alpha,
-        SideColumnKey.Kana,
         SideColumnKey.Emoji,
+        SideColumnKey.ModeCycle,
     )
 
     /**
