@@ -83,9 +83,17 @@ fun KeyView(
     val isAltKey = keyDef.action is KeyAction.Alt
     val isAltActive = isAltKey && service.layerManager.isAltActive
 
+    // Shift shows its state like the other mode keys: highlighted while
+    // pre-armed (classic one-shot) and right after a post-hoc ⇧ press on
+    // the 12-key ABC grid rewrote the word before the cursor.
+    val isShiftKey = keyDef.action is KeyAction.Shift
+    val isShiftActive = isShiftKey &&
+        (service.layerManager.isShifted || service.inputEngine.flickShiftApplied)
+
     val bgColor = when {
         isPressed -> KeyBgPressed
         isAltActive -> KeyBgPressed
+        isShiftActive -> KeyBgPressed
         isFnKey -> KeyBg
         else -> KeyBg
     }
@@ -93,6 +101,7 @@ fun KeyView(
     val textColor = when {
         isPressed -> GlowColor
         isAltActive -> GlowColor
+        isShiftActive -> GlowColor
         else -> KeyText
     }
 
