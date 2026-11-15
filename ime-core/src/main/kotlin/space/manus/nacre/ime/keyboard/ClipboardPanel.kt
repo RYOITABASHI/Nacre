@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -40,6 +41,16 @@ fun ClipboardPanel(
     val clipboardManager = service.clipboardManager
     val entries = clipboardManager.history
     val dateFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    // Pick up a clip copied while the IME view was hidden (some devices
+    // only let the IME read the clipboard while its view is shown). The
+    // manager's observable currentClipText marks the matching entry.
+    LaunchedEffect(Unit) { clipboardManager.captureCurrentClip() }
+    val currentClip = clipboardManager.currentClipText
+    fun isCurrent(entry: ClipboardEntry): Boolean {
+        val clip = currentClip ?: return false
+        return entry.text == clip || (entry.truncated && clip.startsWith(entry.text))
+    }
 
     Column(
         modifier = Modifier
@@ -131,8 +142,17 @@ fun ClipboardPanel(
                             modifier = Modifier.weight(1f),
                         )
                         Spacer(modifier = Modifier.width(8.dp))
+                        if (isCurrent(entry)) {
+                            Text(
+                                text = "Current",
+                                color = AccentColor,
+                                fontSize = 10.sp,
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                        }
                         Text(
-                            text = dateFormat.format(Date(entry.timestamp)),
+                            text = dateFormat.format(Date(entry.timestamp)) +
+                                if (entry.truncated) " · partial" else "",
                             color = TimestampText,
                             fontSize = 11.sp,
                         )

@@ -125,7 +125,9 @@ class NacreInputMethodService :
         currentTheme = space.manus.nacre.config.ThemeProvider.loadSelectedTheme(this)
         inputEngine = InputEngine(this)
         feedbackManager = FeedbackManager(this)
-        clipboardManager = ClipboardManager(this)
+        // The password-field provider keeps clips copied while a password
+        // field is focused out of the clipboard history (privacy).
+        clipboardManager = ClipboardManager(this) { inputEngine.isPasswordField }
         macroEngine = MacroEngine(this)
         snippetEngine = SnippetEngine(this)
         autoConvertEngine = AutoConvertEngine(this)

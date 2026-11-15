@@ -253,10 +253,14 @@ class InputEngine(private val service: NacreInputMethodService) {
             // Only check password variation when the class is actually TYPE_CLASS_TEXT
             // Termux uses TYPE_CLASS_TEXT with TYPE_TEXT_VARIATION_NORMAL (0x0) or TYPE_NULL
             val isTextClass = inputType == InputType.TYPE_CLASS_TEXT
-            val isPassword = isTextClass && (
+            val isPassword = (isTextClass && (
                 variation == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
                 variation == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
                 variation == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+            )) || (
+                // PIN fields: TYPE_CLASS_NUMBER + TYPE_NUMBER_VARIATION_PASSWORD
+                inputType == InputType.TYPE_CLASS_NUMBER &&
+                variation == InputType.TYPE_NUMBER_VARIATION_PASSWORD
             )
             val isNumber = inputType == InputType.TYPE_CLASS_NUMBER ||
                 inputType == InputType.TYPE_CLASS_PHONE
