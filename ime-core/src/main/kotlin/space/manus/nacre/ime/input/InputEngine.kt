@@ -151,6 +151,16 @@ class InputEngine(private val service: NacreInputMethodService) {
      * layerManager.isJapanese (which drives QWERTY + voice language).
      */
     var flickAlphaMode: Boolean = false
+
+    /**
+     * True right after a ⇧ press on the 12-key ABC grid rewrote the word
+     * before the cursor (post-hoc capitalization, see [processShiftKey]).
+     * Observable so the Shift key can show its "applied" state alongside
+     * the classic armed state; cleared by the next input of any other kind.
+     */
+    var flickShiftApplied by mutableStateOf(false)
+        private set
+
     private var predictionJob: Job? = null
 
     // zenz neural conversion: async job + a sequence number that invalidates
@@ -404,6 +414,9 @@ class InputEngine(private val service: NacreInputMethodService) {
     fun processAction(action: KeyAction) {
         val ic = service.currentInputConnection ?: return
 
+        // Any action other than ⇧ ends the post-hoc shift "applied" state.
+        if (action !is KeyAction.Shift) flickShiftApplied = false
+
         when (action) {
             is KeyAction.Text -> {
                 // Dismiss symbol candidates (、。？！) when typing next character
@@ -601,7 +614,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 }
             }
 
-            is KeyAction.Shift -> service.layerManager.toggleShift()
+            is KeyAction.Shift -> processShiftKey()
             is KeyAction.Fn -> service.layerManager.toggleFn()
             is KeyAction.FnPage2 -> service.layerManager.toggleFn2()
 
@@ -1440,6 +1453,7 @@ class InputEngine(private val service: NacreInputMethodService) {
     private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
     private val ZENZ_PREDICT_DEBOUNCE_MS = 300L // Composing must be stable this long before firing
     private val ZENZ_CONTEXT_FETCH_MARGIN = 40 // Extra chars fetched before the cursor so ZenzContext can align the cap to a sentence boundary
+    private val POST_HOC_SHIFT_FETCH_CHARS = 64 // Window read before the cursor for a post-hoc ⇧ press (bounds the rewritable word)
     private val flickToggle = FlickToggleState(TOGGLE_TIMEOUT_MS)
 
     // ABC-grid immediate-commit cycling (iPhone-style direct insertion)
@@ -1457,6 +1471,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         tapCycleOverride: List<String>? = null,
     ) {
         val ic = service.currentInputConnection ?: return
+        flickShiftApplied = false
         // Kana input supersedes any pending ABC replace-cycle: the pending
         // alpha character stays committed as-is.
         alphaCycler.reset()
@@ -1555,6 +1570,7 @@ class InputEngine(private val service: NacreInputMethodService) {
      */
     fun processFlickDirectText(text: String) {
         val ic = service.currentInputConnection ?: return
+        flickShiftApplied = false
         alphaCycler.reset()
         finalizeComposingForDirectInput(ic)
         ic.commitText(text, 1)
@@ -1580,6 +1596,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         tapCycle: List<String>? = null,
     ) {
         val ic = service.currentInputConnection ?: return
+        flickShiftApplied = false
         val wasConverting = isConverting
         if (wasConverting) commitSelectedCandidate(ic)
 
@@ -1623,6 +1640,68 @@ class InputEngine(private val service: NacreInputMethodService) {
         alphaCycler.reset()
         finalizeComposingForDirectInput(ic)
         ic.commitText(kana, 1)
+    }
+
+    /**
+     * Shift key entry for every layout. QWERTY keeps the classic behavior
+     * (pre-arm one-shot, second press disarms). On the 12-key ABC grid the
+     * press is POST-HOC first: when a letter word sits right before the
+     * cursor, ⇧ rewrites that word's case (see [ShiftCaseCycle] for the
+     * cycle) instead of arming — on a tap-driven pad, noticing "that should
+     * have been a capital" after the letter is the common case, and
+     * pre-arming before every capital is pure friction. Only when there is
+     * no word to rewrite does the press fall back to the classic pre-arm.
+     */
+    fun processShiftKey() {
+        if (flickAlphaMode) {
+            // Seal any pending multi-tap state FIRST (the same confirm
+            // semantics as ▶ and the ゛゜小 key): the ABC replace-cycle and
+            // the kana toggle both settle, so the letter the user just
+            // tapped stays exactly as committed — and, being the last
+            // character before the cursor, it is the one the transform's
+            // first step uppercases.
+            alphaCycler.reset()
+            confirmFlickToggle()
+            if (tryPostHocCapitalize()) return
+        }
+        service.layerManager.toggleShift()
+    }
+
+    /**
+     * Rewrite the case of the word before the cursor per [ShiftCaseCycle].
+     * Returns true when the ⇧ press was consumed by the rewrite.
+     *
+     * Guards mirror [processFlickAlpha]'s replace path: never while a
+     * composition or conversion is live (the "previous text" would be
+     * composing text and deleting it would corrupt the composition),
+     * never with a live text selection (the rewrite would destroy the
+     * selected text), and never in a password field — the field's text is
+     * masked, so the press falls back to pre-arm there (capitals stay
+     * reachable the classic way). The word itself is only read through
+     * getTextBeforeCursor and rewritten in place; nothing is stored or
+     * learned from it.
+     */
+    private fun tryPostHocCapitalize(): Boolean {
+        if (isPasswordField) return false
+        if (isConverting || composingFlickKana.isNotEmpty() ||
+            composingText.isNotEmpty() || englishComposing.isNotEmpty()
+        ) return false
+        val ic = service.currentInputConnection ?: return false
+        // A live selection would be destroyed by the rewrite:
+        // deleteSurroundingText eats the word before the selection while
+        // commitText replaces the selection itself. Collapsed cursor only.
+        if (ic.getSelectedText(0) != null) return false
+        val before = ic.getTextBeforeCursor(POST_HOC_SHIFT_FETCH_CHARS, 0)?.toString()
+            ?: return false
+        val word = ShiftCaseCycle.wordBeforeCursor(before)
+        val transformed = ShiftCaseCycle.nextTransform(word) ?: return false
+        ic.deleteSurroundingText(word.length, 0)
+        ic.commitText(transformed, 1)
+        // The press was spent on the rewrite: a stale pre-arm must not
+        // leak onto the next letter the user types.
+        if (service.layerManager.isShifted) service.layerManager.toggleShift()
+        flickShiftApplied = true
+        return true
     }
 
     /**
