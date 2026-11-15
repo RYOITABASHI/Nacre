@@ -260,8 +260,10 @@ private fun FlickSideColumn(
  * conversion is active it adjusts the segment boundary — the same
  * adjustSegmentBoundary call the candidate bar's horizontal swipe
  * makes, but tappable, which matters for a tap-input user; otherwise
- * it sends the DPAD keycode (DPAD_RIGHT doubles as the tap-cyclers'
- * confirm in InputEngine). Styled after ModeSwitchKey.
+ * it routes to InputEngine.onFlickCursorKey, which seals a pending
+ * flick toggle on ▶ and moves the caret with setSelection (never a
+ * raw DPAD event — an unconsumed one can escape to the activity's
+ * focus search and hide the keyboard). Styled after ModeSwitchKey.
  */
 @Composable
 private fun FlickCursorKey(
@@ -300,12 +302,7 @@ private fun FlickCursorKey(
                     if (isConverting) {
                         service.inputEngine.adjustSegmentBoundary(direction)
                     } else {
-                        val keyCode = if (direction == SwipeDirection.Left) {
-                            android.view.KeyEvent.KEYCODE_DPAD_LEFT
-                        } else {
-                            android.view.KeyEvent.KEYCODE_DPAD_RIGHT
-                        }
-                        service.inputEngine.processAction(KeyAction.KeyCode(keyCode))
+                        service.inputEngine.onFlickCursorKey(direction)
                     }
                 }
             },
