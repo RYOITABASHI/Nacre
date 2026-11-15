@@ -1,5 +1,6 @@
 package space.manus.nacre.ime.keyboard
 
+import android.view.KeyEvent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -36,26 +37,29 @@ import space.manus.nacre.ime.input.FlickEngine
 import space.manus.nacre.ime.input.SwipeDirection
 import kotlin.math.abs
 
-/** Input mode for the 12-key pad. Selected directly by the iOS-style ☆123 / ABC / あいう keys. */
+/** Input mode for the 12-key pad. Cycled by the single Gboard-style あa1 key in the left column. */
 private enum class FlickMode { Kana, Alpha, Numbers }
 
 /**
- * Main 12-key input pad composable. The grid and mode column follow the
- * iPhone stock Japanese kana keyboard (verified against real-device
- * references — see the layout PR): a 4-row × 5-column grid whose centre
- * 3 columns are the twelve kana keys, flanked by a left column of direct
- * mode keys (☆123 / ABC / あいう / 絵記 — one tap jumps straight to a
- * mode, no cycling). There is NO separate 変換 key (空白 converts /
- * walks candidates, 改行 confirms — exactly the iPhone split).
- * Multi-tap (連打) on the centre keys cycles within a row (か→き→く→け→こ).
+ * Main 12-key input pad composable. The grid follows the iPhone stock
+ * Japanese kana keyboard (verified against real-device references —
+ * see the layout PR): a 4-row × 5-column grid whose centre 3 columns
+ * are the twelve kana keys. There is NO separate 変換 key (空白
+ * converts / walks candidates, 改行 confirms — exactly the iPhone
+ * split). Multi-tap (連打) on the centre keys cycles within a row
+ * (か→き→く→け→こ).
  *
- * The cursor arrows follow GBOARD's Japanese 12-key instead (owner's own
- * Gboard, screenshot-verified): ◀ sits in the left column SECOND from
- * the top and ▶ in the right strip SECOND from the top, both flanking
- * the た row. The left column therefore holds five equal slots
- * (☆123 / ◀ / ABC / あいう / 絵記 — mode keys 40dp at scale 1.0) and
- * the right strip four equal slots (⌫ / ▶ / 空白 / 改行); PR #46's
- * iPhone-style tall 改行 gave way to Gboard's equal strip.
+ * The flanking columns follow GBOARD's Japanese 12-key instead
+ * (owner's own Gboard, screenshot-verified): the left column is
+ * ↩ / ◀ / ☺記 / あa1 — the top slot is an inert placeholder (Nacre
+ * has no undo yet), ◀ sits in the left column SECOND from the top
+ * and ▶ in the right strip SECOND from the top, both flanking the
+ * た row, and mode switching is consolidated into the single あa1
+ * key at the bottom of the left column, which cycles
+ * kana → alpha → numbers → kana (the former ☆123 / ABC / あいう
+ * direct keys were retired by owner decision, 2026-11-16). The
+ * right strip holds four equal slots (⌫ / ▶ / 空白 / 改行);
+ * PR #46's iPhone-style tall 改行 gave way to Gboard's equal strip.
  * Below the grid, a slim 44dp row holds only 📋 (clipboard / palette),
  * the one Nacre-only function with no home in either stock layout.
  * Layout: candidate bar → [left column | 3-col grid | right strip] →
@@ -103,8 +107,8 @@ fun FlickInputPad(
         // Candidate bar only (no toolbar — functions covered by grid keys)
         CandidateBar(service = service)
 
-        // Grid: switches based on flickMode. Mode is set directly (iOS-style),
-        // not cycled — ☆123 / ABC / あいう jump straight to a mode.
+        // Grid: switches based on flickMode, cycled by the single あa1
+        // key in the left column (Gboard-style consolidation).
         val onSetMode: (FlickMode) -> Unit = { flickMode = it }
         when (flickMode) {
             FlickMode.Kana -> FlickKanaGrid(
@@ -218,14 +222,25 @@ private fun FlickKanaGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Left column: ☆123 / ◀ / ABC / あいう / 絵記 — five equal slots over
-// the grid's height, rendered positionally from
-// FlickEngine.sideColumnKeys (unit-tested). The four mode keys keep
-// their direct one-tap jumps (Nacre keeps 4 mode keys where Gboard has
-// a single cycling あa1 key); ◀ takes the second slot, Gboard's arrow
-// position. Equal division puts every slot at 40dp at scale 1.0
-// (mode keys were 50dp as grid-row cells).
+// Left column (Gboard): ↩ slot / ◀ / 絵記 / あa1 — four equal slots
+// over the grid's height, rendered positionally from
+// FlickEngine.sideColumnKeys (unit-tested). The top slot is an inert
+// placeholder reserving Gboard's ↩ undo position (Nacre has no undo
+// implementation yet, so nothing is wired to it). ◀ takes the second
+// slot, Gboard's arrow position; 絵記 the third. The あa1 key closes
+// the column at the pad's bottom edge and is the ONLY mode key: it
+// cycles kana → alpha → numbers → kana. It replaces the ☆123 / ABC /
+// あいう direct keys (owner decision, 2026-11-16) — the mode keys
+// used to sit directly above 絵記, and a downward overshoot when
+// switching back to kana kept opening the emoji panel instead.
 // ─────────────────────────────────────────────────────────────────
+
+/** Cycle order of the consolidated あa1 switch key: kana → alpha → numbers → kana. */
+private fun nextFlickMode(mode: FlickMode): FlickMode = when (mode) {
+    FlickMode.Kana -> FlickMode.Alpha
+    FlickMode.Alpha -> FlickMode.Numbers
+    FlickMode.Numbers -> FlickMode.Kana
+}
 
 @Composable
 private fun FlickSideColumn(
@@ -240,16 +255,16 @@ private fun FlickSideColumn(
     Column(modifier = modifier.height((rowH * 4).dp)) {
         FlickEngine.sideColumnKeys.forEach { key ->
             when (key) {
-                FlickEngine.SideColumnKey.Numbers ->
-                    ModeSwitchKey(label = "☆123", active = flickMode == FlickMode.Numbers, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Numbers) })
+                FlickEngine.SideColumnKey.UndoSlot ->
+                    // Reserved for Gboard's ↩ (undo) — inert until
+                    // Nacre has an undo implementation to wire here.
+                    Box(modifier = Modifier.weight(1f).fillMaxWidth())
                 FlickEngine.SideColumnKey.CursorLeft ->
                     FlickCursorKey(service = service, direction = SwipeDirection.Left, modifier = Modifier.weight(1f).fillMaxWidth())
-                FlickEngine.SideColumnKey.Alpha ->
-                    ModeSwitchKey(label = "ABC", active = flickMode == FlickMode.Alpha, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Alpha) })
-                FlickEngine.SideColumnKey.Kana ->
-                    ModeSwitchKey(label = "あいう", active = flickMode == FlickMode.Kana, modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onClick = { onSetMode(FlickMode.Kana) })
                 FlickEngine.SideColumnKey.Emoji ->
                     SymbolEmojiKey(label = "絵記", modifier = Modifier.weight(1f).fillMaxWidth(), service = service, onTap = onEmoji, onLongPress = onSymbols)
+                FlickEngine.SideColumnKey.ModeCycle ->
+                    ModeCycleKey(service = service, flickMode = flickMode, modifier = Modifier.weight(1f).fillMaxWidth(), onClick = { onSetMode(nextFlickMode(flickMode)) })
             }
         }
     }
@@ -263,7 +278,11 @@ private fun FlickSideColumn(
  * it routes to InputEngine.onFlickCursorKey, which seals a pending
  * flick toggle on ▶ and moves the caret with setSelection (never a
  * raw DPAD event — an unconsumed one can escape to the activity's
- * focus search and hide the keyboard). Styled after ModeSwitchKey.
+ * focus search and hide the keyboard). Exactly one key-press feedback
+ * (haptic + sound) fires per tap on either route, like the letter
+ * keys: the conversion route's tick comes from adjustSegmentBoundary
+ * itself, the cursor-move route fires it here.
+ * Styled after ModeCycleKey.
  */
 @Composable
 private fun FlickCursorKey(
@@ -276,9 +295,6 @@ private fun FlickCursorKey(
     val accentColor = Color(theme.accent.toInt())
     val surfaceColor = Color(theme.surface.toInt())
     val shape = RoundedCornerShape(6.dp)
-    // Read during composition so the key re-routes the moment a
-    // conversion starts or ends.
-    val isConverting = service.inputEngine.isConverting
 
     Box(
         modifier = modifier
@@ -299,10 +315,36 @@ private fun FlickCursorKey(
                         if (!change.pressed) { change.consume(); break }
                         change.consume()
                     }
-                    if (isConverting) {
+                    // Read live at release: pointerInput is keyed on
+                    // direction only, so a value captured at composition
+                    // would go stale the moment a conversion starts or
+                    // ends — the key must route by the CURRENT state.
+                    if (service.inputEngine.isConverting) {
+                        // adjustSegmentBoundary already fires the tap
+                        // tick itself (FeedbackManager.onSwipe inside
+                        // InputEngine) — no feedback is added here.
                         service.inputEngine.adjustSegmentBoundary(direction)
                     } else {
                         service.inputEngine.onFlickCursorKey(direction)
+                        // Same key feedback as the letter keys (the
+                        // PR #53 one-shot tap via
+                        // FeedbackManager.onKeyPress, with its strength /
+                        // system-toggle / power-save gating and cached
+                        // availability checks) — the cursor-move path
+                        // used to fire none at all (owner feedback,
+                        // 2026-11-16), so exactly one feedback fires
+                        // per tap on either path. The KeyCode token
+                        // mirrors the QWERTY ↑↓ keys, which reach
+                        // onKeyPress through KeyView.
+                        service.feedbackManager.onKeyPress(
+                            KeyAction.KeyCode(
+                                if (direction == SwipeDirection.Left) {
+                                    KeyEvent.KEYCODE_DPAD_LEFT
+                                } else {
+                                    KeyEvent.KEYCODE_DPAD_RIGHT
+                                },
+                            ),
+                        )
                     }
                 }
             },
@@ -452,7 +494,7 @@ private fun FlickAlphaGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Number grid (same iPhone-style skeleton: left modes + right strip)
+// Number grid (same skeleton: Gboard left column + right strip)
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -480,7 +522,7 @@ private fun FlickNumberGrid(
         )
         Column(modifier = Modifier.weight(1f + 1f + 1f)) {
             // Row 1: 1 | 2 | 3
-            // Digits commit immediately (iPhone ☆123 page) via FlickDirectKey —
+            // Digits commit immediately (iPhone number page) via FlickDirectKey —
             // they no longer route through the romaji composing buffer.
             Row(modifier = Modifier.fillMaxWidth().height(h)) {
                 FlickDirectKey(label = "1", service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
@@ -511,7 +553,7 @@ private fun FlickNumberGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Direct-commit key (☆123 digits, alpha "-"): tap / swipe-up / swipe-down
+// Direct-commit key (number-grid digits, alpha "-"): tap / swipe-up / swipe-down
 // insert IMMEDIATELY via InputEngine.processFlickDirectText — iPhone-style,
 // never the romaji/flick composing buffer, so no 確定 press is needed.
 // Visuals mirror FlickKeyView; vertical swipes use the shared threshold.
@@ -871,20 +913,22 @@ private fun FlickClipboardKey(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// iOS-style direct mode key (☆123 / ABC / あいう); highlighted when active
+// Consolidated mode key (Gboard's あa1): the pad's ONLY mode key.
+// One tap cycles kana → alpha → numbers → kana (see nextFlickMode).
+// The label shows all three modes; the current mode's glyph is
+// highlighted in the accent colour — the active style of the direct
+// ☆123 / ABC / あいう keys this replaces — the others stay dimmed.
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
-private fun ModeSwitchKey(
-    label: String,
+private fun ModeCycleKey(
     service: NacreInputMethodService,
+    flickMode: FlickMode,
     modifier: Modifier = Modifier,
-    active: Boolean = false,
     onClick: () -> Unit,
 ) {
     val theme = service.currentTheme
     val keyBg = Color(theme.keyBackground.toInt())
-    val keyBgPressed = Color(theme.keyBackgroundPressed.toInt())
     val keyText = Color(theme.keyText.toInt())
     val accentColor = Color(theme.accent.toInt())
     val surfaceColor = Color(theme.surface.toInt())
@@ -898,13 +942,12 @@ private fun ModeSwitchKey(
             .background(surfaceColor)
             .padding(bottom = 1.5.dp)
             .clip(shape)
-            .background(if (active) keyBgPressed else keyBg)
-            .border(
-                width = if (active) 1.dp else 0.5.dp,
-                color = if (active) accentColor else surfaceColor.copy(alpha = 0.5f),
-                shape = shape,
-            )
-            .pointerInput(label) {
+            .background(keyBg)
+            .border(0.5.dp, surfaceColor.copy(alpha = 0.5f), shape)
+            // Keyed on flickMode: the click target (the NEXT mode) is
+            // derived from the current one, so the gesture handler
+            // must restart with the fresh onClick after every cycle.
+            .pointerInput(flickMode) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     while (true) {
@@ -918,14 +961,23 @@ private fun ModeSwitchKey(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = label,
-            color = if (active) accentColor else keyText,
-            fontSize = if (label.length > 2) 10.sp else 12.sp,
-            fontWeight = FontWeight.Medium,
-            fontFamily = FontFamily.Monospace,
-            textAlign = TextAlign.Center,
-        )
+        Row {
+            listOf(
+                "あ" to FlickMode.Kana,
+                "a" to FlickMode.Alpha,
+                "1" to FlickMode.Numbers,
+            ).forEach { (glyph, mode) ->
+                val current = flickMode == mode
+                Text(
+                    text = glyph,
+                    color = if (current) accentColor else keyText.copy(alpha = 0.55f),
+                    fontSize = 14.sp,
+                    fontWeight = if (current) FontWeight.Bold else FontWeight.Medium,
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
     }
 }
 

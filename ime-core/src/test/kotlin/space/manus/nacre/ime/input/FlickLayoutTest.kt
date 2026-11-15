@@ -15,11 +15,13 @@ import org.junit.Test
  *     ま や ら
  *     ゛゜小 わ 、。？！   (゛゜小 is the dedicated DakutenKeyView)
  *
- * flanked by the left column (☆123 / ◀ / ABC / あいう / 絵記) and the
- * right strip (⌫ / ▶ / 空白 / 改行). The kana grid and mode keys follow
- * the iPhone arrangement; the arrow positions follow Gboard's Japanese
- * 12-key (◀ second in the left column, ▶ second in the right strip,
- * both flanking the た row — owner's own Gboard, screenshot-verified).
+ * flanked by the left column (↩ slot / ◀ / 絵記 / あa1) and the
+ * right strip (⌫ / ▶ / 空白 / 改行). The kana grid follows the iPhone
+ * arrangement; the flanking columns follow Gboard's Japanese 12-key
+ * (◀ second in the left column, ▶ second in the right strip, both
+ * flanking the た row; mode switching consolidated into the single
+ * あa1 key at the bottom of the left column — owner's own Gboard,
+ * screenshot-verified).
  * If the data order ever drifts, the rendered pad silently stops being
  * the stock arrangement — this test pins it.
  * Behavioural parity (cycles, tap counts, dakuten) lives in FlickParityTest.
@@ -54,18 +56,26 @@ class FlickLayoutTest {
 
     @Test
     fun `left column seats cursor-left second like Gboard`() {
-        // Gboard's ◀: left column, second from the top, flanking the
-        // た row. FlickSideColumn renders sideColumnKeys positionally;
-        // the four direct mode keys keep their slots around it.
+        // Gboard's left column: ↩ / ◀ / ☺記 / あa1. Nacre has no undo
+        // implementation, so the top slot is the inert UndoSlot
+        // placeholder reserving the ↩ position; ◀ stays second from
+        // the top, flanking the た row; 絵記 is third; and the
+        // consolidated あa1 cycle key (ModeCycle) closes the column at
+        // the bottom. The former ☆123 / ABC / あいう direct keys are
+        // gone (owner decision, 2026-11-16). FlickSideColumn renders
+        // sideColumnKeys positionally.
         assertEquals(
             listOf(
-                FlickEngine.SideColumnKey.Numbers,
+                FlickEngine.SideColumnKey.UndoSlot,
                 FlickEngine.SideColumnKey.CursorLeft,
-                FlickEngine.SideColumnKey.Alpha,
-                FlickEngine.SideColumnKey.Kana,
                 FlickEngine.SideColumnKey.Emoji,
+                FlickEngine.SideColumnKey.ModeCycle,
             ),
             FlickEngine.sideColumnKeys,
+        )
+        assertEquals(
+            FlickEngine.SideColumnKey.ModeCycle,
+            FlickEngine.sideColumnKeys.last(),
         )
     }
 
