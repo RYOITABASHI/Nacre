@@ -1229,6 +1229,21 @@ private fun LlmModelSection() {
     var progressPct by remember { mutableStateOf(0) }
     var progressBytes by remember { mutableStateOf(0L to 0L) }
 
+    // Qwen3 opt-in state (never auto-downloaded; see the block below).
+    var qwen3Path by remember { mutableStateOf<String?>(null) }
+    var qwen3Downloading by remember { mutableStateOf(false) }
+    var qwen3ProgressPct by remember { mutableStateOf(0) }
+    var qwen3ProgressBytes by remember { mutableStateOf(0L to 0L) }
+    var showQwen3Confirm by remember { mutableStateOf(false) }
+    var refineModelId by remember { mutableStateOf(space.manus.nacre.ai.RefineModel.selectedId(context)) }
+    val qwen3SizeMb = space.manus.nacre.ai.ModelDownloader.QWEN3_MODEL_BYTES / 1024 / 1024
+
+    fun refreshQwen3() {
+        qwen3Path = downloader.getQwen3ModelPath()
+    }
+
+    LaunchedEffect(Unit) { refreshQwen3() }
+
     // Re-check when resuming
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
@@ -1240,6 +1255,7 @@ private fun LlmModelSection() {
                     modelSize = java.io.File(found).length() / 1024 / 1024
                 }
             }
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) refreshQwen3()
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -1331,7 +1347,179 @@ private fun LlmModelSection() {
                     else "Download Qwen 2.5"
                 )
             }
+
+            // ── Refinement model selection ────────────────────────────
+            // Default stays Qwen 2.5. Qwen3 is used only when downloaded
+            // AND selected here; if it fails to load, the voice path
+            // falls back to Qwen 2.5 and records that in VoiceStatus.
+            Spacer(modifier = Modifier.height(16.dp))
+            androidx.compose.material3.HorizontalDivider(color = NacreTextDim.copy(alpha = 0.2f))
+            Spacer(modifier = Modifier.height(12.dp))
+            Text("整文モデル", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "音声入力の整文に使うローカルLLM。切替はキーボード再起動後に反映されます。",
+                color = NacreTextDim, fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                for ((modelId, modelLabel) in listOf(
+                    space.manus.nacre.ai.RefineModel.ID_QWEN25 to "Qwen 2.5 1.5B",
+                    space.manus.nacre.ai.RefineModel.ID_QWEN3 to "Qwen3 1.7B",
+                )) {
+                    val selected = refineModelId == modelId
+                    val isQwen3 = modelId == space.manus.nacre.ai.RefineModel.ID_QWEN3
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(if (selected) NacreAccent else NacreBackground)
+                            .clickable {
+                                if (isQwen3 && qwen3Path == null) {
+                                    Toast.makeText(
+                                        context,
+                                        "Qwen3は未ダウンロードです。下のボタンからダウンロードしてください。",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                } else {
+                                    refineModelId = modelId
+                                    space.manus.nacre.ai.RefineModel.setSelectedId(context, modelId)
+                                }
+                            }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            modelLabel,
+                            color = if (selected) Color.Black else NacreText,
+                            fontSize = 13.sp,
+                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                        )
+                    }
+                }
+            }
+            if (refineModelId == space.manus.nacre.ai.RefineModel.ID_QWEN3 && qwen3Path == null) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Qwen3が未ダウンロードのため、ダウンロードが完了するまではQwen 2.5で整文します。",
+                    color = Color(0xFFFFAA66), fontSize = 11.sp,
+                )
+            }
+
+            // ── Qwen3: opt-in refinement upgrade ──────────────────────
+            // ~1.1GB, so NEVER auto-downloaded: the size is shown in the
+            // section and again in the confirmation dialog.
+            Spacer(modifier = Modifier.height(16.dp))
+            androidx.compose.material3.HorizontalDivider(color = NacreTextDim.copy(alpha = 0.2f))
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("高性能整文 Qwen3 1.7B", color = NacreText, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(modifier = Modifier.width(8.dp))
+                if (qwen3Path != null) {
+                    Text("ダウンロード済み", color = Color(0xFF4CAF50), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                } else {
+                    Text("未ダウンロード", color = NacreTextDim, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Qwen3世代へのアップグレード（llama.cpp更新で読込可能になりました）。" +
+                    "ダウンロードして上の「整文モデル」でQwen3を選ぶと使われます。" +
+                    "読込に失敗した場合は自動でQwen 2.5に戻ります。",
+                color = NacreTextDim, fontSize = 12.sp,
+            )
+            if (qwen3Path != null) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(qwen3Path!!, color = NacreTextDim.copy(alpha = 0.5f), fontSize = 10.sp, maxLines = 1)
+            } else {
+                Text(
+                    "サイズ: 約${qwen3SizeMb}MB（自動ダウンロードはされません）",
+                    color = NacreTextDim, fontSize = 12.sp,
+                )
+            }
+            if (qwen3Downloading) {
+                Spacer(modifier = Modifier.height(12.dp))
+                LinearProgressIndicator(
+                    progress = { qwen3ProgressPct / 100f },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = NacreAccent,
+                    trackColor = NacreTextDim.copy(alpha = 0.3f),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "${qwen3ProgressPct}% (${qwen3ProgressBytes.first / 1024 / 1024}/${qwen3ProgressBytes.second / 1024 / 1024}MB)",
+                    color = NacreTextDim, fontSize = 11.sp,
+                )
+            }
+            if (qwen3Path == null) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = { showQwen3Confirm = true },
+                    enabled = !qwen3Downloading,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = NacreAccent,
+                        contentColor = Color.Black,
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (qwen3Downloading) "Downloading..."
+                        else "Qwen3をダウンロード（約${qwen3SizeMb}MB）"
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Model: Qwen3-1.7B by Qwen (Alibaba), Apache-2.0. " +
+                    "GGUF packaging: unsloth/Qwen3-1.7B-GGUF (Q4_K_M). " +
+                    "モデルは端末へダウンロードされ、APKには含まれません。",
+                color = NacreTextDim.copy(alpha = 0.7f),
+                fontSize = 10.sp,
+            )
         }
+    }
+
+    if (showQwen3Confirm) {
+        AlertDialog(
+            onDismissRequest = { showQwen3Confirm = false },
+            title = { Text("Qwen3をダウンロード") },
+            text = {
+                Text(
+                    "高性能整文モデル Qwen3 1.7B（約${qwen3SizeMb}MB）をダウンロードします。" +
+                        "大きなファイルです。Wi-Fi環境でのダウンロードを推奨します。" +
+                        "中断した場合は途中から再開できます。",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showQwen3Confirm = false
+                        qwen3Downloading = true
+                        qwen3ProgressPct = 0
+                        downloader.onProgress = { p ->
+                            qwen3ProgressPct = p.percent
+                            qwen3ProgressBytes = p.bytesDownloaded to p.totalBytes
+                        }
+                        downloader.downloadQwen3Llm { ok ->
+                            qwen3Downloading = false
+                            downloader.onProgress = null
+                            if (ok) {
+                                refreshQwen3()
+                                Toast.makeText(context, "Qwen3 downloaded. 「整文モデル」でQwen3を選んでください。", Toast.LENGTH_LONG).show()
+                            } else {
+                                Toast.makeText(context, "Download failed. 再開はもう一度ボタンから。", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    },
+                ) { Text("ダウンロード") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showQwen3Confirm = false }) { Text("キャンセル") }
+            },
+        )
     }
 }
 

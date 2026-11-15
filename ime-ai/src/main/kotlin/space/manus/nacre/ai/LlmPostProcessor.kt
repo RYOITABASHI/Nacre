@@ -222,6 +222,27 @@ object LlmPostProcessor {
         return text
     }
 
+    /**
+     * Detect a greedy-decoding repetition loop: the same sentence
+     * (≥8 chars) appearing 3+ times in one output. Observed with Qwen3
+     * (desktop smoke, 1 of 20 golden prompts: one sentence repeated
+     * until MAX_TOKENS) — the JNI decodes greedy-only with no presence
+     * penalty, so a loop, once entered, never exits on its own.
+     * Legitimate refined prose essentially never repeats a full sentence
+     * verbatim three times, so this is a safe rejection signal.
+     */
+    fun hasRepetitionLoop(text: String): Boolean {
+        val counts = HashMap<String, Int>()
+        for (raw in text.split('。', '！', '？', '\n')) {
+            val sentence = raw.trim()
+            if (sentence.length < 8) continue
+            val count = (counts[sentence] ?: 0) + 1
+            if (count >= 3) return true
+            counts[sentence] = count
+        }
+        return false
+    }
+
     private fun writeDiag(message: String) {
         try {
             val file = java.io.File(

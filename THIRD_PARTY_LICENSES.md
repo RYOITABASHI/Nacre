@@ -144,6 +144,31 @@ shown in the Settings AI Models section.
 
 ---
 
+## Qwen3 - Local LLM for Voice Refinement (user-downloaded, not bundled)
+
+Model: Qwen3-1.7B (GGUF, Q4_K_M, 1,107,409,472 bytes)
+Author: Qwen team (Alibaba)
+License: Apache License 2.0
+License text: https://www.apache.org/licenses/LICENSE-2.0
+
+Source model: https://huggingface.co/Qwen/Qwen3-1.7B
+GGUF packaging (the exact file Nacre downloads at runtime):
+https://huggingface.co/unsloth/Qwen3-1.7B-GGUF (Qwen3-1.7B-Q4_K_M.gguf,
+sha256 b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897)
+
+Changes: none to the model itself. Nacre downloads the GGUF as published
+and runs it with the bundled llama.cpp runtime.
+
+Usage in Nacre: Optional upgrade for on-device voice-dictation
+refinement. It is NEVER bundled in the APK and NEVER auto-downloaded:
+the user opts in explicitly in Settings → AI Models (the ~1.1GB size is
+shown before confirming). It is used only when downloaded AND selected
+as the refinement model; Qwen 2.5 1.5B remains the default and the
+automatic fallback if Qwen3 fails to load. This attribution is also
+shown in the Settings AI Models section.
+
+---
+
 ## Person-name dictionary data (bundled asset: dict/person_names.tsv)
 
 The surname selection and order follow the national surname ranking

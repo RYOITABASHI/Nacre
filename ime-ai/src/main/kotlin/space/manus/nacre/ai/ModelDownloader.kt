@@ -55,6 +55,7 @@ class ModelDownloader(private val context: Context) {
             "parakeet" to (getParakeetModelDir() != null),
             "vad" to (getVadModelPath() != null),
             "llm" to (getLlmModelPath() != null),
+            "qwen3" to (getQwen3ModelPath() != null),
             "kenlm" to File(getModelsDir(), KENLM_FILENAME).exists(),
             "kenlm_compact" to File(getModelsDir(), COMPACT_KENLM_FILENAME).exists(),
             "zenz" to (getZenzModelPath() != null),
@@ -327,14 +328,18 @@ class ModelDownloader(private val context: Context) {
 
     fun getCompactKenLmModelPath(): String? = findModelFile(COMPACT_KENLM_FILENAME)
 
-    // ---- LLM (Qwen 2.5 1.5B default; Gemma 4 retired) ----
+    // ---- LLM (Qwen 2.5 1.5B default; Qwen3 1.7B opt-in; Gemma 4 retired) ----
     //
-    // The native llama.cpp is pinned to b3500 (July 2024), whose loader does NOT
-    // understand the Gemma 4 / Gemma 3n "E2B" architecture — on device it just
-    // times out ("did not become ready after 180s") and dictation refinement
-    // stays disabled. Gemma 4 is also ~3GB, which does not fit the ~1.6GB free on
-    // a busy device. Qwen 2.5 1.5B is Qwen2-arch (loads fine on b3500), ~1.0GB
-    // (fits memory), and strong at Japanese — so it is now the default.
+    // History: the native llama.cpp was pinned to b3500 (July 2024), whose
+    // loader did NOT understand the Gemma 4 / Gemma 3n "E2B" architecture —
+    // on device it just timed out ("did not become ready after 180s") and
+    // dictation refinement stayed disabled. Gemma 4 is also ~3GB, which does
+    // not fit the ~1.6GB free on a busy device, so it stays retired even
+    // after the unpin to b12381 (tools/llama-pin.txt). Qwen 2.5 1.5B is
+    // ~1.0GB (fits memory) and strong at Japanese — so it is the default.
+    // Qwen3 1.7B (below) became loadable with the b12381 unpin and is an
+    // opt-in upgrade: never bundled, never auto-downloaded, used only when
+    // downloaded AND selected (see [RefineModel]).
 
     /**
      * Download the default local LLM (Qwen 2.5 1.5B Q4_K_M) used for voice
@@ -366,6 +371,33 @@ class ModelDownloader(private val context: Context) {
         return findModelFile(QWEN_LLM_FILENAME) ?: findModelFile(LLM_FILENAME)
     }
 
+    // ---- Qwen3 1.7B (opt-in refinement upgrade) ----
+    //
+    // Qwen3-1.7B Q4_K_M (unsloth GGUF packaging of Qwen's Apache-2.0
+    // weights), 1,107,409,472 bytes, sha256
+    // b139949c5bd74937ad8ed8c8cf3d9ffb1e99c866c823204dc42c0d91fa181897
+    // (HF LFS oid, verified 2026-11-15). Requires llama.cpp b5092+, i.e.
+    // the b12381 pin — it cannot load on the old b3500 pin. Like Parakeet
+    // it is NEVER bundled and NEVER auto-downloaded: at ~1.1GB it is an
+    // explicit Settings opt-in (Settings → AI Models, size shown before
+    // confirming). ensureDefaultModelsDownloaded must not reference it.
+    // It is used only when downloaded AND selected via [RefineModel];
+    // Qwen 2.5 stays the fallback (see [getPreferredLlmModelPaths]).
+    // Attribution: THIRD_PARTY_LICENSES.md + the Settings AI Models
+    // section.
+
+    /** Download Qwen3 1.7B (Q4_K_M, ~1.1GB). User-initiated only. */
+    fun downloadQwen3Llm(onComplete: (Boolean) -> Unit) {
+        downloadModel(
+            url = QWEN3_LLM_URL,
+            modelName = "Qwen3 1.7B Instruct (Q4_K_M)",
+            fileName = QWEN3_LLM_FILENAME,
+            onComplete = onComplete,
+        )
+    }
+
+    fun getQwen3ModelPath(): String? = findModelFile(QWEN3_LLM_FILENAME)
+
     // ---- zenz neural conversion (zenz-v3.2-small, GGUF Q5_K_M, ~74MB) ----
     //
     // zenz is a GPT-2-arch kana-kanji converter (azooKey Zenzai). It needs the
@@ -388,18 +420,27 @@ class ModelDownloader(private val context: Context) {
     fun getZenzModelPath(): String? = findModelFile(ZENZ_FILENAME)
 
     fun getPreferredLlmModelPaths(): List<String> {
-        // Qwen first (loads on the pinned llama.cpp b3500); a stray legacy Gemma
-        // file is only tried as a last resort and will simply fail to load.
+        // The user's refinement-model selection ([RefineModel]) goes first:
+        // Qwen3 only when it is both selected and downloaded. Qwen 2.5 is
+        // always next, so a Qwen3 load failure falls back to it within the
+        // same session (the voice startup path walks this list in order).
+        // A stray legacy Gemma file is only tried as a last resort.
+        val selectedFirst = if (RefineModel.isQwen3Selected(context)) {
+            findModelFile(QWEN3_LLM_FILENAME)
+        } else {
+            null
+        }
         return listOfNotNull(
+            selectedFirst,
             findModelFile(QWEN_LLM_FILENAME),
             findModelFile(LLM_FILENAME),
         ).distinct()
     }
 
     /**
-     * Remove the obsolete Gemma 4 GGUF (~3GB). It cannot load on the pinned
-     * llama.cpp b3500 and only wastes internal storage. Nacre-private file —
-     * not shared with Shelly or any other app.
+     * Remove the obsolete Gemma 4 GGUF (~3GB). It could not load on the old
+     * b3500 pin and at ~3GB it only wastes internal storage. Nacre-private
+     * file — not shared with Shelly or any other app.
      */
     fun deleteObsoleteLlmModels() {
         val obsolete = findModelFile(LLM_FILENAME) ?: return
@@ -417,8 +458,8 @@ class ModelDownloader(private val context: Context) {
     /**
      * Provision the personal default model set without blocking UI/IME startup.
      * Compact KenLM is the default conversion model; Qwen 2.5 1.5B is the default
-     * local LLM (b3500-compatible, fits memory). Any obsolete Gemma 4 GGUF is
-     * deleted to reclaim ~3GB.
+     * local LLM (fits memory). Qwen3 is opt-in only and is never provisioned
+     * here. Any obsolete Gemma 4 GGUF is deleted to reclaim ~3GB.
      */
     fun ensureDefaultModelsDownloaded(
         downloadCompactKenLm: Boolean = true,
@@ -772,6 +813,9 @@ class ModelDownloader(private val context: Context) {
         const val COMPACT_KENLM_FILENAME = "japanese-compact.klm"
         const val LLM_FILENAME = "gemma-4-E2B-it-Q4_K_M.gguf"
         const val QWEN_LLM_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+        const val QWEN3_LLM_FILENAME = "qwen3-1.7b-q4_k_m.gguf"
+        const val QWEN3_MODEL_BYTES = 1_107_409_472L
+        const val QWEN3_LLM_URL = "https://huggingface.co/unsloth/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf"
         const val KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-5gram.klm"
         const val COMPACT_KENLM_URL = "https://github.com/RYOITABASHI/Nacre/releases/download/v0.1.0-models/japanese-compact.klm"
         const val LLM_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf"
