@@ -241,6 +241,11 @@ class InputEngine(private val service: NacreInputMethodService) {
         composingText = ""
         composingFlickKana = ""
         composingKana = ""
+        // English composing must reset too (it was the one buffer missing
+        // here): otherwise uncommitted text typed in a password field
+        // survives the field switch and can be committed — and recorded
+        // into the English history — in the next, non-password field.
+        englishComposing = ""
         japaneseEngine.reset()
         clearCandidates()
         alphaCycler.reset()
@@ -472,7 +477,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                         if (englishComposing.isNotEmpty()) {
                             val toCommit = resolveEnglishCommitText()
                             ic.commitText(toCommit, 1)
-                            dictionary?.recordEnglishSelection(toCommit)
+                            recordEnglishSelection(toCommit)
                             englishComposing = ""
                             candidates.clear()
                             selectedCandidateIndex = -1
@@ -528,7 +533,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 } else if (composingFlickKana.isNotEmpty()) {
                     // Flick mode: commit kana as-is
                     ic.commitText(composingFlickKana, 1)
-                    if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                    if (flickAlphaMode) recordEnglishSelection(composingFlickKana)
                     else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
@@ -538,7 +543,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 } else if (englishComposing.isNotEmpty()) {
                     // Commit English composing text as-is
                     ic.commitText(englishComposing, 1)
-                    dictionary?.recordEnglishSelection(englishComposing)
+                    recordEnglishSelection(englishComposing)
                     englishComposing = ""
                     clearCandidates()
                 } else {
@@ -580,7 +585,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                     // English: space commits the top candidate (or raw text) + space
                     val toCommit = resolveEnglishCommitText()
                     ic.commitText(toCommit + " ", 1)
-                    dictionary?.recordEnglishSelection(toCommit)
+                    recordEnglishSelection(toCommit)
                     englishComposing = ""
                     clearCandidates()
                 } else {
@@ -627,7 +632,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 if (isConverting) commitSelectedCandidate(ic)
                 if (composingFlickKana.isNotEmpty()) {
                     ic.commitText(composingFlickKana, 1)
-                    if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                    if (flickAlphaMode) recordEnglishSelection(composingFlickKana)
                     else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                     composingFlickKana = ""
                     composingKana = ""
@@ -635,6 +640,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 if (composingText.isNotEmpty()) finishComposing(ic)
                 if (englishComposing.isNotEmpty()) {
                     ic.commitText(englishComposing, 1)
+                    recordEnglishSelection(englishComposing)
                     englishComposing = ""
                 }
                 // Always clear any leftover candidate bar (e.g. Japanese punctuation
@@ -722,7 +728,7 @@ class InputEngine(private val service: NacreInputMethodService) {
             ) {
                 // English word committed (QWERTY English mode or 12-key ABC mode) —
                 // learn it so it surfaces as history next time.
-                dictionary?.recordEnglishSelection(candidate.surface)
+                recordEnglishSelection(candidate.surface)
                 englishComposing = ""
                 composingFlickKana = ""
             } else {
@@ -1091,6 +1097,19 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun updateFlickPredictions(text: String) {
         if (flickAlphaMode) updateEnglishPredictions(text)
         else updatePredictions(text)
+    }
+
+    /**
+     * Record a committed English word for learning/history — the single
+     * funnel every English commit path (QWERTY English layer, 12-key ABC
+     * pad, candidate-bar selection) goes through. SPEC: password fields
+     * disable prediction, history and AI; the prediction entry points
+     * already return early there, but commit paths do not, so the gate
+     * lives here to keep password text out of the learned history.
+     */
+    private fun recordEnglishSelection(word: String) {
+        if (isPasswordField) return
+        dictionary?.recordEnglishSelection(word)
     }
 
     private fun updateEnglishPredictions(prefix: String) {
@@ -1544,7 +1563,7 @@ class InputEngine(private val service: NacreInputMethodService) {
             composingFlickKana.isNotEmpty() -> {
                 val pending = composingFlickKana
                 ic.commitText(pending, 1)
-                if (flickAlphaMode) dictionary?.recordEnglishSelection(pending)
+                if (flickAlphaMode) recordEnglishSelection(pending)
                 else recordJapanesePhrase(pending, pending)
                 composingFlickKana = ""
                 composingKana = ""
@@ -1554,7 +1573,7 @@ class InputEngine(private val service: NacreInputMethodService) {
             englishComposing.isNotEmpty() -> {
                 val pending = englishComposing
                 ic.commitText(pending, 1)
-                dictionary?.recordEnglishSelection(pending)
+                recordEnglishSelection(pending)
                 englishComposing = ""
                 clearCandidates()
             }
@@ -1799,7 +1818,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         }
         // No results: commit as-is (kana, or ASCII in ABC mode — learn the word then)
         ic.commitText(kana, 1)
-        if (flickAlphaMode) dictionary?.recordEnglishSelection(kana)
+        if (flickAlphaMode) recordEnglishSelection(kana)
         composingFlickKana = ""
         composingKana = ""
         clearCandidates()
@@ -1838,7 +1857,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                 commitSelectedCandidate(ic)
             } else {
                 ic.commitText(composingFlickKana, 1)
-                if (flickAlphaMode) dictionary?.recordEnglishSelection(composingFlickKana)
+                if (flickAlphaMode) recordEnglishSelection(composingFlickKana)
                 else recordJapanesePhrase(composingFlickKana, composingFlickKana)
                 composingFlickKana = ""
                 composingKana = ""
