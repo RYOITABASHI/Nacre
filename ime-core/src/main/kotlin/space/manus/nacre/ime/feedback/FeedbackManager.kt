@@ -57,6 +57,7 @@ class FeedbackManager(context: Context) {
     }
 
     fun release() {
+        haptic.release()
         sound.release()
     }
 }

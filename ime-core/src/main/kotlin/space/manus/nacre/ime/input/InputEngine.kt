@@ -773,6 +773,11 @@ class InputEngine(private val service: NacreInputMethodService) {
      * fields (defense in depth: both call sites already exclude them), at
      * the start of a field, or when the editor returns nothing.
      *
+     * This is a blocking IPC into the editor app: call it only from the
+     * zenz request paths (inside the debounced typing job / the conversion
+     * job), NEVER from per-keystroke scheduling code — see
+     * [scheduleZenzPredict].
+     *
      * [composingDisplay] is what the editor currently shows as the
      * composing region (the kana while typing, the first candidate's
      * surface during conversion): editors that include the composing
@@ -806,12 +811,23 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun requestZenzCandidate(kana: String, seq: Int) {
         if (isPasswordField) return // SPEC: no AI features in password fields
         if (kana.length < 2) return
-        // The composing region currently displays the first candidate's
-        // surface (set by startConversion / startFlickConversion just
-        // before this call); the context is the committed text before it.
-        val leftContext = zenzLeftContext(candidates.firstOrNull()?.surface ?: kana)
+        // Both the composing-display read and the getTextBeforeCursor fetch
+        // happen inside the job below, so the conversion keystroke never
+        // waits on an editor IPC round-trip (the engine candidates are
+        // already on screen at this point).
         zenzJob?.cancel()
         zenzJob = scope.launch {
+            // Read the composing display NOW, not at request time: a queued
+            // candidate-selection event may have changed the surface the
+            // editor shows as the composing region since the request was
+            // made, and ZenzContext.extract can only strip the tail it is
+            // told about. The seq / fullKana guards (repeated after the
+            // zenz call, as before) still decide whether the result may be
+            // inserted; this only keeps the context itself accurate.
+            if (seq != conversionSeq || !isConverting || fullKana != kana) return@launch
+            val composingDisplay = candidates.getOrNull(selectedCandidateIndex)?.surface
+                ?: candidates.firstOrNull()?.surface ?: kana
+            val leftContext = zenzLeftContext(composingDisplay)
             val surface = try {
                 withContext(Dispatchers.Default) {
                     service.voiceInputManager.convertViaZenz(kana, leftContext, timeoutMs = 2500)
@@ -968,8 +984,14 @@ class InputEngine(private val service: NacreInputMethodService) {
             // Skip entirely when native Mozc produced these candidates: Mozc's own ranking
             // is authoritative, and running the local-LLM reranker on every keystroke would
             // just reorder good candidates and wake the LLM process for nothing.
+            // Also skip the context fetch when the reranker cannot run at all
+            // (disabled or no server — the default): rerankAsync() would
+            // return without using the text, so fetching it was a wasted
+            // editor IPC on the main thread after every prediction batch.
             val mozcActive = (dict as? NacreDictionary)?.useMozcNative() == true
-            if (!mozcActive && predictions.size > 1) {
+            if (!mozcActive && predictions.size > 1 &&
+                llmReranker.enabled && llmReranker.serverAvailable
+            ) {
                 val precedingText = service.currentInputConnection
                     ?.getTextBeforeCursor(50, 0)?.toString() ?: ""
                 llmReranker.rerankAsync(kana, predictions, precedingText) { reranked ->
@@ -1007,13 +1029,22 @@ class InputEngine(private val service: NacreInputMethodService) {
         zenzPredictJob = null
         if (flickAlphaMode || kana.length < ZENZ_PREDICT_MIN_KANA) return
         val seq = ++zenzPredictSeq
-        // While typing, the composing region displays the kana itself.
-        // Captured now (not after the debounce): the committed text before
-        // the composing region cannot change without a commit, and a
-        // commit restarts this schedule with a fresh capture.
-        val leftContext = zenzLeftContext(kana)
         zenzPredictJob = scope.launch {
             kotlinx.coroutines.delay(ZENZ_PREDICT_DEBOUNCE_MS)
+            // The left-context capture lives HERE, after the debounce, not
+            // in the scheduling call above: zenzLeftContext() performs a
+            // synchronous getTextBeforeCursor IPC into the editor app, and
+            // scheduleZenzPredict runs on the main thread on EVERY keystroke
+            // — fetching there stalled each tap by an editor round-trip once
+            // the composing kana reached the minimum length. Freshness is
+            // unchanged: the composing text is stable by construction at
+            // this point (any keystroke cancels this job), and the committed
+            // text before the composing region cannot change without a
+            // commit, which restarts the schedule — so the capture is
+            // exactly as fresh as an at-schedule-time one. While typing, the
+            // composing region displays the kana itself.
+            if (seq != zenzPredictSeq || isConverting || composingKana != kana) return@launch
+            val leftContext = zenzLeftContext(kana)
             val surface = try {
                 withContext(Dispatchers.Default) {
                     service.voiceInputManager.convertViaZenz(kana, leftContext, timeoutMs = 2500)
