@@ -1,12 +1,19 @@
 package space.manus.nacre.ime.feedback
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.database.ContentObserver
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 
 class HapticManager(private val context: Context) {
@@ -63,8 +70,100 @@ class HapticManager(private val context: Context) {
         }
     }
 
+    // --- Cached availability inputs --------------------------------------
+    // onKeyTap() runs on the main thread for every key press, and the
+    // availability checks it used to perform inline were all IPC:
+    // Vibrator.hasVibrator() / hasAmplitudeControl() (binder calls into
+    // the vibrator service), PowerManager.isPowerSaveMode (binder), and a
+    // Settings.System read through the ContentResolver — several
+    // round-trips stacked in front of the vibrate() call itself on every
+    // single tap. The hardware facts never change for the life of the
+    // process, so they are resolved once; the two system switches are
+    // kept current by listeners instead of being re-read per tap.
+    private val hasVibratorCached: Boolean by lazy { vibrator?.hasVibrator() == true }
+    private val hasAmplitudeControlCached: Boolean by lazy {
+        vibrator?.hasAmplitudeControl() == true
+    }
+
+    @Volatile
+    private var powerSaveActive: Boolean = powerManager?.isPowerSaveMode == true
+
+    @Volatile
+    private var systemHapticEnabled: Boolean = isSystemHapticEnabled()
+
+    private val powerSaveReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            powerSaveActive = powerManager?.isPowerSaveMode == true
+        }
+    }
+
+    private val hapticSettingObserver =
+        object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                systemHapticEnabled = isSystemHapticEnabled()
+            }
+        }
+
+    private var powerSaveReceiverRegistered = false
+    private var hapticObserverRegistered = false
+
     init {
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
+        registerSystemListeners()
+        // Re-read both flags AFTER registering: a system change that landed
+        // between the field initializers above and listener registration
+        // would otherwise be missed until the NEXT change. From here on,
+        // changes arrive via the listeners, and both writers store the
+        // live system value, so ordering between them cannot go stale.
+        powerSaveActive = powerManager?.isPowerSaveMode == true
+        systemHapticEnabled = isSystemHapticEnabled()
+    }
+
+    private fun registerSystemListeners() {
+        // Each registration is tracked independently so release() can undo
+        // exactly the ones that succeeded. Registration failure leaves the
+        // flags at their init-time refresh values (see init) — feedback
+        // behavior stays correct at startup, just not live-updated.
+        try {
+            // ACTION_POWER_SAVE_MODE_CHANGED is a system broadcast, so a
+            // NOT_EXPORTED receiver still receives it (the flag only gates
+            // other apps as senders).
+            ContextCompat.registerReceiver(
+                context,
+                powerSaveReceiver,
+                IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            powerSaveReceiverRegistered = true
+        } catch (_: Exception) {
+        }
+        try {
+            context.contentResolver.registerContentObserver(
+                Settings.System.getUriFor(Settings.System.HAPTIC_FEEDBACK_ENABLED),
+                false,
+                hapticSettingObserver,
+            )
+            hapticObserverRegistered = true
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Unregister the system listeners (called from FeedbackManager.release()). */
+    fun release() {
+        if (powerSaveReceiverRegistered) {
+            powerSaveReceiverRegistered = false
+            try {
+                context.unregisterReceiver(powerSaveReceiver)
+            } catch (_: Exception) {
+            }
+        }
+        if (hapticObserverRegistered) {
+            hapticObserverRegistered = false
+            try {
+                context.contentResolver.unregisterContentObserver(hapticSettingObserver)
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun loadStrength(): Strength {
@@ -78,13 +177,9 @@ class HapticManager(private val context: Context) {
 
     private val isAvailable: Boolean
         get() = strength != Strength.OFF &&
-                vibrator?.hasVibrator() == true &&
-                !isBatterySaverActive() &&
-                isSystemHapticEnabled()
-
-    private fun isBatterySaverActive(): Boolean {
-        return powerManager?.isPowerSaveMode == true
-    }
+                hasVibratorCached &&
+                !powerSaveActive &&
+                systemHapticEnabled
 
     /** Respect the system-wide touch-feedback switch (default: on). */
     @Suppress("DEPRECATION") // HAPTIC_FEEDBACK_ENABLED is the documented switch
@@ -113,7 +208,7 @@ class HapticManager(private val context: Context) {
     private fun vibrateTap() {
         if (!isAvailable) return
         val vib = vibrator ?: return
-        val scaledAmplitude = if (vib.hasAmplitudeControl()) {
+        val scaledAmplitude = if (hasAmplitudeControlCached) {
             (BASE_AMPLITUDE_TAP * strength.multiplier).toInt().coerceIn(1, 255)
         } else {
             VibrationEffect.DEFAULT_AMPLITUDE
@@ -148,8 +243,7 @@ class HapticManager(private val context: Context) {
         val vib = vibrator ?: return
 
         // SPEC: hasAmplitudeControl() check — use DEFAULT_AMPLITUDE if not supported
-        val hasAmplitude = vib.hasAmplitudeControl()
-        val scaledAmplitude = if (hasAmplitude) {
+        val scaledAmplitude = if (hasAmplitudeControlCached) {
             (baseAmplitude * strength.multiplier).toInt().coerceIn(1, 255)
         } else {
             VibrationEffect.DEFAULT_AMPLITUDE

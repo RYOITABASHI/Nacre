@@ -1,10 +1,14 @@
 package space.manus.nacre.ime.feedback
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.media.AudioAttributes
 import android.media.SoundPool
 import android.os.PowerManager
+import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import java.io.File
 import java.io.FileOutputStream
@@ -55,8 +59,23 @@ class SoundManager(private val context: Context) {
     private val normalizedVolume: Float
         get() = volume / 100f
 
+    // PowerManager.isPowerSaveMode is a binder IPC and onKeyTap() runs on
+    // the main thread for every key press — cache the flag and keep it
+    // current with the system's power-save-changed broadcast instead of
+    // paying a round-trip per tap (same pattern as HapticManager).
+    @Volatile
+    private var powerSaveActive: Boolean = powerManager?.isPowerSaveMode == true
+
+    private val powerSaveReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            powerSaveActive = powerManager?.isPowerSaveMode == true
+        }
+    }
+
+    private var powerSaveReceiverRegistered = false
+
     private val isAvailable: Boolean
-        get() = volume > 0 && profile != Profile.SILENT && !isBatterySaverActive()
+        get() = volume > 0 && profile != Profile.SILENT && !powerSaveActive
 
     private val audioAttributes = AudioAttributes.Builder()
         .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
@@ -81,6 +100,23 @@ class SoundManager(private val context: Context) {
     }
 
     init {
+        // Register the power-save listener FIRST (before the comparatively
+        // slow sound synthesis below) and refresh the cached flag right
+        // after: a change landing between the field initializer and
+        // registration would otherwise be missed until the next change.
+        try {
+            // System broadcast: a NOT_EXPORTED receiver still receives it.
+            ContextCompat.registerReceiver(
+                context,
+                powerSaveReceiver,
+                IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            powerSaveReceiverRegistered = true
+        } catch (_: Exception) {
+            // Optimization only — the flag keeps its refreshed value.
+        }
+        powerSaveActive = powerManager?.isPowerSaveMode == true
         initSoundPool()
         generateAndLoadSounds()
         prefs.registerOnSharedPreferenceChangeListener(prefsListener)
@@ -115,6 +151,13 @@ class SoundManager(private val context: Context) {
 
     fun release() {
         prefs.unregisterOnSharedPreferenceChangeListener(prefsListener)
+        if (powerSaveReceiverRegistered) {
+            powerSaveReceiverRegistered = false
+            try {
+                context.unregisterReceiver(powerSaveReceiver)
+            } catch (_: Exception) {
+            }
+        }
         soundPool?.release()
         soundPool = null
         soundIds.clear()
@@ -321,10 +364,6 @@ class SoundManager(private val context: Context) {
             }
         }
         return pcm
-    }
-
-    private fun isBatterySaverActive(): Boolean {
-        return powerManager?.isPowerSaveMode == true
     }
 
     private fun loadProfile(): Profile {
