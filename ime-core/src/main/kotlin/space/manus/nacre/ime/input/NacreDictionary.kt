@@ -101,6 +101,20 @@ class NacreDictionary internal constructor(
     private val englishBigramBoost = ConcurrentHashMap<String, Int>(200)
     private var lastCommittedEnglish: String = ""
 
+    // English commit history: recently committed alphabet words (newest
+    // first, committed case preserved), surfaced by predictEnglish() the
+    // way recentHistory is surfaced by predict(). Kept separate from
+    // recentHistory: that list is keyed by kana readings and also feeds
+    // Japanese next-word prediction, which alphabet words must not leak
+    // into. Same cap (maxHistory) and same persistence store.
+    // Access is guarded by englishHistoryLock: predictEnglish() runs on a
+    // background dispatcher while commits mutate the list on the main
+    // thread, and an unsynchronized LinkedList iteration racing a mutation
+    // can throw ConcurrentModificationException. (The older recentHistory
+    // predates this discipline and is left as-is.)
+    private val recentEnglishHistory = java.util.LinkedList<String>()
+    private val englishHistoryLock = Any()
+
     // N-gram context: last 4 committed surfaces (for KenLM 5-gram)
     private val committedContext = ArrayDeque<String>(4)
 
@@ -1058,6 +1072,15 @@ class NacreDictionary internal constructor(
         recentHistory.addFirst(candidate.copy(cost = historyCost))
         while (recentHistory.size > maxHistory) recentHistory.removeLast()
 
+        // An English word committed from the Japanese candidate bar (e.g. a
+        // loanword spelling like "computer" for こんぴゅーたー) is also an
+        // alphabet commit: feed it to the English history so it resurfaces
+        // for alphabet prefixes too, not only for its kana reading above.
+        // No-op for non-alphabet surfaces (EnglishHistory.record filters).
+        synchronized(englishHistoryLock) {
+            EnglishHistory.record(recentEnglishHistory, candidate.surface, maxHistory)
+        }
+
         debouncedSave()
 
         // #13/M5: feed the choice back into Mozc's own history/learning so its ranking
@@ -1818,7 +1841,34 @@ class NacreDictionary internal constructor(
             if (prev == null || candidate.cost < prev.cost) adapted[surface] = candidate
         }
 
-        return adapted.values.sortedBy { it.cost }.take(limit)
+        val sorted = adapted.values.sortedBy { it.cost }
+
+        // 7. Commit history: words the user has committed before resurface
+        // for alphabet prefixes too (the Japanese path has long had this
+        // via historyMatchesFor in predict()). History surfaces keep their
+        // committed case — they bypass the case adaptation above — and
+        // merge by word: a history word that is also a dictionary hit
+        // appears once, in its committed form, at the better of the two
+        // costs. EnglishHistory.matchesFor applies a penalty proportional
+        // to the untyped remainder, so history cannot bury dictionary
+        // completions on short prefixes.
+        val historySnapshot = synchronized(englishHistoryLock) { recentEnglishHistory.toList() }
+        val historyMatches = EnglishHistory.matchesFor(historySnapshot, prefix)
+        if (historyMatches.isEmpty()) return sorted.take(limit)
+        val merged = sorted.toMutableList()
+        for (h in historyMatches) {
+            var bestCost = h.cost
+            val iter = merged.iterator()
+            while (iter.hasNext()) {
+                val c = iter.next()
+                if (c.surface.equals(h.surface, ignoreCase = true)) {
+                    if (c.cost < bestCost) bestCost = c.cost
+                    iter.remove()
+                }
+            }
+            merged.add(h.copy(cost = bestCost))
+        }
+        return merged.sortedBy { it.cost }.take(limit)
     }
 
     private enum class EnglishCasePattern { LOWER, CAPITALIZED, UPPER, MIXED }
@@ -1873,7 +1923,7 @@ class NacreDictionary internal constructor(
     }
 
     /**
-     * Record English word selection for bigram learning.
+     * Record English word selection for bigram learning and commit history.
      */
     override fun recordEnglishSelection(word: String) {
         if (lastCommittedEnglish.isNotEmpty()) {
@@ -1881,6 +1931,16 @@ class NacreDictionary internal constructor(
             val count = englishBigramBoost.merge(key, 1) { old, _ -> minOf(old + 1, 5) } ?: 1
         }
         lastCommittedEnglish = word
+        // Commit history (surfaced by predictEnglish step 7): same
+        // dedupe/cap discipline as the Japanese recentHistory, persisted
+        // through the same debounced save. Callers (InputEngine) never
+        // invoke this in password fields.
+        val recorded = synchronized(englishHistoryLock) {
+            EnglishHistory.record(recentEnglishHistory, word, maxHistory)
+        }
+        if (recorded) {
+            debouncedSave()
+        }
     }
 
     /**
@@ -2679,6 +2739,25 @@ class NacreDictionary internal constructor(
                     }
                 }
             }
+
+            // English commit history: one committed word per line, newest
+            // first (the order saveUserBoost writes). Re-validate on load
+            // so a hand-edited or stale store can never inject strings the
+            // recorder itself would have rejected.
+            val englishHistoryData = store.getString("english_history")
+            if (englishHistoryData != null) {
+                synchronized(englishHistoryLock) {
+                    for (line in englishHistoryData.split('\n')) {
+                        val word = line.trim()
+                        if (EnglishHistory.isRecordable(word) &&
+                            recentEnglishHistory.none { it.equals(word, ignoreCase = true) }
+                        ) {
+                            recentEnglishHistory.add(word)
+                            if (recentEnglishHistory.size >= maxHistory) break
+                        }
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to load user boost", e)
         }
@@ -2707,10 +2786,15 @@ class NacreDictionary internal constructor(
                 .take(maxHistory)
                 .joinToString("\n") { "${it.surface}\t${it.reading}" }
 
+            val englishHistoryData = synchronized(englishHistoryLock) {
+                recentEnglishHistory.take(maxHistory).joinToString("\n")
+            }
+
             store.putString("boost", data)
             store.putString("bigram", bigramData)
             store.putString("trigram", trigramData)
             store.putString("history", historyData)
+            store.putString("english_history", englishHistoryData)
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save user boost", e)
         }
@@ -2943,5 +3027,90 @@ class NacreDictionary internal constructor(
         } catch (e: Exception) {
             Log.w("NacreDictionary", "Failed to save epoch", e)
         }
+    }
+}
+
+/**
+ * Pure logic for the English commit history (surfaced by
+ * [NacreDictionary.predictEnglish] step 7): which committed words are worth
+ * remembering, how the list is maintained, and how history hits are costed
+ * for a typed prefix. Extracted so it is unit-testable on a plain JVM, and
+ * deliberately mirrors the Japanese side's historyMatchesFor() penalty
+ * scheme so the two languages rank history the same way.
+ */
+internal object EnglishHistory {
+
+    /** Base cost of the newest history hit, before penalties. */
+    const val BASE_COST = 900
+
+    /** Extra cost per step down the history list (older = weaker). */
+    const val RECENCY_STEP = 150
+
+    /** Max history hits surfaced per prefix (mirrors historyMatchesFor). */
+    const val MAX_MATCHES = 3
+
+    /**
+     * A committable alphabet word: at least two ASCII letters, with an
+     * internal apostrophe allowed ("don't"). Single letters, digits, code
+     * tokens and mixed-script strings are not history material.
+     */
+    fun isRecordable(word: String): Boolean {
+        if (word.length < 2) return false
+        var letters = 0
+        for (ch in word) {
+            when {
+                ch in 'a'..'z' || ch in 'A'..'Z' -> letters++
+                ch == '\'' -> Unit
+                else -> return false
+            }
+        }
+        return letters >= 2
+    }
+
+    /**
+     * Remember [word] at the front of [history] (newest first), dropping
+     * any older entry for the same word (case-insensitive — the newest
+     * committed case wins) and capping the list at [max]. Returns true if
+     * the word was recorded.
+     */
+    fun record(history: MutableList<String>, word: String, max: Int): Boolean {
+        if (!isRecordable(word)) return false
+        history.removeAll { it.equals(word, ignoreCase = true) }
+        history.add(0, word)
+        while (history.size > max) history.removeAt(history.size - 1)
+        return true
+    }
+
+    /**
+     * History hits for [prefix]: entries whose lowercase form starts with
+     * the lowercase prefix (exact matches included). Surfaces keep their
+     * committed case. Cost = [BASE_COST] + a recency step + a penalty
+     * proportional to the untyped remainder — high for 1-2 char prefixes,
+     * lower for longer ones — mirroring historyMatchesFor(), so a long
+     * history word cannot bury dictionary completions on a short prefix.
+     */
+    fun matchesFor(
+        history: List<String>,
+        prefix: String,
+        limit: Int = MAX_MATCHES,
+    ): List<ConversionCandidate> {
+        if (prefix.isEmpty() || history.isEmpty()) return emptyList()
+        val prefixLower = prefix.lowercase()
+        val perCharPenalty = if (prefixLower.length <= 2) 2000 else 1200
+        val results = ArrayList<ConversionCandidate>()
+        for ((index, word) in history.withIndex()) {
+            val lower = word.lowercase()
+            if (!lower.startsWith(prefixLower)) continue
+            val unmatched = lower.length - prefixLower.length
+            results.add(
+                ConversionCandidate(
+                    surface = word,
+                    reading = prefix,
+                    cost = BASE_COST + index * RECENCY_STEP + unmatched * perCharPenalty,
+                )
+            )
+            if (results.size >= limit) break
+        }
+        return results
     }
 }
