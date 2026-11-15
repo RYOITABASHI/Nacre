@@ -448,8 +448,9 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             }
             val downloader = space.manus.nacre.ai.ModelDownloader(service)
             // Search all standard locations (filesDir, external files, /sdcard/Download, MediaStore).
-            // Qwen 2.5 1.5B is the default (Gemma 4 E2B was retired: it never
-            // loads on the pinned llama.cpp b3500 — see ModelDownloader).
+            // Order = the user's selection first (Qwen3 when selected and
+            // downloaded), then Qwen 2.5 1.5B (the default) — see
+            // ModelDownloader.getPreferredLlmModelPaths.
             val modelPaths = downloader.getPreferredLlmModelPaths()
             if (modelPaths.isEmpty()) {
                 downloader.ensureDefaultModelsDownloaded(downloadCompactKenLm = false)
@@ -462,10 +463,14 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 return
             }
             var loadedPath: String? = null
+            var qwen3Failed = false
             for (modelPath in modelPaths) {
                 if (tryLoadLlmModel(svc, modelPath)) {
                     loadedPath = modelPath
                     break
+                }
+                if (modelPath.endsWith(space.manus.nacre.ai.ModelDownloader.QWEN3_LLM_FILENAME)) {
+                    qwen3Failed = true
                 }
                 try {
                     svc.unloadModel()
@@ -484,11 +489,20 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             llmService = svc
             voiceRefineUiState = VoiceRefineUiState.READY_LOCAL
             val modelFile = java.io.File(loadedPath)
+            // A selected Qwen3 that failed to load must not degrade
+            // silently: the READY record names the fallback AND the fact
+            // that Qwen3 failed (same pattern as the Parakeet ASR
+            // fallback in PR #60).
+            val readyDetail = if (qwen3Failed) {
+                "Qwen3読込失敗 → Qwen 2.5で継続（${modelFile.name}）"
+            } else {
+                modelFile.name
+            }
             space.manus.nacre.ai.VoiceStatus.recordRefine(
                 service, space.manus.nacre.ai.VoiceStatus.RefineState.READY_LOCAL,
-                modelFile.name,
+                readyDetail,
             )
-            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB)")
+            writeDiagnostic("llmConnection: model ready: ${modelFile.name} (${modelFile.length() / 1024 / 1024}MB), qwen3Failed=$qwen3Failed")
         } catch (e: Exception) {
             voiceRefineUiState = VoiceRefineUiState.UNAVAILABLE
             space.manus.nacre.ai.VoiceStatus.recordRefine(

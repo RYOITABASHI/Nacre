@@ -193,8 +193,25 @@ class LlmService : Service() {
     private fun llmTransform(text: String, instruction: String): String {
         val prompt = buildPrompt(text, instruction)
         // Log.d removed: never log LLM prompts (contain user text)
-        val result = LlamaJni.generate(prompt, MAX_TOKENS)
-        return result.trim()
+        var result = LlamaJni.generate(prompt, MAX_TOKENS).trim()
+        if (promptFormat == PromptFormat.QWEN3) {
+            // Defensive: the prompt already pre-fills an empty think block
+            // (see buildPrompt), so generation should start with the answer.
+            // If a think block still leads the output, drop it rather than
+            // leaking reasoning markup into the user's text.
+            result = result.replace(THINK_BLOCK_PREFIX, "").trim()
+            if (LlmPostProcessor.hasRepetitionLoop(result)) {
+                // Greedy-only decoding has no presence penalty, so a
+                // repetition loop runs to MAX_TOKENS (observed in the
+                // desktop smoke test, 1/20 prompts). Never hand the user
+                // loop text: fall back to the unrefined input, which the
+                // caller pipeline treats as "no refinement" — the same
+                // safe degradation as a model that is not loaded.
+                Log.w(TAG, "Qwen3 output rejected: repetition loop detected")
+                return text
+            }
+        }
+        return result
     }
 
     private fun buildPrompt(text: String, instruction: String): String {
@@ -208,6 +225,18 @@ class LlmService : Service() {
                 "<|im_start|>system\n$instruction<|im_end|>\n" +
                     "<|im_start|>user\n$text<|im_end|>\n" +
                     "<|im_start|>assistant\n"
+            PromptFormat.QWEN3 ->
+                // Qwen3 thinking suppression, template-faithful form: the
+                // GGUF chat template with enable_thinking=false pre-fills
+                // an empty think block right after the assistant header.
+                // Nacre builds ChatML by hand, so insert exactly that —
+                // byte-equivalent, and NOT a "/no_think" string in the
+                // user turn (verified against the model card + GGUF
+                // template during the llama.cpp unpin, phase 3 spec).
+                "<|im_start|>system\n$instruction<|im_end|>\n" +
+                    "<|im_start|>user\n$text<|im_end|>\n" +
+                    "<|im_start|>assistant\n" +
+                    "<think>\n\n</think>\n\n"
         }
     }
 
@@ -329,6 +358,9 @@ class LlmService : Service() {
         private const val TAG = "LlmService"
         private const val MAX_TOKENS = 512
 
+        /** A leading (possibly non-empty) think block in Qwen3 output. */
+        private val THINK_BLOCK_PREFIX = Regex("^<think>.*?</think>\\s*", RegexOption.DOT_MATCHES_ALL)
+
         /** List of supported transformation commands for UI display */
         val SUPPORTED_COMMANDS = listOf(
             "敬語にして" to "Polite Japanese (keigo)",
@@ -348,12 +380,18 @@ class LlmService : Service() {
 
     private enum class PromptFormat {
         GEMMA,
-        QWEN;
+        QWEN,
+        QWEN3;
 
         companion object {
             fun fromPath(path: String): PromptFormat {
                 val lower = path.lowercase()
-                return if (lower.contains("qwen")) QWEN else GEMMA
+                return when {
+                    // "qwen3" must be checked first: it also contains "qwen".
+                    lower.contains("qwen3") -> QWEN3
+                    lower.contains("qwen") -> QWEN
+                    else -> GEMMA
+                }
             }
         }
     }
