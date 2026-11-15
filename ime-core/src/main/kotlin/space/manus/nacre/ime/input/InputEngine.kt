@@ -146,17 +146,35 @@ class InputEngine(private val service: NacreInputMethodService) {
     private var composingText: String = ""
     private var composingFlickKana: String = ""
     /**
+     * Post-hoc ⇧ target: the run of letters typed via the 12-key ABC pad
+     * since the last resetting action. Only this explicitly tracked span
+     * may ever be case-rewritten — see [PostHocShiftTracker] for the
+     * contract and the reset wiring in this class.
+     */
+    private val postHocShift = PostHocShiftTracker()
+
+    /**
      * True while the 12-key is in ABC (alpha) mode. Routes flick prediction +
      * history to the English engine without touching the shared
      * layerManager.isJapanese (which drives QWERTY + voice language).
      */
     var flickAlphaMode: Boolean = false
+        set(value) {
+            // A mode switch is a resetting action for the post-hoc ⇧
+            // target: letters typed on one grid must never be rewritten
+            // from another.
+            if (field != value) {
+                field = value
+                postHocShift.reset()
+            }
+        }
 
     /**
-     * True right after a ⇧ press on the 12-key ABC grid rewrote the word
-     * before the cursor (post-hoc capitalization, see [processShiftKey]).
-     * Observable so the Shift key can show its "applied" state alongside
-     * the classic armed state; cleared by the next input of any other kind.
+     * True right after a ⇧ press on the 12-key ABC grid rewrote the
+     * tracked just-typed span (post-hoc capitalization, see
+     * [processShiftKey]). Observable so the Shift key can show its
+     * "applied" state alongside the classic armed state; cleared by the
+     * next input of any other kind.
      */
     var flickShiftApplied by mutableStateOf(false)
         private set
@@ -249,6 +267,8 @@ class InputEngine(private val service: NacreInputMethodService) {
         japaneseEngine.reset()
         clearCandidates()
         alphaCycler.reset()
+        // Field change is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
 
         // Shelly Dev Mode detection — exact package match (isShellyDevModeTarget),
         // gated by a user-facing opt-out that defaults to ON. Recomputed on every
@@ -421,6 +441,14 @@ class InputEngine(private val service: NacreInputMethodService) {
 
         // Any action other than ⇧ ends the post-hoc shift "applied" state.
         if (action !is KeyAction.Shift) flickShiftApplied = false
+
+        // …and is a resetting action for the post-hoc ⇧ target: space,
+        // punctuation and other character commits, Enter, Backspace, raw
+        // cursor key events, language/mode switches — after any of them
+        // ⇧ is classic pre-arm only. (Entry points that bypass
+        // processAction — flick kana/direct commits, flick backspace,
+        // cursor keys, candidate selection — reset at their own sites.)
+        if (action !is KeyAction.Shift) postHocShift.reset()
 
         when (action) {
             is KeyAction.Text -> {
@@ -696,6 +724,8 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     fun selectCandidate(index: Int) {
         val ic = service.currentInputConnection ?: return
+        // Candidate selection is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
         if (index in candidates.indices) {
             selectedCandidateIndex = index
             ic.setComposingText(candidates[index].surface, 1)
@@ -704,6 +734,8 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     fun commitCandidate(index: Int) {
         val ic = service.currentInputConnection ?: return
+        // Candidate selection is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
         if (index in candidates.indices) {
             val candidate = candidates[index]
 
@@ -939,6 +971,8 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun commitSelectedCandidate(ic: InputConnection) {
+        // Candidate selection is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
         if (candidates.isNotEmpty() && selectedCandidateIndex in candidates.indices) {
             val candidate = candidates[selectedCandidateIndex]
             ic.commitText(candidate.surface, 1)
@@ -1394,6 +1428,8 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     fun moveCursor(dx: Int, dy: Int) {
         val ic = service.currentInputConnection ?: return
+        // A cursor move is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
         val ei = editorInfo
 
         if (isTerminalApp(ei)) {
@@ -1443,6 +1479,9 @@ class InputEngine(private val service: NacreInputMethodService) {
             confirmFlickToggle()
             return
         }
+        // Actually moving the caret (◀ ▶) is a resetting action for the
+        // post-hoc ⇧ target — the seal-only path above does not move it.
+        postHocShift.reset()
         val dx = if (direction == SwipeDirection.Right) 1 else -1
         val keyCode = if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
         if (isTerminalApp(editorInfo)) {
@@ -1472,7 +1511,6 @@ class InputEngine(private val service: NacreInputMethodService) {
     private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
     private val ZENZ_PREDICT_DEBOUNCE_MS = 300L // Composing must be stable this long before firing
     private val ZENZ_CONTEXT_FETCH_MARGIN = 40 // Extra chars fetched before the cursor so ZenzContext can align the cap to a sentence boundary
-    private val POST_HOC_SHIFT_FETCH_CHARS = 64 // Window read before the cursor for a post-hoc ⇧ press (bounds the rewritable word)
     private val flickToggle = FlickToggleState(TOGGLE_TIMEOUT_MS)
 
     // ABC-grid immediate-commit cycling (iPhone-style direct insertion)
@@ -1491,6 +1529,10 @@ class InputEngine(private val service: NacreInputMethodService) {
     ) {
         val ic = service.currentInputConnection ?: return
         flickShiftApplied = false
+        // A kana commit is an "other character" commit: it ends the
+        // post-hoc ⇧ target (the ABC letters are no longer the text
+        // immediately before the cursor as a pure run).
+        postHocShift.reset()
         // Kana input supersedes any pending ABC replace-cycle: the pending
         // alpha character stays committed as-is.
         alphaCycler.reset()
@@ -1590,6 +1632,9 @@ class InputEngine(private val service: NacreInputMethodService) {
     fun processFlickDirectText(text: String) {
         val ic = service.currentInputConnection ?: return
         flickShiftApplied = false
+        // Direct commits from the ☆123 grid are digits/punctuation —
+        // "other character" commits that end the post-hoc ⇧ target.
+        postHocShift.reset()
         alphaCycler.reset()
         finalizeComposingForDirectInput(ic)
         ic.commitText(text, 1)
@@ -1639,8 +1684,18 @@ class InputEngine(private val service: NacreInputMethodService) {
                     // first tap produced an uppercase letter; cycling keeps it).
                     val next = tapCycle[replaceIndex]
                     val out = if (prev.any { it.isUpperCase() }) next.uppercase() else next
-                    ic.deleteSurroundingText(prev.length, 0)
-                    ic.commitText(out, 1)
+                    // Batched: one selection report for the pair, at the
+                    // final position, so the post-hoc ⇧ tracker's anchor
+                    // check never sees the intermediate deleted state.
+                    ic.beginBatchEdit()
+                    try {
+                        ic.deleteSurroundingText(prev.length, 0)
+                        ic.commitText(out, 1)
+                    } finally {
+                        ic.endBatchEdit()
+                    }
+                    noteAlphaCommit(out, replaced = true)
+                    anchorPostHocSpanIfNeeded(ic, out.length)
                     return
                 }
                 // Cursor moved or the pending char is gone: re-arm as a fresh
@@ -1652,6 +1707,8 @@ class InputEngine(private val service: NacreInputMethodService) {
             // is committed first, then the letter inserts directly.
             finalizeComposingForDirectInput(ic)
             ic.commitText(kana, 1)
+            noteAlphaCommit(kana, replaced = false)
+            anchorPostHocSpanIfNeeded(ic, kana.length)
             return
         }
 
@@ -1659,26 +1716,84 @@ class InputEngine(private val service: NacreInputMethodService) {
         alphaCycler.reset()
         finalizeComposingForDirectInput(ic)
         ic.commitText(kana, 1)
+        noteAlphaCommit(kana, replaced = false)
+        anchorPostHocSpanIfNeeded(ic, kana.length)
+    }
+
+    /**
+     * Feed a character committed by the ABC grid into the post-hoc ⇧
+     * tracker: a letter extends (or starts) the tracked span, a tap-cycle
+     * replacement rewrites its last letter. Anything else the grid can
+     * commit (a digit or symbol on a flick) is an "other character"
+     * commit and ends the target instead.
+     */
+    private fun noteAlphaCommit(text: String, replaced: Boolean) {
+        if (text.length == 1 && text[0].isLetter()) {
+            if (replaced) postHocShift.onLastLetterReplaced(text)
+            else postHocShift.onLetterAppended(text)
+        } else {
+            postHocShift.reset()
+        }
+    }
+
+    /**
+     * Capture the tracked span's absolute end position from the editor.
+     * One extracted-text read per span — NOT per keystroke: the read
+     * happens after the commit that STARTED the span, in the same input
+     * event, and later mutations are maintained arithmetically by the
+     * tracker.
+     *
+     * The fresh-span guard ([committedLength] must equal the whole
+     * span) is load-bearing: capture must never be RETRIED for an
+     * already-accumulated span. If the first letter's capture failed
+     * (editor returned null) and the user then moved the cursor behind
+     * identical older text and typed on, a late capture would anchor
+     * the accumulated span at the new location and launder the foreign
+     * prefix into the target. A span consisting solely of the letter
+     * just committed has an unambiguous position; anything longer stays
+     * unanchored — and an unanchored target fails closed in the
+     * tracker: it can never be rewritten, only dropped.
+     */
+    private fun anchorPostHocSpanIfNeeded(ic: InputConnection, committedLength: Int) {
+        if (!postHocShift.hasTarget || postHocShift.anchorEnd >= 0) return
+        if (postHocShift.lastWritten?.length != committedLength) return
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return
+        if (extracted.selectionStart < 0 ||
+            extracted.selectionStart != extracted.selectionEnd
+        ) return
+        postHocShift.onAnchorKnown(extracted.startOffset + extracted.selectionStart)
+    }
+
+    /**
+     * Selection updates reported by the editor (forwarded from the
+     * service's onUpdateSelection). A collapsed cursor anywhere other
+     * than the tracked span's anchored end — a tap into older text, a
+     * drag selection, the app moving the cursor — is an external
+     * selection change and drops the post-hoc ⇧ target, even when the
+     * text there reads identically to the span.
+     */
+    fun onSelectionUpdate(newSelStart: Int, newSelEnd: Int) {
+        postHocShift.onSelectionChanged(newSelStart, newSelEnd)
     }
 
     /**
      * Shift key entry for every layout. QWERTY keeps the classic behavior
      * (pre-arm one-shot, second press disarms). On the 12-key ABC grid the
-     * press is POST-HOC first: when a letter word sits right before the
-     * cursor, ⇧ rewrites that word's case (see [ShiftCaseCycle] for the
-     * cycle) instead of arming — on a tap-driven pad, noticing "that should
+     * press is POST-HOC first: when [postHocShift] holds a just-typed
+     * target, ⇧ cycles THAT span's case (see [PostHocShiftTracker])
+     * instead of arming — on a tap-driven pad, noticing "that should
      * have been a capital" after the letter is the common case, and
-     * pre-arming before every capital is pure friction. Only when there is
-     * no word to rewrite does the press fall back to the classic pre-arm.
+     * pre-arming before every capital is pure friction. With no target
+     * the press is the classic pre-arm, and it can never rewrite text
+     * the user did not just type.
      */
     fun processShiftKey() {
         if (flickAlphaMode) {
             // Seal any pending multi-tap state FIRST (the same confirm
             // semantics as ▶ and the ゛゜小 key): the ABC replace-cycle and
             // the kana toggle both settle, so the letter the user just
-            // tapped stays exactly as committed — and, being the last
-            // character before the cursor, it is the one the transform's
-            // first step uppercases.
+            // tapped stays exactly as committed — it is part of the
+            // tracked span the transform acts on.
             alphaCycler.reset()
             confirmFlickToggle()
             if (tryPostHocCapitalize()) return
@@ -1687,35 +1802,66 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     /**
-     * Rewrite the case of the word before the cursor per [ShiftCaseCycle].
+     * Cycle the case of the tracked just-typed span per [PostHocShiftTracker].
      * Returns true when the ⇧ press was consumed by the rewrite.
+     *
+     * Only the tracked span can be rewritten — never whatever word
+     * happens to precede the cursor. Identity is established AT MUTATION
+     * TIME from one extracted-text snapshot read synchronously here:
+     * the live selection must be collapsed exactly at the span's
+     * anchored end, and the span's current content must be what the
+     * tracker last wrote. Selection notifications (onUpdateSelection)
+     * drop stale targets early but are asynchronous, so they are never
+     * the authorization. Any verification failure — including the
+     * editor not reporting its text at all — fails closed: the target
+     * is dropped and the press falls back to pre-arm.
      *
      * Guards mirror [processFlickAlpha]'s replace path: never while a
      * composition or conversion is live (the "previous text" would be
      * composing text and deleting it would corrupt the composition),
-     * never with a live text selection (the rewrite would destroy the
-     * selected text), and never in a password field — the field's text is
-     * masked, so the press falls back to pre-arm there (capitals stay
-     * reachable the classic way). The word itself is only read through
-     * getTextBeforeCursor and rewritten in place; nothing is stored or
-     * learned from it.
+     * and never in a password field — the field's text is masked, so
+     * the press falls back to pre-arm there (capitals stay reachable
+     * the classic way). Nothing is learned from the span.
      */
     private fun tryPostHocCapitalize(): Boolean {
         if (isPasswordField) return false
         if (isConverting || composingFlickKana.isNotEmpty() ||
             composingText.isNotEmpty() || englishComposing.isNotEmpty()
         ) return false
+        if (!postHocShift.hasTarget) return false
         val ic = service.currentInputConnection ?: return false
-        // A live selection would be destroyed by the rewrite:
-        // deleteSurroundingText eats the word before the selection while
-        // commitText replaces the selection itself. Collapsed cursor only.
-        if (ic.getSelectedText(0) != null) return false
-        val before = ic.getTextBeforeCursor(POST_HOC_SHIFT_FETCH_CHARS, 0)?.toString()
-            ?: return false
-        val word = ShiftCaseCycle.wordBeforeCursor(before)
-        val transformed = ShiftCaseCycle.nextTransform(word) ?: return false
-        ic.deleteSurroundingText(word.length, 0)
-        ic.commitText(transformed, 1)
+        val spanLength = postHocShift.lastWritten?.length ?: return false
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        val text = extracted?.text?.toString()
+        if (extracted == null || text == null ||
+            extracted.selectionStart < 0 ||
+            extracted.selectionStart != extracted.selectionEnd ||
+            extracted.selectionStart < spanLength
+        ) {
+            // Cannot prove the span's identity from a live snapshot —
+            // no report, a live selection (which the rewrite would
+            // destroy), or the span crossing the reported window.
+            postHocShift.reset()
+            return false
+        }
+        val liveCursor = extracted.startOffset + extracted.selectionStart
+        val inSpan = text.substring(
+            extracted.selectionStart - spanLength,
+            extracted.selectionStart,
+        )
+        val form = postHocShift.advance(inSpan, liveCursor) ?: return false
+        if (form != inSpan) {
+            // Batched so the editor reports one selection update for the
+            // pair, at the final position (== the anchor), instead of an
+            // intermediate one that would read as an external move.
+            ic.beginBatchEdit()
+            try {
+                ic.deleteSurroundingText(spanLength, 0)
+                ic.commitText(form, 1)
+            } finally {
+                ic.endBatchEdit()
+            }
+        }
         // The press was spent on the rewrite: a stale pre-arm must not
         // leak onto the next letter the user types.
         if (service.layerManager.isShifted) service.layerManager.toggleShift()
@@ -1826,6 +1972,8 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     fun processFlickBackspace() {
         val ic = service.currentInputConnection ?: return
+        // A delete is a resetting action for the post-hoc ⇧ target.
+        postHocShift.reset()
         // Deleting breaks any pending ABC replace-cycle (its character may be
         // the one just deleted; the cursor check would catch it, but be safe).
         alphaCycler.reset()
@@ -1851,6 +1999,9 @@ class InputEngine(private val service: NacreInputMethodService) {
      */
     fun commitFlickIfNeeded() {
         alphaCycler.reset()
+        // Committing the pending composition (layout switch) ends the
+        // post-hoc ⇧ target like any other non-letter commit.
+        postHocShift.reset()
         if (composingFlickKana.isNotEmpty()) {
             val ic = service.currentInputConnection ?: return
             if (isConverting) {
