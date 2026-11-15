@@ -1384,6 +1384,53 @@ class InputEngine(private val service: NacreInputMethodService) {
         }
     }
 
+    /**
+     * Entry for the 12-key pad's ◀ / ▶ cursor keys (FlickCursorKey, when
+     * not converting — conversion routes to [adjustSegmentBoundary]).
+     *
+     * ▶ first seals a pending flick toggle, the role the KeyCode branch
+     * in [processAction] plays for raw DPAD_RIGHT actions; the tap then
+     * does NOT also move the caret.
+     *
+     * The caret itself is moved with setSelection over the extracted
+     * text, exactly like [moveCursor] — never with a raw DPAD key event.
+     * A DPAD event the editor cannot consume (caret already at the end
+     * of the text, or an empty field) propagates to the activity's focus
+     * search, and when focus lands on a non-text widget Android hides
+     * the IME: the "▶ sometimes closes the keyboard" bug. Terminal apps
+     * keep the raw key events (they implement DPAD themselves),
+     * mirroring moveCursor. When the editor cannot report its text at
+     * all, fall back to the key event so the key never goes fully dead.
+     */
+    fun onFlickCursorKey(direction: SwipeDirection) {
+        if (direction == SwipeDirection.Right && flickToggle.isArmed) {
+            confirmFlickToggle()
+            return
+        }
+        val dx = if (direction == SwipeDirection.Right) 1 else -1
+        val keyCode = if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+        if (isTerminalApp(editorInfo)) {
+            sendKeyEvent(keyCode)
+            return
+        }
+        val ic = service.currentInputConnection ?: return
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        val text = extracted?.text?.toString()
+        if (extracted == null || text == null) {
+            sendKeyEvent(keyCode)
+            return
+        }
+        val target = computeCursorKeyTarget(
+            text, extracted.selectionStart, extracted.selectionEnd, dx,
+        )
+        if (target >= 0) {
+            // computeCursorKeyTarget works in extracted-window offsets;
+            // setSelection takes full-document offsets.
+            val docTarget = extracted.startOffset + target
+            ic.setSelection(docTarget, docTarget)
+        }
+    }
+
     // Track last flick tap for toggle input (ガラケー打ち)
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
     private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
