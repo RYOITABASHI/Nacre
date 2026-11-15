@@ -18,6 +18,8 @@ local.properties
 tools/mozc_raw/
 # KenLM vendored source (too large for git, cloned locally)
 ime-ai/src/main/cpp/kenlm/
+# llama.cpp vendored source (cloned by CI, too large for git)
+ime-ai/src/main/cpp/llama.cpp/
 # KenLM cloned source
 /kenlm-src/
 # Signing keys — NEVER commit

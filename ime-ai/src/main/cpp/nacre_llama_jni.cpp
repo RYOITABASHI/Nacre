@@ -36,6 +36,14 @@ static inline void nacre_batch_clear(llama_batch & batch) {
 static std::mutex g_mutex;
 
 #ifdef LLAMA_AVAILABLE
+// Modern llama.cpp expects llama_backend_init() before first use.
+static void nacre_backend_init_once() {
+    static std::once_flag once;
+    std::call_once(once, [] { llama_backend_init(); });
+}
+#endif
+
+#ifdef LLAMA_AVAILABLE
 static llama_model* g_model = nullptr;
 static llama_context* g_ctx = nullptr;
 #endif
@@ -63,10 +71,11 @@ JNIEXPORT jboolean JNICALL
 Java_space_manus_nacre_ai_LlamaJni_loadModel(JNIEnv* env, jobject, jstring model_path) {
 #ifdef LLAMA_AVAILABLE
     std::lock_guard<std::mutex> lock(g_mutex);
+    nacre_backend_init_once();
 
     // Unload existing
     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
-    if (g_model) { llama_free_model(g_model); g_model = nullptr; }
+    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
 
     const char* path = env->GetStringUTFChars(model_path, nullptr);
     LOGI("Loading LLM model from: %s", path);
@@ -74,7 +83,7 @@ Java_space_manus_nacre_ai_LlamaJni_loadModel(JNIEnv* env, jobject, jstring model
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0; // CPU only on mobile
 
-    g_model = llama_load_model_from_file(path, model_params);
+    g_model = llama_model_load_from_file(path, model_params);
     env->ReleaseStringUTFChars(model_path, path);
 
     if (!g_model) {
@@ -88,10 +97,10 @@ Java_space_manus_nacre_ai_LlamaJni_loadModel(JNIEnv* env, jobject, jstring model
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
 
-    g_ctx = llama_new_context_with_model(g_model, ctx_params);
+    g_ctx = llama_init_from_model(g_model, ctx_params);
     if (!g_ctx) {
         LOGE("Failed to create LLM context");
-        llama_free_model(g_model);
+        llama_model_free(g_model);
         g_model = nullptr;
         g_model_loaded = false;
         return JNI_FALSE;
@@ -111,7 +120,7 @@ Java_space_manus_nacre_ai_LlamaJni_unloadModel(JNIEnv*, jobject) {
 #ifdef LLAMA_AVAILABLE
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
-    if (g_model) { llama_free_model(g_model); g_model = nullptr; }
+    if (g_model) { llama_model_free(g_model); g_model = nullptr; }
 #endif
     g_model_loaded = false;
     LOGI("LLM model unloaded");
@@ -144,7 +153,7 @@ Java_space_manus_nacre_ai_LlamaJni_generate(JNIEnv* env, jobject, jstring prompt
     // Tokenize
     const int n_prompt_max = prompt_text.length() + 256;
     std::vector<llama_token> tokens(n_prompt_max);
-    int n_tokens = llama_tokenize(g_model, prompt_text.c_str(), prompt_text.length(),
+    int n_tokens = llama_tokenize(llama_model_get_vocab(g_model), prompt_text.c_str(), prompt_text.length(),
                                    tokens.data(), n_prompt_max, true, true);
     if (n_tokens < 0) {
         LOGE("Tokenization failed");
@@ -153,7 +162,7 @@ Java_space_manus_nacre_ai_LlamaJni_generate(JNIEnv* env, jobject, jstring prompt
     tokens.resize(n_tokens);
 
     // Clear KV cache
-    llama_kv_cache_clear(g_ctx);
+    llama_memory_clear(llama_get_memory(g_ctx), true);
 
     // Evaluate prompt
     llama_batch batch = llama_batch_init(n_tokens, 0, 1);
@@ -178,22 +187,22 @@ Java_space_manus_nacre_ai_LlamaJni_generate(JNIEnv* env, jobject, jstring prompt
             break;
         }
 
-        // Build candidates array from logits for greedy sampling.
-        // b3500 API: llama_sample_token_greedy(ctx, candidates_arr*) — no 3-arg form exists.
+        // Greedy sampling (argmax), see below.
+        // Greedy = argmax over logits (llama_sample_token_greedy was removed
+        // from llama.cpp after b3500; it returned the first maximal
+        // candidate, which is exactly this scan).
         float* logits = llama_get_logits_ith(g_ctx, batch.n_tokens - 1);
-        const int n_vocab = llama_n_vocab(g_model);
-        std::vector<llama_token_data> candidates;
-        candidates.reserve(n_vocab);
-        for (llama_token tid = 0; tid < n_vocab; tid++) {
-            candidates.push_back(llama_token_data{tid, logits[tid], 0.0f});
+        const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(g_model));
+        llama_token new_token = 0;
+        float best_logit = logits[0];
+        for (llama_token tid = 1; tid < n_vocab; tid++) {
+            if (logits[tid] > best_logit) { best_logit = logits[tid]; new_token = tid; }
         }
-        llama_token_data_array candidates_arr = { candidates.data(), candidates.size(), false };
-        llama_token new_token = llama_sample_token_greedy(g_ctx, &candidates_arr);
 
-        if (llama_token_is_eog(g_model, new_token)) break;
+        if (llama_vocab_is_eog(llama_model_get_vocab(g_model), new_token)) break;
 
         char buf[256];
-        int len = llama_token_to_piece(g_model, new_token, buf, sizeof(buf), 0, true);
+        int len = llama_token_to_piece(llama_model_get_vocab(g_model), new_token, buf, sizeof(buf), 0, true);
         if (len > 0) {
             result.append(buf, len);
         }
@@ -240,7 +249,7 @@ Java_space_manus_nacre_ai_LlamaJni_loadZenzModel(JNIEnv* env, jobject, jstring m
     std::lock_guard<std::mutex> lock(g_mutex);
 
     if (g_zenz_ctx) { llama_free(g_zenz_ctx); g_zenz_ctx = nullptr; }
-    if (g_zenz_model) { llama_free_model(g_zenz_model); g_zenz_model = nullptr; }
+    if (g_zenz_model) { llama_model_free(g_zenz_model); g_zenz_model = nullptr; }
     g_zenz_loaded = false;
 
     const char* path = env->GetStringUTFChars(model_path, nullptr);
@@ -249,12 +258,12 @@ Java_space_manus_nacre_ai_LlamaJni_loadZenzModel(JNIEnv* env, jobject, jstring m
     llama_model_params model_params = llama_model_default_params();
     model_params.n_gpu_layers = 0; // CPU only on mobile
 
-    g_zenz_model = llama_load_model_from_file(path, model_params);
+    g_zenz_model = llama_model_load_from_file(path, model_params);
     env->ReleaseStringUTFChars(model_path, path);
 
     if (!g_zenz_model) {
         LOGE("Failed to load zenz model");
-        g_zenz_load_error = "llama_load_model_from_file failed (unsupported pre-tokenizer or corrupt GGUF)";
+        g_zenz_load_error = "llama_model_load_from_file failed (unsupported pre-tokenizer or corrupt GGUF)";
         return JNI_FALSE;
     }
 
@@ -263,12 +272,12 @@ Java_space_manus_nacre_ai_LlamaJni_loadZenzModel(JNIEnv* env, jobject, jstring m
     ctx_params.n_threads = 4;
     ctx_params.n_threads_batch = 4;
 
-    g_zenz_ctx = llama_new_context_with_model(g_zenz_model, ctx_params);
+    g_zenz_ctx = llama_init_from_model(g_zenz_model, ctx_params);
     if (!g_zenz_ctx) {
         LOGE("Failed to create zenz context");
-        llama_free_model(g_zenz_model);
+        llama_model_free(g_zenz_model);
         g_zenz_model = nullptr;
-        g_zenz_load_error = "llama_new_context_with_model failed";
+        g_zenz_load_error = "llama_init_from_model failed";
         return JNI_FALSE;
     }
 
@@ -288,7 +297,7 @@ Java_space_manus_nacre_ai_LlamaJni_unloadZenzModel(JNIEnv*, jobject) {
 #ifdef LLAMA_AVAILABLE
     std::lock_guard<std::mutex> lock(g_mutex);
     if (g_zenz_ctx) { llama_free(g_zenz_ctx); g_zenz_ctx = nullptr; }
-    if (g_zenz_model) { llama_free_model(g_zenz_model); g_zenz_model = nullptr; }
+    if (g_zenz_model) { llama_model_free(g_zenz_model); g_zenz_model = nullptr; }
 #endif
     g_zenz_loaded = false;
     LOGI("zenz model unloaded");
@@ -328,7 +337,7 @@ Java_space_manus_nacre_ai_LlamaJni_generateZenz(JNIEnv* env, jobject, jstring pr
     // azooKey reference implementation.
     const int n_prompt_max = prompt_text.length() + 256;
     std::vector<llama_token> tokens(n_prompt_max);
-    int n_tokens = llama_tokenize(g_zenz_model, prompt_text.c_str(), prompt_text.length(),
+    int n_tokens = llama_tokenize(llama_model_get_vocab(g_zenz_model), prompt_text.c_str(), prompt_text.length(),
                                    tokens.data(), n_prompt_max, false, true);
     if (n_tokens < 0) {
         LOGE("zenz tokenization failed");
@@ -336,7 +345,7 @@ Java_space_manus_nacre_ai_LlamaJni_generateZenz(JNIEnv* env, jobject, jstring pr
     }
     tokens.resize(n_tokens);
 
-    llama_kv_cache_clear(g_zenz_ctx);
+    llama_memory_clear(llama_get_memory(g_zenz_ctx), true);
 
     llama_batch batch = llama_batch_init(n_tokens, 0, 1);
     for (int i = 0; i < n_tokens; i++) {
@@ -359,24 +368,25 @@ Java_space_manus_nacre_ai_LlamaJni_generateZenz(JNIEnv* env, jobject, jstring pr
             break;
         }
 
-        // Greedy sampling, same candidates-array pattern as generate().
+        // Greedy sampling, same argmax pattern as generate().
+        // Greedy = argmax over logits (llama_sample_token_greedy was removed
+        // from llama.cpp after b3500; it returned the first maximal
+        // candidate, which is exactly this scan).
         float* logits = llama_get_logits_ith(g_zenz_ctx, batch.n_tokens - 1);
-        const int n_vocab = llama_n_vocab(g_zenz_model);
-        std::vector<llama_token_data> candidates;
-        candidates.reserve(n_vocab);
-        for (llama_token tid = 0; tid < n_vocab; tid++) {
-            candidates.push_back(llama_token_data{tid, logits[tid], 0.0f});
+        const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(g_zenz_model));
+        llama_token new_token = 0;
+        float best_logit = logits[0];
+        for (llama_token tid = 1; tid < n_vocab; tid++) {
+            if (logits[tid] > best_logit) { best_logit = logits[tid]; new_token = tid; }
         }
-        llama_token_data_array candidates_arr = { candidates.data(), candidates.size(), false };
-        llama_token new_token = llama_sample_token_greedy(g_zenz_ctx, &candidates_arr);
 
         char buf[256];
-        int len = llama_token_to_piece(g_zenz_model, new_token, buf, sizeof(buf), 0, true);
+        int len = llama_token_to_piece(llama_model_get_vocab(g_zenz_model), new_token, buf, sizeof(buf), 0, true);
         std::string piece = len > 0 ? std::string(buf, len) : "";
 
         // Stop BEFORE appending: stock is_eog (id 2), plus zenz's real stop
         // token </s> (id 3 / piece "</s>") — see header comment.
-        if (llama_token_is_eog(g_zenz_model, new_token) || new_token == 3 || piece == "</s>") break;
+        if (llama_vocab_is_eog(llama_model_get_vocab(g_zenz_model), new_token) || new_token == 3 || piece == "</s>") break;
 
         result += piece;
 

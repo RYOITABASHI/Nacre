@@ -1,9 +1,10 @@
 # llama.cpp golden-output regression harness
 
-The :llm native runtime (llama.cpp) is pinned in CI
-(`.github/workflows/build-android.yml` clones a tag and flattens the core
-sources; `ime-ai/src/main/cpp/CMakeLists.txt` applies the zenz
-pre-tokenizer patch at configure time). Two production models run on it:
+The :llm native runtime (llama.cpp) is pinned by `tools/llama-pin.txt`
+(CI clones that tag and copies the whole tree;
+`ime-ai/src/main/cpp/CMakeLists.txt` builds it via upstream CMake and
+applies the zenz pre-tokenizer patch at configure time). Two production
+models run on it:
 
 - **zenz-v3.2-small** (conversion) — depends on the pre-tokenizer patch;
   a pin bump that loses the patch or changes tokenization silently kills
