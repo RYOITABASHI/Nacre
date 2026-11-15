@@ -361,6 +361,32 @@ class NacreInputMethodService :
         inputEngine.onStartInput(info)
     }
 
+    /**
+     * Forward editor-reported selection changes to the engine. This is
+     * the only channel that observes cursor moves the IME did not make
+     * itself (the user tapping into older text, the app repositioning
+     * the cursor); the post-hoc ⇧ tracker depends on it to drop its
+     * target instead of rewriting foreign text that merely reads the
+     * same. Our own commits/rewrites report back as a collapsed cursor
+     * at the tracked position and are recognized as such by the tracker.
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd,
+            candidatesStart, candidatesEnd,
+        )
+        if (::inputEngine.isInitialized) {
+            inputEngine.onSelectionUpdate(newSelStart, newSelEnd)
+        }
+    }
+
     override fun onWindowShown() {
         super.onWindowShown()
         if (!lifecycleRegistry.currentState.isAtLeast(Lifecycle.State.STARTED)) {

@@ -1,96 +1,55 @@
 package space.manus.nacre.ime.input
 
 /**
- * Post-hoc Shift capitalization for the 12-key ABC grid: pressing ⇧ AFTER
- * typing a word rewrites the word before the cursor instead of (only)
- * pre-arming the next letter. Pure string logic — no Android, no state —
- * so the whole decision is unit-testable; [InputEngine] supplies the text
- * before the cursor (via the same getTextBeforeCursor seam the ABC
- * replace-cycle already verifies against) and applies a non-null result
- * with deleteSurroundingText + commitText.
+ * The case forms of the post-hoc Shift cycle for the 12-key ABC grid
+ * (⇧ pressed AFTER typing). Pure string logic — no Android, no state.
  *
- * The cycle is derived from the word's CURRENT case pattern, so repeated
- * ⇧ presses keep advancing it without any press counter to desync:
+ * Every form is computed from the span's recorded ORIGINAL text (see
+ * [PostHocShiftTracker]), never re-derived from the text currently on
+ * screen. PR #69 derived the "next" form from the word's current case
+ * pattern instead, which misclassified natural mixed-case words
+ * (iPhone, McDonald): the derived step landed somewhere the user never
+ * intended, and later steps rewrote the whole word's pattern. Deriving
+ * from the original makes the cycle a fixed rotation the user can
+ * predict — and step 0 restores EXACTLY what was typed, mixed case
+ * included:
  *
- *   hello → hellO → Hello → HELLO → hello → hellO …
+ *   original → last-char-upper → Capitalize → ALL-CAPS → original …
  *
- * 1. all-lowercase → uppercase the LAST cased letter only. The just-typed
- *    letter is the common case (type "a", notice, ⇧ → "A"), and after an
- *    ABC multi-tap the sealed letter is exactly this character.
- * 2. only-last-uppercase → Capitalize the word (first cased letter upper,
- *    the rest lower).
- * 3. Capitalized → ALL-CAPS.
- * 4. ALL-CAPS → all-lowercase (cycle restart).
- * Any other mix (e.g. "hELLO") normalizes to Capitalized, so no press is
- * ever a dead no-op. Single letters collapse to a plain toggle (a ⇄ A):
- * "A" is ALL-CAPS, which rule 4 maps back to "a".
- *
- * Uncased letters inside the run (kana typed just before switching to the
- * ABC grid, e.g. "abcあ") are skipped over, never treated as the cycle's
- * target: the steps act on cased letters, so a mixed run still advances
- * (abcあ → abCあ → Abcあ → ABCあ → abcあ) instead of uppercasing an
- * unchangeable final kana forever.
+ * Steps act on cased letters only; uncased characters inside the span
+ * (should any ever get in) pass through untouched at every step.
  */
 object ShiftCaseCycle {
 
-    /**
-     * The letter word immediately before the cursor in [textBeforeCursor]:
-     * the trailing run of letters, or "" when the character right before
-     * the cursor is not a letter (start of field, after a space, digit or
-     * punctuation) — the caller then falls back to classic pre-arm Shift.
-     */
-    fun wordBeforeCursor(textBeforeCursor: String): String {
-        var start = textBeforeCursor.length
-        while (start > 0 && textBeforeCursor[start - 1].isLetter()) start--
-        return textBeforeCursor.substring(start)
-    }
+    /** The span exactly as originally typed. */
+    const val STEP_ORIGINAL = 0
 
-    /**
-     * The next form of [word] in the cycle described above, or null when
-     * the word has no cased letter at all (e.g. a kana-only run — Shift
-     * has nothing to change there, so the press falls back to pre-arm).
-     */
-    fun nextTransform(word: String): String? {
-        if (word.isEmpty()) return null
-        val cased = word.filter { it.isUpperCase() || it.isLowerCase() }
-        if (cased.isEmpty()) return null
+    /** Only the last cased letter is uppercase; all else as the original. */
+    const val STEP_LAST_CHAR_UPPER = 1
 
-        // ALL-CAPS → all-lowercase (cycle restart). Checked first so a
-        // single uppercase letter toggles back down instead of matching
-        // the Capitalized rule below.
-        if (cased.all { it.isUpperCase() }) return word.lowercase()
+    /** First cased letter uppercase, every other cased letter lowercase. */
+    const val STEP_CAPITALIZED = 2
 
-        // Capitalized → ALL-CAPS.
-        if (cased.first().isUpperCase() && cased.drop(1).all { it.isLowerCase() }) {
-            return word.uppercase()
+    /** Every cased letter uppercase. */
+    const val STEP_ALL_CAPS = 3
+
+    /** Number of steps in the cycle (including [STEP_ORIGINAL]). */
+    const val STEP_COUNT = 4
+
+    /** The form of [original] at [step]; [step] wraps modulo [STEP_COUNT]. */
+    fun formAt(original: String, step: Int): String =
+        when (step % STEP_COUNT) {
+            STEP_LAST_CHAR_UPPER -> lastCasedUpper(original)
+            STEP_CAPITALIZED -> capitalize(original)
+            STEP_ALL_CAPS -> original.uppercase()
+            else -> original
         }
 
-        // Only the last cased letter is uppercase → Capitalize.
-        if (cased.last().isUpperCase() && cased.dropLast(1).all { it.isLowerCase() }) {
-            return capitalize(word)
-        }
-
-        // All-lowercase → uppercase the last cased letter only (an
-        // uncased trailing kana is skipped, not "uppercased" as a no-op).
-        if (cased.all { it.isLowerCase() }) {
-            val idx = word.indexOfLast { it.isLowerCase() }
-            return word.substring(0, idx) + word[idx].uppercase() + word.substring(idx + 1)
-        }
-
-        // Any other mix normalizes to Capitalized.
-        return capitalize(word)
-    }
-
-    /**
-     * One-call decision for the engine: given the text before the cursor,
-     * returns the replacement for the word before the cursor, or null when
-     * this ⇧ press should fall back to classic pre-arm (no letter word
-     * before the cursor, or the word has no case to change).
-     */
-    fun decide(textBeforeCursor: String): String? {
-        val word = wordBeforeCursor(textBeforeCursor)
-        if (word.isEmpty()) return null
-        return nextTransform(word)
+    /** [word] with its last cased letter uppercased; every other character exactly as-is. */
+    private fun lastCasedUpper(word: String): String {
+        val idx = word.indexOfLast { it.isUpperCase() || it.isLowerCase() }
+        if (idx < 0) return word
+        return word.substring(0, idx) + word[idx].uppercase() + word.substring(idx + 1)
     }
 
     /** First cased letter uppercase, every other cased letter lowercase; uncased letters pass through. */
