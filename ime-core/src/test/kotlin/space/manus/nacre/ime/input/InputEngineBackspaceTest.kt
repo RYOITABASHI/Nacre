@@ -51,6 +51,33 @@ class InputEngineBackspaceTest {
         assertEquals(1, backspaceDeleteCount(""))
     }
 
+    // ── conversionCancelKana — which buffer a conversion cancel reverts to ──
+    //
+    // Cancelling a conversion (backspace during conversion) restores the
+    // composing kana. A flick-started conversion composes from the flick
+    // buffer while the romaji buffer stays empty; deriving the revert text
+    // from the romaji buffer alone erased the whole flick input.
+
+    @Test
+    fun `conversion cancel reverts to the flick kana for a flick conversion`() {
+        assertEquals("あした", conversionCancelKana(flickComposingKana = "あした", romajiComposingKana = ""))
+    }
+
+    @Test
+    fun `conversion cancel reverts to the romaji kana for a romaji conversion`() {
+        assertEquals("あした", conversionCancelKana(flickComposingKana = "", romajiComposingKana = "あした"))
+    }
+
+    @Test
+    fun `conversion cancel prefers the flick buffer when both are present`() {
+        assertEquals("あした", conversionCancelKana(flickComposingKana = "あした", romajiComposingKana = "ちがう"))
+    }
+
+    @Test
+    fun `conversion cancel with no composition reverts to empty`() {
+        assertEquals("", conversionCancelKana(flickComposingKana = "", romajiComposingKana = ""))
+    }
+
     @Test
     fun `handles a multi-codepoint emoji sequence, deleting only the trailing pair`() {
         // 👍🏽 (thumbs up + medium skin tone modifier) is two surrogate pairs

@@ -384,6 +384,10 @@ class InputEngine(private val service: NacreInputMethodService) {
                 val lastSpace = trimmed.lastIndexOf(' ')
                 val deleteCount = pos - if (lastSpace >= 0) lastSpace + 1 else 0
                 if (deleteCount > 0) {
+                    // The deleted span may contain a pending ABC
+                    // replace-cycle character — same reset as the plain
+                    // backspace fall-through.
+                    alphaCycler.reset()
                     ic.deleteSurroundingText(deleteCount, 0)
                 }
             }
@@ -530,7 +534,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                     composingText = removeLastKanaUnit(composingText)
                     if (composingText.isEmpty()) {
                         composingKana = ""
-                        ic.finishComposingText()
+                        discardComposingText(ic)
                         clearCandidates()
                     } else {
                         val kana = japaneseEngine.romajiToHiragana(composingText)
@@ -542,13 +546,22 @@ class InputEngine(private val service: NacreInputMethodService) {
                     // English backspace: remove last char
                     englishComposing = englishComposing.dropLast(1)
                     if (englishComposing.isEmpty()) {
-                        ic.finishComposingText()
+                        discardComposingText(ic)
                         clearCandidates()
                     } else {
                         ic.setComposingText(englishComposing, 1)
                         updateEnglishPredictions(englishComposing)
                     }
                 } else {
+                    // Deleting already-committed text. A pending ABC
+                    // replace-cycle character may be exactly what is being
+                    // deleted — reset the cycler here too (processFlick-
+                    // Backspace does the same on its route; this fall-through
+                    // is the route the 12-key pad's ⌫ actually takes when
+                    // nothing is composing, and it bypasses that function).
+                    // Without the reset, a re-tap within the window would
+                    // try to "replace" whatever now precedes the cursor.
+                    alphaCycler.reset()
                     deleteOneCharacterBeforeCursor(ic)
                 }
             }
@@ -635,12 +648,12 @@ class InputEngine(private val service: NacreInputMethodService) {
                 } else if (composingFlickKana.isNotEmpty()) {
                     composingFlickKana = ""
                     composingKana = ""
-                    ic.finishComposingText()
+                    discardComposingText(ic)
                     clearCandidates()
                 } else if (composingText.isNotEmpty()) {
                     composingText = ""
                     composingKana = ""
-                    ic.finishComposingText()
+                    discardComposingText(ic)
                     clearCandidates()
                 } else {
                     sendKeyEvent(KeyEvent.KEYCODE_ESCAPE)
@@ -993,7 +1006,15 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun cancelConversion(ic: InputConnection) {
-        val kana = japaneseEngine.romajiToHiragana(composingText)
+        // A flick-started conversion composes from composingFlickKana, not
+        // the romaji buffer (which stays empty) — restore whichever buffer
+        // actually fed the conversion. Deriving the kana from the romaji
+        // buffer unconditionally made a flick conversion cancel erase the
+        // entire input instead of reverting to its kana.
+        val kana = conversionCancelKana(
+            composingFlickKana,
+            japaneseEngine.romajiToHiragana(composingText),
+        )
         ic.setComposingText(kana, 1)
         isConverting = false
         selectedCandidateIndex = -1
@@ -1312,6 +1333,27 @@ class InputEngine(private val service: NacreInputMethodService) {
     private fun deleteOneCharacterBeforeCursor(ic: InputConnection) {
         val before = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
         ic.deleteSurroundingText(backspaceDeleteCount(before), 0)
+    }
+
+    /**
+     * End the current composition WITHOUT keeping its text — the discard
+     * counterpart to finishing/committing a composition.
+     *
+     * `InputConnection.finishComposingText()` alone does NOT remove the
+     * composing text: it commits whatever the editor currently shows in the
+     * composing region, as-is. The backspace branches that shrink a
+     * composition to empty (and the Escape discard branches) used to call
+     * it directly after zeroing their internal buffer, so the LAST
+     * composing character survived the delete as freshly committed text —
+     * deleting the final kana/letter took two backspace presses, and
+     * typing on instead appended after the "deleted" character. Clearing
+     * the region first (the same setComposingText("", …) idiom the
+     * candidate-selection path already uses before finishing) makes the
+     * character actually go away.
+     */
+    private fun discardComposingText(ic: InputConnection) {
+        ic.setComposingText("", 1)
+        ic.finishComposingText()
     }
 
     /**
@@ -1980,10 +2022,21 @@ class InputEngine(private val service: NacreInputMethodService) {
         if (isConverting) {
             cancelConversion(ic)
         } else if (composingFlickKana.isNotEmpty()) {
+            // Deleting removes the pending multi-tap character itself, so
+            // the toggle must disarm here (FlickToggleState's contract:
+            // whatever settles the pending character disarms it — deletion
+            // settles it by removing it). While armed, the next same-row
+            // tap would "continue" the cycle against the character BEFORE
+            // the deleted one: its last char is not in the cycle, the cycle
+            // lookup misses, and the tap replaces that character with the
+            // cycle's first entry — eating a character the user kept.
+            // (The shrink-to-empty path happened to disarm via
+            // clearCandidates(); the shrink-to-nonempty path did not.)
+            flickToggle.disarm()
             composingFlickKana = composingFlickKana.dropLast(1)
             composingKana = composingFlickKana
             if (composingFlickKana.isEmpty()) {
-                ic.finishComposingText()
+                discardComposingText(ic)
                 clearCandidates()
             } else {
                 ic.setComposingText(composingFlickKana, 1)
@@ -2050,6 +2103,20 @@ internal fun backspaceDeleteCount(beforeCursor: String): Int {
     val low = beforeCursor[beforeCursor.length - 1]
     return if (Character.isSurrogatePair(high, low)) 2 else 1
 }
+
+/**
+ * Which kana text cancelling a conversion reverts the composition to.
+ *
+ * Two composition buffers can feed a conversion: the flick pad's
+ * [composingFlickKana] (12-key input; the romaji buffer stays empty there)
+ * and the romaji buffer's kana (QWERTY input; the flick buffer stays empty
+ * there). The flick buffer wins when non-empty. Extracted as a pure
+ * function so the precedence is unit-testable: cancelling a flick-started
+ * conversion used to derive the kana from the (empty) romaji buffer alone
+ * and erased the whole input instead of reverting to its kana.
+ */
+internal fun conversionCancelKana(flickComposingKana: String, romajiComposingKana: String): String =
+    flickComposingKana.ifEmpty { romajiComposingKana }
 
 enum class SwipeDirection { Up, Down, Left, Right }
 
