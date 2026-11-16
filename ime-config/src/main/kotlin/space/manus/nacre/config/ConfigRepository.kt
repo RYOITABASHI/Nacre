@@ -17,6 +17,7 @@ class ConfigRepository(context: Context) {
         private const val KEY_V_ANGLE = "v_angle"
         private const val KEY_AUTO_CONVERT_ENABLED = "auto_convert_enabled"
         private const val KEY_LIGHTING_MODE = "lighting_mode"
+        private const val KEY_SWIPE_TYPING_ENABLED = "swipe_typing_enabled"
 
         // Defaults
         private const val DEFAULT_PRESET = "Default"
@@ -30,6 +31,7 @@ class ConfigRepository(context: Context) {
         private const val DEFAULT_V_ANGLE = 4f
         private const val DEFAULT_AUTO_CONVERT = true
         private const val DEFAULT_LIGHTING_MODE = "none"
+        private const val DEFAULT_SWIPE_TYPING = true
     }
 
     private val prefs: SharedPreferences =
@@ -79,6 +81,12 @@ class ConfigRepository(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO_CONVERT_ENABLED, DEFAULT_AUTO_CONVERT)
         set(value) = prefs.edit().putBoolean(KEY_AUTO_CONVERT_ENABLED, value).apply()
 
+    // ---- Swipe (glide) typing on the QWERTY layer ----
+
+    var swipeTypingEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SWIPE_TYPING_ENABLED, DEFAULT_SWIPE_TYPING)
+        set(value) = prefs.edit().putBoolean(KEY_SWIPE_TYPING_ENABLED, value).apply()
+
     // ---- Lighting ----
 
     var lightingMode: String
@@ -98,6 +106,7 @@ class ConfigRepository(context: Context) {
             .putFloat(KEY_V_ANGLE, DEFAULT_V_ANGLE)
             .putBoolean(KEY_AUTO_CONVERT_ENABLED, DEFAULT_AUTO_CONVERT)
             .putString(KEY_LIGHTING_MODE, DEFAULT_LIGHTING_MODE)
+            .putBoolean(KEY_SWIPE_TYPING_ENABLED, DEFAULT_SWIPE_TYPING)
             .apply()
     }
 }

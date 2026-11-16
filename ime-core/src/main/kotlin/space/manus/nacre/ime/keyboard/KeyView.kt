@@ -17,6 +17,9 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -31,8 +34,13 @@ import kotlinx.coroutines.withTimeoutOrNull
 import space.manus.nacre.config.KeyAction
 import space.manus.nacre.config.KeyDef
 import space.manus.nacre.ime.NacreInputMethodService
+import space.manus.nacre.ime.input.Layer
+import space.manus.nacre.ime.input.SwipeDecoder
 import space.manus.nacre.ime.input.SwipeDirection
+import space.manus.nacre.ime.input.SwipeKeyBox
+import space.manus.nacre.ime.input.SwipeTracePoint
 import kotlin.math.abs
+import kotlin.math.hypot
 
 // Colors are read from service.currentTheme at runtime
 
@@ -44,6 +52,11 @@ fun KeyView(
     row: Int = 0,
     column: Int = 0,
     heightDp: Float = 52f,
+    // True only for keys of the standard/compact QWERTY screens: those keys
+    // take part in glide (swipe) typing. Other KeyView users (V-Split, the
+    // flick pad's mod keys, the symbol pad) keep the default and are
+    // completely untouched by the glide machinery.
+    glideEnabled: Boolean = false,
 ) {
     var isPressed by remember { mutableStateOf(false) }
     var bsRepeating by remember { mutableStateOf(false) }
@@ -148,9 +161,37 @@ fun KeyView(
     val isCharacterKey = keyDef.action is KeyAction.Text && keyDef.primary.length == 1
     var pressPopupChar by remember { mutableStateOf<String?>(null) }
 
+    // Glide (swipe) typing: QWERTY letter keys publish their geometry to
+    // the input engine's registry, so a glide starting on any letter can be
+    // decoded against all of them. Registration follows layout (and is
+    // withdrawn on dispose), so whichever QWERTY variant is on screen is
+    // exactly the geometry the decoder sees — no layout math duplicated.
+    val isGlideLetterKey = glideEnabled && isCharacterKey && keyDef.primary[0] in 'a'..'z'
+    var keyCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    if (isGlideLetterKey) {
+        DisposableEffect(keyDef.primary) {
+            onDispose { service.inputEngine.swipeGeometry.unregister(keyDef.primary[0]) }
+        }
+    }
+
     Box(
         modifier = modifier
             .then(if (heightDp > 0f) Modifier.height(heightDp.dp) else Modifier.fillMaxHeight())
+            .onGloballyPositioned { coords ->
+                keyCoords = coords
+                if (isGlideLetterKey) {
+                    val pos = coords.positionInRoot()
+                    service.inputEngine.swipeGeometry.register(
+                        SwipeKeyBox(
+                            char = keyDef.primary[0],
+                            centerX = pos.x + coords.size.width / 2f,
+                            centerY = pos.y + coords.size.height / 2f,
+                            width = coords.size.width.toFloat(),
+                            height = coords.size.height.toFloat(),
+                        ),
+                    )
+                }
+            }
             // Gesture handling wraps the FULL cell, before the visual
             // padding below: the entire cell is the hit area, so there
             // are no dead gaps between keys (previously the padding
@@ -176,6 +217,53 @@ fun KeyView(
                     // Long-press alternate awaiting release-to-commit
                     // (Gboard style); sliding off the key cancels it.
                     var pendingAlternate: String? = null
+
+                    // --- Glide (swipe) typing state ---
+                    // Armed only for QWERTY letter keys on the base layer
+                    // with the setting on and never in password fields.
+                    // Because this key received the DOWN, Compose keeps
+                    // delivering the pointer's moves to THIS handler even
+                    // as the finger crosses other keys — the full path is
+                    // available here, converted to root coordinates (the
+                    // space the geometry registry and the trail overlay
+                    // share). A glide ACTIVATES only after the finger has
+                    // clearly travelled across several keys; anything
+                    // shorter flows into the existing tap / long-press /
+                    // directional-flick branches below, unchanged.
+                    val engine = service.inputEngine
+                    val glideArmed = isGlideLetterKey &&
+                        service.layerManager.currentLayer == Layer.Base &&
+                        service.configRepository.swipeTypingEnabled &&
+                        !engine.isPasswordField
+                    var glideBoxes: List<SwipeKeyBox> = emptyList()
+                    var glideJapanese = false
+                    var glideKeyUnitPx = 0f
+                    val glideTrace = ArrayList<SwipeTracePoint>()
+                    val glideKeysVisited = HashSet<Char>()
+                    var glidePathLength = 0f
+                    var glideActive = false
+                    var glideLastDecodeMs = 0L
+                    // Set when the pointer's release is actually observed;
+                    // distinguishes a finished glide from a cancelled one
+                    // in the finally block below.
+                    var glideCompleted = false
+                    if (glideArmed) {
+                        glideBoxes = engine.swipeGeometry.snapshot()
+                        glideJapanese = service.layerManager.isJapanese
+                        if (glideBoxes.size >= 10) {
+                            val widths = glideBoxes.map { it.width }.sorted()
+                            glideKeyUnitPx = widths[widths.size / 2]
+                            val start = keyCoords?.localToRoot(down.position)
+                            if (start != null) {
+                                val startPoint = SwipeTracePoint(start.x, start.y)
+                                glideTrace.add(startPoint)
+                                nearestGlideKey(startPoint, glideBoxes)?.let {
+                                    glideKeysVisited.add(it)
+                                }
+                            }
+                        }
+                    }
+                    val glideTracking = glideArmed && glideTrace.isNotEmpty()
 
                     try {
                         while (true) {
@@ -233,9 +321,44 @@ fun KeyView(
                                     wasDragged = true
                                     pressPopupChar = null
                                 }
+
+                                if (glideTracking) {
+                                    val rp = keyCoords?.localToRoot(change.position)
+                                    if (rp != null) {
+                                        val lastPt = glideTrace.last()
+                                        val moved = hypot(rp.x - lastPt.x, rp.y - lastPt.y)
+                                        if (moved >= 6f) {
+                                            glidePathLength += moved
+                                            val pt = SwipeTracePoint(rp.x, rp.y)
+                                            glideTrace.add(pt)
+                                            nearestGlideKey(pt, glideBoxes)?.let {
+                                                glideKeysVisited.add(it)
+                                            }
+                                            if (!glideActive &&
+                                                glidePathLength >= glideKeyUnitPx * 1.15f &&
+                                                glideKeysVisited.size >= 3
+                                            ) {
+                                                glideActive = true
+                                            }
+                                            if (glideActive) {
+                                                engine.onSwipeTrailUpdate(glideTrace.toList())
+                                                val nowMs = System.currentTimeMillis()
+                                                if (nowMs - glideLastDecodeMs >= 80L) {
+                                                    glideLastDecodeMs = nowMs
+                                                    engine.previewSwipe(
+                                                        glideTrace,
+                                                        glideBoxes,
+                                                        glideJapanese,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 change.consume()
                             } else {
                                 change.consume()
+                                glideCompleted = true
                                 break
                             }
                         }
@@ -243,14 +366,58 @@ fun KeyView(
                         isPressed = false
                         bsRepeating = false
                         pressPopupChar = null
+                        if (glideActive && !glideCompleted) {
+                            // The gesture was cancelled mid-glide (IME
+                            // window hidden, layout switched, pointer
+                            // stream interrupted): the release handling
+                            // below never runs, so discard the preview
+                            // here — its candidates must not stay
+                            // tappable behind a gesture that never landed.
+                            engine.cancelSwipePreview()
+                        } else if (glideTracking) {
+                            engine.clearSwipeTrail()
+                        }
                     }
 
                     val feedback = service.feedbackManager
 
                     val holdDuration = System.currentTimeMillis() - downTime
 
-                    // Fn key: handle hold vs tap
-                    if (isFnAction) {
+                    if (glideActive) {
+                        // Glide takes precedence even if the long-press
+                        // timer fired earlier in this gesture: on a letter
+                        // key the only long-press outcome is a pending
+                        // alternate (committed on release, below), and a
+                        // finger that went on to cross several keys was
+                        // gliding, not holding. (The slide-off-to-cancel
+                        // gesture for alternates is short and never
+                        // reaches the glide activation gate.)
+                        //
+                        // Glide word: decode the full trace. On success the
+                        // top candidate commits (English) or feeds the
+                        // romaji path (Japanese). On failure the gesture
+                        // falls back to the letters it crossed, replayed
+                        // as ordinary taps through the normal input path —
+                        // a failed glide types what the finger visited,
+                        // never nothing.
+                        val results = engine.decodeSwipe(glideTrace, glideBoxes, glideJapanese)
+                        if (results.isNotEmpty()) {
+                            feedback.onSwipe()
+                            engine.commitSwipe(results, glideJapanese)
+                        } else {
+                            val letters = SwipeDecoder.lettersAlongPath(glideTrace, glideBoxes)
+                            if (letters.length >= 2) {
+                                letters.forEach { ch ->
+                                    engine.processAction(KeyAction.Text(ch.toString()))
+                                }
+                            } else {
+                                feedback.onKeyPress(keyDef.action)
+                                service.keyLighting.onKeyPress(keyDef.primary, column)
+                                engine.processKey(keyDef)
+                            }
+                        }
+                    } else if (isFnAction) {
+                        // Fn key: handle hold vs tap
                         if (longPressHandled) {
                             // Long press = Esc already handled, return to base
                             service.layerManager.fnUp(wasTap = false)
@@ -437,6 +604,24 @@ fun KeyView(
             )
         }
     }
+}
+
+/**
+ * The letter whose key contains (or nearly contains) [point], in the
+ * normalized-distance metric the swipe decoder uses; null when the point
+ * is over no key (e.g. drifted onto the space row mid-glide).
+ */
+private fun nearestGlideKey(point: SwipeTracePoint, boxes: List<SwipeKeyBox>): Char? {
+    var best: Char? = null
+    var bestNd = Double.MAX_VALUE
+    for (box in boxes) {
+        val nd = SwipeDecoder.normalizedDistance(point, box)
+        if (nd < bestNd) {
+            bestNd = nd
+            best = box.char
+        }
+    }
+    return if (bestNd <= 1.0) best else null
 }
 
 /** Minimal globe outline icon drawn with Canvas (no icon dependency needed) */

@@ -8,6 +8,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -166,6 +168,7 @@ private fun StandardKeyboardScreen(
     val accentColor = Color(theme.accent.toInt())
     val heightScale = keyboardHeightScale(service.configRepository)
 
+    Box(modifier = Modifier.fillMaxWidth()) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -210,6 +213,47 @@ private fun StandardKeyboardScreen(
                 KeyRow(keys = row, service = service, rowIndex = rowIndex, keyHeightDp = keyHeight)
             }
         }
+    }
+
+    // Glide trail, drawn over the keys while a swipe is in progress.
+    SwipeTrailOverlay(service = service)
+    }
+}
+
+/**
+ * The glide trail: a polyline through the live trace points the input
+ * engine publishes while a swipe is in progress. Points arrive in root
+ * coordinates, so the Canvas converts by its own root position. Purely
+ * visual — the Canvas installs no pointer handlers and never intercepts
+ * touches meant for the keys below.
+ */
+@Composable
+private fun SwipeTrailOverlay(service: NacreInputMethodService) {
+    val trail = service.inputEngine.swipeTrail
+    if (trail.size < 2) return
+    var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
+    val accent = Color(service.currentTheme.accent.toInt())
+    androidx.compose.foundation.Canvas(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { origin = it.positionInRoot() },
+    ) {
+        val path = androidx.compose.ui.graphics.Path()
+        trail.forEachIndexed { index, point ->
+            val x = point.x - origin.x
+            val y = point.y - origin.y
+            if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
+        }
+        drawPath(
+            path = path,
+            color = accent,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 3.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                join = androidx.compose.ui.graphics.StrokeJoin.Round,
+            ),
+            alpha = 0.75f,
+        )
     }
 }
 
@@ -308,6 +352,7 @@ fun KeyRow(
                 row = rowIndex,
                 column = colIndex,
                 heightDp = keyHeightDp,
+                glideEnabled = true,
             )
         }
     }
@@ -345,6 +390,7 @@ fun KeyRowWithTrackball(
                     row = rowIndex,
                     column = colIndex,
                     heightDp = keyHeightDp,
+                    glideEnabled = true,
                 )
             }
         }
@@ -366,6 +412,7 @@ fun KeyRowWithTrackball(
                     row = rowIndex,
                     column = mid + colIndex,
                     heightDp = keyHeightDp,
+                    glideEnabled = true,
                 )
             }
         }
