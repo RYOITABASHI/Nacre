@@ -1871,6 +1871,57 @@ class NacreDictionary internal constructor(
         return merged.sortedBy { it.cost }.take(limit)
     }
 
+    // --- Swipe (glide) typing lexicons ---
+
+    override fun swipeLexiconEnglish(): List<SwipeLexiconWord> {
+        if (englishFullDict.isEmpty()) return emptyList()
+        return englishFullDict.map { (key, entries) ->
+            val best = entries.minByOrNull { it.cost } ?: entries.first()
+            SwipeLexiconWord(word = key, cost = best.cost, surface = best.surface)
+        }
+    }
+
+    @Volatile
+    private var swipeRomajiLexiconCache: List<SwipeLexiconWord>? = null
+
+    override fun swipeLexiconRomaji(): List<SwipeLexiconWord> {
+        swipeRomajiLexiconCache?.let { return it }
+        if (dict.isEmpty()) return emptyList()
+        // Keep the ROMAJI_SWIPE_LEXICON_LIMIT most frequent readings (by
+        // their cheapest entry cost) in a bounded max-heap: the main
+        // dictionary holds hundreds of thousands of readings, and a full
+        // sort just to take a top-N would stall the first glide.
+        val heap = java.util.PriorityQueue<Pair<String, Int>>(
+            ROMAJI_SWIPE_LEXICON_LIMIT,
+            compareByDescending { it.second },
+        )
+        for ((reading, entries) in dict) {
+            val cost = entries.minOf { it.cost }
+            if (heap.size < ROMAJI_SWIPE_LEXICON_LIMIT) {
+                heap.add(reading to cost)
+            } else if (cost < (heap.peek()?.second ?: Int.MAX_VALUE)) {
+                heap.poll()
+                heap.add(reading to cost)
+            }
+        }
+        val engine = JapaneseEngine()
+        val bestByRomaji = HashMap<String, Int>()
+        for ((reading, cost) in heap) {
+            val romaji = KanaRomaji.hiraganaToRomaji(reading) ?: continue
+            if (romaji.length < SwipeLexicon.MIN_WORD_LENGTH) continue
+            // KanaRomaji is a generation aid, not a source of truth: the
+            // romaji enters the lexicon only if the real engine converts
+            // it back to exactly this reading.
+            if (engine.romajiToHiragana(romaji, finalize = true) != reading) continue
+            val prev = bestByRomaji[romaji]
+            if (prev == null || cost < prev) bestByRomaji[romaji] = cost
+        }
+        if (bestByRomaji.isEmpty()) return emptyList()
+        val result = bestByRomaji.map { (romaji, cost) -> SwipeLexiconWord(romaji, cost) }
+        swipeRomajiLexiconCache = result
+        return result
+    }
+
     private enum class EnglishCasePattern { LOWER, CAPITALIZED, UPPER, MIXED }
 
     private fun englishCasePattern(s: String): EnglishCasePattern {
@@ -2320,6 +2371,9 @@ class NacreDictionary internal constructor(
 
         /** Max keys scanned per predictEnglish() prefix query (see step 2). */
         private const val ENGLISH_PREFIX_SCAN_LIMIT = 500
+
+        /** Kana readings (most frequent) converted into the romaji swipe lexicon. */
+        private const val ROMAJI_SWIPE_LEXICON_LIMIT = 20000
 
         // Dictionary snapshot (fast restart): magic "NCSP", on-disk layout
         // version — bump when the serialized layout or DictEntry changes.

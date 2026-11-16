@@ -214,6 +214,7 @@ fun NacreSettingsScreen() {
         // --- Auto Convert ---
         SectionHeader("Auto Convert")
         AutoConvertSection(config)
+        SwipeTypingSection(config)
 
         Spacer(modifier = Modifier.height(24.dp))
 
@@ -945,6 +946,45 @@ private fun AutoConvertSection(config: ConfigRepository) {
                     enabled = it
                     acPrefs.edit().putBoolean("auto_convert_enabled", it).apply()
                     config.autoConvertEnabled = it
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NacreAccent,
+                    checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun SwipeTypingSection(config: ConfigRepository) {
+    var enabled by remember { mutableStateOf(config.swipeTypingEnabled) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Swipe Typing", color = NacreText, fontSize = 14.sp)
+                Text(
+                    "Glide across the QWERTY letters to type words (English and romaji)",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    config.swipeTypingEnabled = it
                 },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = NacreAccent,
@@ -2058,7 +2098,7 @@ private fun WhisperModelSection() {
                 }
             } else {
                 Text(
-                    "Place an ASR model directory (ReazonSpeech/SenseVoice) + silero_vad_v6.onnx in /sdcard/Download/",
+                    "Place an ASR model directory (ReazonSpeech/SenseVoice) + silero_vad.onnx in /sdcard/Download/",
                     color = NacreTextDim, fontSize = 12.sp,
                 )
                 if (modelDir == null) {

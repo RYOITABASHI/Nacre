@@ -208,6 +208,50 @@ class InputEngine(private val service: NacreInputMethodService) {
     private var englishComposing: String = ""
     private var englishPredictionJob: Job? = null
 
+    // --- Swipe (glide) typing on the QWERTY layer (see SwipeDecoder.kt) ---
+
+    /** Letter-key geometry, registered by the QWERTY key views as they lay out. */
+    val swipeGeometry = SwipeGeometry()
+
+    /** Live glide trail in keyboard-root coordinates, read by the trail overlay. */
+    var swipeTrail by mutableStateOf<List<SwipeTracePoint>>(emptyList())
+        private set
+
+    /**
+     * The committed span ("word ") of the latest glide, while it can still
+     * be replaced wholesale: tapping another candidate swaps it, and one
+     * backspace removes it entirely. Mirrors the symbolReplace contract.
+     * Invalidated by any other action (see processAction), by candidate
+     * selection, and by clearCandidates().
+     *
+     * Safety discipline (same as the post-hoc ⇧ tracker): [swipeReplaceEnd]
+     * records the absolute cursor position the span ends at, and
+     * onSelectionUpdate disarms the span the moment the cursor is anywhere
+     * else; independently, both consumers verify at mutation time that the
+     * text immediately before the cursor IS the span before deleting
+     * anything. A stale span can therefore never delete or replace
+     * unrelated text — worst case it silently stops being replaceable.
+     */
+    private var swipeReplace: String? = null
+    private var swipeReplaceEnd: Int = -1
+
+    private fun armSwipeReplace(ic: InputConnection, span: String) {
+        swipeReplace = span
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        swipeReplaceEnd = if (extracted != null) {
+            extracted.startOffset + extracted.selectionEnd
+        } else {
+            -1
+        }
+    }
+
+    /** True when the text immediately before the cursor is exactly [span]. */
+    private fun textBeforeCursorEquals(ic: InputConnection, span: String): Boolean =
+        ic.getTextBeforeCursor(span.length, 0)?.toString() == span
+
+    @Volatile private var swipeDecoderEn: SwipeDecoder? = null
+    @Volatile private var swipeDecoderJa: SwipeDecoder? = null
+
     // Conversion state (observable by Compose)
     var candidates = mutableStateListOf<ConversionCandidate>()
         private set
@@ -242,11 +286,189 @@ class InputEngine(private val service: NacreInputMethodService) {
     // Debug: last prediction info
     var debugInfo by mutableStateOf("")
 
+    /** Build the swipe decoders off the main thread so the first glide is instant. */
+    fun warmUpSwipeDecoders() {
+        scope.launch(Dispatchers.Default) {
+            buildSwipeDecoder(japanese = false)
+            buildSwipeDecoder(japanese = true)
+        }
+    }
+
+    private fun buildSwipeDecoder(japanese: Boolean): SwipeDecoder? {
+        val cached = if (japanese) swipeDecoderJa else swipeDecoderEn
+        if (cached != null) return cached
+        val dict = dictionary ?: return null
+        val words = if (japanese) dict.swipeLexiconRomaji() else dict.swipeLexiconEnglish()
+        if (words.isEmpty()) return null
+        val built = SwipeDecoder(SwipeLexicon(words))
+        if (japanese) swipeDecoderJa = built else swipeDecoderEn = built
+        return built
+    }
+
+    fun onSwipeTrailUpdate(points: List<SwipeTracePoint>) {
+        swipeTrail = points
+    }
+
+    fun clearSwipeTrail() {
+        if (swipeTrail.isNotEmpty()) swipeTrail = emptyList()
+    }
+
+    /** Decode a glide trace against the registered key geometry. */
+    fun decodeSwipe(
+        trace: List<SwipeTracePoint>,
+        keys: List<SwipeKeyBox>,
+        japanese: Boolean,
+        limit: Int = 8,
+    ): List<SwipeCandidate> {
+        val decoder = buildSwipeDecoder(japanese) ?: return emptyList()
+        return decoder.decode(trace, keys, limit)
+    }
+
+    /**
+     * Live candidates while the finger is still gliding (the caller
+     * throttles this). Replaces the candidate bar content directly —
+     * in-flight prediction jobs are cancelled so a stale result can't land
+     * on top of the preview.
+     */
+    fun previewSwipe(trace: List<SwipeTracePoint>, keys: List<SwipeKeyBox>, japanese: Boolean) {
+        if (isPasswordField) return
+        // Never disturb an active conversion: its candidate list and
+        // isConverting state belong to the conversion, and commitSwipe
+        // commits the selected candidate before feeding the glide's
+        // romaji. The trail still draws; only the bar stays untouched.
+        if (isConverting) return
+        val results = decodeSwipe(trace, keys, japanese, limit = 5)
+        if (results.isEmpty()) return
+        // Publishing glide candidates takes over the candidate bar, so the
+        // bar's previous replacement offers end here — a pending
+        // symbolReplace (or the previous glide's swipeReplace) must not
+        // stay armed behind the preview: a second finger tapping a
+        // preview candidate mid-glide would otherwise take a replacement
+        // branch in commitCandidate and act on the older span.
+        symbolReplace = null
+        swipeReplace = null
+        englishPredictionJob?.cancel()
+        englishPredictionJob = null
+        predictionJob?.cancel()
+        predictionJob = null
+        zenzPredictSeq++
+        zenzPredictJob?.cancel()
+        zenzPredictJob = null
+        androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+            candidates.clear()
+            candidates.addAll(results.map { cand ->
+                if (japanese) {
+                    ConversionCandidate(
+                        surface = japaneseEngine.romajiToHiragana(cand.word),
+                        reading = cand.word,
+                    )
+                } else {
+                    ConversionCandidate(surface = cand.surface, reading = cand.word)
+                }
+            })
+            selectedCandidateIndex = -1
+            isConverting = false
+        }
+    }
+
+    /**
+     * Discard a glide preview after a CANCELLED gesture (the pointer
+     * stream was interrupted before release): regenerate the candidate
+     * state the preview replaced, from whatever composition is actually
+     * live, so no candidate from the cancelled gesture remains tappable.
+     */
+    fun cancelSwipePreview() {
+        clearSwipeTrail()
+        when {
+            // The preview is gated while converting, so a conversion's
+            // candidates were never replaced — nothing to restore.
+            isConverting -> Unit
+            composingText.isNotEmpty() -> {
+                // Clear SYNCHRONOUSLY first: the restoration below is
+                // async (debounced prediction), and a tap landing in
+                // that window must not find the cancelled glide's
+                // candidates still actionable over the live composition.
+                candidates.clear()
+                selectedCandidateIndex = -1
+                updatePredictions(composingKana)
+            }
+            englishComposing.isNotEmpty() -> {
+                candidates.clear()
+                selectedCandidateIndex = -1
+                updateEnglishPredictions(englishComposing)
+            }
+            else -> clearCandidates()
+        }
+    }
+
+    /**
+     * Commit the top result of a finished glide.
+     *
+     * English: the word plus a trailing space commits immediately (the
+     * typed path's Space behavior); the alternates stay in the candidate
+     * bar and the committed span remains replaceable as a whole (see
+     * [swipeReplace]). Japanese: the decoded romaji feeds the EXISTING
+     * romaji→kana path via [processJapaneseInput] — nothing is committed
+     * blindly, and conversion proceeds exactly as if the romaji had been
+     * typed key by key.
+     */
+    fun commitSwipe(results: List<SwipeCandidate>, japanese: Boolean) {
+        val ic = service.currentInputConnection ?: return
+        val top = results.firstOrNull() ?: return
+        clearSwipeTrail()
+        // A glide is a fresh word input, so it performs the same
+        // symbol-candidate dismissal as the typed Text action: a pending
+        // symbolReplace must not survive into the glide's candidates, or
+        // tapping one would "replace" the just-committed symbol with a
+        // glide word and corrupt the composition state.
+        if (symbolReplace != null) {
+            symbolReplace = null
+            candidates.clear()
+            selectedCandidateIndex = -1
+        }
+        if (japanese) {
+            if (isConverting) commitSelectedCandidate(ic)
+            processJapaneseInput(top.word, ic)
+            return
+        }
+        // A half-typed word is committed first, exactly like Space does.
+        if (englishComposing.isNotEmpty()) {
+            val pending = resolveEnglishCommitText()
+            ic.commitText(pending + " ", 1)
+            recordEnglishSelection(pending)
+            englishComposing = ""
+        }
+        val shifted = service.layerManager.isShifted
+        val surface = if (shifted) {
+            service.layerManager.toggleShift()
+            top.surface.replaceFirstChar { it.uppercase() }
+        } else {
+            top.surface
+        }
+        ic.commitText(surface + " ", 1)
+        recordEnglishSelection(surface)
+        armSwipeReplace(ic, surface + " ")
+        androidx.compose.runtime.snapshots.Snapshot.withMutableSnapshot {
+            candidates.clear()
+            candidates.addAll(results.map { cand ->
+                val s = if (shifted) {
+                    cand.surface.replaceFirstChar { it.uppercase() }
+                } else {
+                    cand.surface
+                }
+                ConversionCandidate(surface = s, reading = cand.word)
+            })
+            selectedCandidateIndex = 0
+            isConverting = false
+        }
+    }
+
     /**
      * Called when dictionary finishes loading. If there's active composing text,
      * regenerate predictions so candidates appear retroactively.
      */
     fun refreshPredictionsIfNeeded() {
+        warmUpSwipeDecoders()
         if (composingText.isNotEmpty() && !isConverting) {
             val kana = japaneseEngine.romajiToHiragana(composingText)
             // Log.d removed: never log user input text (kana) even in debug
@@ -266,6 +488,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         englishComposing = ""
         japaneseEngine.reset()
         clearCandidates()
+        clearSwipeTrail()
         alphaCycler.reset()
         // Field change is a resetting action for the post-hoc ⇧ target.
         postHocShift.reset()
@@ -329,6 +552,9 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     fun processSwipe(keyDef: KeyDef, direction: SwipeDirection) {
+        // A directional flick commits through its own routes — a pending
+        // glide replacement no longer describes the text before the cursor.
+        swipeReplace = null
         val text = when (direction) {
             SwipeDirection.Up -> keyDef.swipeUp
             SwipeDirection.Down -> keyDef.swipeDown
@@ -454,6 +680,10 @@ class InputEngine(private val service: NacreInputMethodService) {
         // cursor keys, candidate selection — reset at their own sites.)
         if (action !is KeyAction.Shift) postHocShift.reset()
 
+        // A glide-committed word stays replaceable only until the next
+        // action moves on; Backspace is the one action that consumes it.
+        if (action !is KeyAction.Backspace) swipeReplace = null
+
         when (action) {
             is KeyAction.Text -> {
                 // Dismiss symbol candidates (、。？！) when typing next character
@@ -553,16 +783,31 @@ class InputEngine(private val service: NacreInputMethodService) {
                         updateEnglishPredictions(englishComposing)
                     }
                 } else {
-                    // Deleting already-committed text. A pending ABC
-                    // replace-cycle character may be exactly what is being
-                    // deleted — reset the cycler here too (processFlick-
-                    // Backspace does the same on its route; this fall-through
-                    // is the route the 12-key pad's ⌫ actually takes when
-                    // nothing is composing, and it bypasses that function).
-                    // Without the reset, a re-tap within the window would
-                    // try to "replace" whatever now precedes the cursor.
-                    alphaCycler.reset()
-                    deleteOneCharacterBeforeCursor(ic)
+                    val swiped = swipeReplace
+                    if (swiped != null) swipeReplace = null // consumed either way
+                    if (swiped != null && textBeforeCursorEquals(ic, swiped)) {
+                        // One ⌫ removes a just-swiped word together with
+                        // its trailing space, as a single action — the
+                        // span goes away in full, never half of it (the
+                        // delete semantics aligned by the backspace audit).
+                        // The identity check above is the fail-closed
+                        // guard: if the span is not exactly what precedes
+                        // the cursor (edited, cursor moved), this ⌫ is an
+                        // ordinary one-character delete instead.
+                        ic.deleteSurroundingText(swiped.length, 0)
+                        clearCandidates()
+                    } else {
+                        // Deleting already-committed text. A pending ABC
+                        // replace-cycle character may be exactly what is being
+                        // deleted — reset the cycler here too (processFlick-
+                        // Backspace does the same on its route; this fall-through
+                        // is the route the 12-key pad's ⌫ actually takes when
+                        // nothing is composing, and it bypasses that function).
+                        // Without the reset, a re-tap within the window would
+                        // try to "replace" whatever now precedes the cursor.
+                        alphaCycler.reset()
+                        deleteOneCharacterBeforeCursor(ic)
+                    }
                 }
             }
 
@@ -739,6 +984,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         val ic = service.currentInputConnection ?: return
         // Candidate selection is a resetting action for the post-hoc ⇧ target.
         postHocShift.reset()
+        swipeReplace = null
         if (index in candidates.indices) {
             selectedCandidateIndex = index
             ic.setComposingText(candidates[index].surface, 1)
@@ -759,6 +1005,25 @@ class InputEngine(private val service: NacreInputMethodService) {
                 ic.commitText(candidate.surface, 1)
                 clearCandidates()
                 return
+            }
+
+            // Swipe replacement: delete the just-glided word (with its
+            // trailing space) and commit the tapped alternate instead.
+            // The candidate bar stays up so the user can re-pick;
+            // swipeReplace tracks the new committed span. Identity is
+            // verified first: if the span no longer precedes the cursor,
+            // the tap falls through to ordinary candidate handling.
+            val swiped = swipeReplace
+            if (swiped != null) {
+                swipeReplace = null
+                if (textBeforeCursorEquals(ic, swiped)) {
+                    ic.deleteSurroundingText(swiped.length, 0)
+                    ic.commitText(candidate.surface + " ", 1)
+                    recordEnglishSelection(candidate.surface)
+                    armSwipeReplace(ic, candidate.surface + " ")
+                    selectedCandidateIndex = index
+                    return
+                }
             }
 
             // Clear composing text first to avoid double input
@@ -1287,6 +1552,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         selectedCandidateIndex = -1
         isConverting = false
         symbolReplace = null
+        swipeReplace = null
         composingFlickKana = ""
         flickToggle.disarm()
     }
@@ -1816,6 +2082,18 @@ class InputEngine(private val service: NacreInputMethodService) {
      */
     fun onSelectionUpdate(newSelStart: Int, newSelEnd: Int) {
         postHocShift.onSelectionChanged(newSelStart, newSelEnd)
+        // The glide replacement span stays armed only while the cursor
+        // sits collapsed exactly at its recorded end. Any other selection
+        // — a tap into older text, a drag selection, the app moving the
+        // cursor — disarms it, so a later backspace or candidate tap can
+        // never act on unrelated text. (Both consumers additionally
+        // verify the span's identity at mutation time; this is the early
+        // drop, and a wrong drop only costs replaceability, never text.)
+        if (swipeReplace != null &&
+            !(newSelStart == newSelEnd && newSelEnd == swipeReplaceEnd)
+        ) {
+            swipeReplace = null
+        }
     }
 
     /**
@@ -2133,4 +2411,18 @@ interface DictionaryProvider {
     fun recordSelection(candidate: ConversionCandidate)
     fun predictEnglish(prefix: String, limit: Int = 20): List<ConversionCandidate>
     fun recordEnglishSelection(word: String)
+
+    /**
+     * Lexicon for swipe (glide) decoding of English words: the decoded form
+     * plus its frequency cost (lower = more frequent). Empty until the
+     * English dictionary has loaded.
+     */
+    fun swipeLexiconEnglish(): List<SwipeLexiconWord> = emptyList()
+
+    /**
+     * Lexicon for swipe decoding in Japanese (romaji) mode: romaji strings
+     * generated from the most frequent kana dictionary readings. Empty
+     * until the main dictionary has loaded.
+     */
+    fun swipeLexiconRomaji(): List<SwipeLexiconWord> = emptyList()
 }
