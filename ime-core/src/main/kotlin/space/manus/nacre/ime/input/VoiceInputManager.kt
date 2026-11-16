@@ -1993,6 +1993,22 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 val instruction = sessionPresetInstruction
                     ?: space.manus.nacre.ai.RefinePresets.activeInstruction(service)
 
+                // Cleanup guard (clean preset only — the rewrite presets
+                // diverge on purpose): the local 1.5B refiner damages
+                // already-clean input (measured 25/40 damaged, 0/40
+                // recovered on clean ASR output; see CleanupGuard), so
+                // skip refinement entirely when the text shows no
+                // cleanup-need signal, and reject divergent outputs
+                // below instead of replacing the committed text.
+                val isCleanupPreset =
+                    instruction == space.manus.nacre.ai.LlmPostProcessor.DICTATION_CLEANUP_INSTRUCTION
+                if (isCleanupPreset &&
+                    !space.manus.nacre.ai.CleanupGuard.needsRefinement(quickCleanText)
+                ) {
+                    writeDiagnostic("tryLlmRefinement: cleanup guard SKIPPED (no cleanup signals) for '${quickCleanText.take(60)}'")
+                    return@Thread
+                }
+
                 // Step 1: cloud chain
                 val cloudChain = space.manus.nacre.ai.cloud.RefinerFactory.build(service)
                 for (refiner in cloudChain) {
@@ -2002,6 +2018,16 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                     if (result.isSuccess) {
                         val refined = result.getOrNull()?.trim().orEmpty()
                         writeDiagnostic("tryLlmRefinement[cloud:${refiner.name}]: ${elapsed}ms, refined='${refined.take(80)}'")
+                        if (isCleanupPreset && refined.isNotBlank() &&
+                            !space.manus.nacre.ai.CleanupGuard.isFaithfulRefinement(quickCleanText, refined)
+                        ) {
+                            // Divergent rewrite of a cleanup input: keep
+                            // the committed quickClean text rather than
+                            // falling through to another refiner, which
+                            // risks the same damage.
+                            writeDiagnostic("tryLlmRefinement[cloud:${refiner.name}]: cleanup guard REJECTED divergent refinement, keeping quickClean")
+                            return@Thread
+                        }
                         applyRefinedIfDifferent(quickCleanText, refined, refiner.name, guarded)
                         return@Thread
                     } else {
@@ -2023,6 +2049,12 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
                 val refined = refineViaAidl(svc, quickCleanText, LLM_REFINE_TIMEOUT_MS, instruction)
                 val elapsed = System.currentTimeMillis() - start
                 writeDiagnostic("tryLlmRefinement[local]: ${elapsed}ms, refined='${refined?.take(80)}'")
+                if (isCleanupPreset && !refined.isNullOrBlank() &&
+                    !space.manus.nacre.ai.CleanupGuard.isFaithfulRefinement(quickCleanText, refined)
+                ) {
+                    writeDiagnostic("tryLlmRefinement[local]: cleanup guard REJECTED divergent refinement, keeping quickClean")
+                    return@Thread
+                }
                 applyRefinedIfDifferent(quickCleanText, refined.orEmpty(), "local-qwen", guarded)
             } catch (e: Exception) {
                 writeDiagnostic("tryLlmRefinement: error ${e.javaClass.simpleName}: ${e.message}")
