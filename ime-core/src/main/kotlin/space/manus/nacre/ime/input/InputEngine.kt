@@ -107,6 +107,27 @@ internal fun computeEnterOutcome(imeOptions: Int, inputType: Int): EnterOutcome 
 }
 
 /**
+ * The English word immediately before the cursor in [textBeforeCursor]:
+ * the trailing run of ASCII letters, or "" when the character right
+ * before the cursor is not an ASCII letter (start of field, after a
+ * space, digit, kana or punctuation).
+ *
+ * The 12-key ABC pad commits letters immediately, so its "current word"
+ * for prediction must be recovered from the editor text — there is no
+ * composing buffer holding it (the QWERTY English layer predicts from
+ * its buffer instead). ASCII only, mirroring what the English predictor
+ * and history accept as a word. Pure function — unit-testable.
+ */
+internal fun englishWordBeforeCursor(textBeforeCursor: String): String {
+    var start = textBeforeCursor.length
+    while (start > 0) {
+        val c = textBeforeCursor[start - 1]
+        if (c in 'a'..'z' || c in 'A'..'Z') start-- else break
+    }
+    return textBeforeCursor.substring(start)
+}
+
+/**
  * Resolve the text to commit for an in-progress English composing buffer: the
  * selected (or top) predicted candidate — but ONLY if that candidate was
  * actually computed for the CURRENT composing prefix.
@@ -166,6 +187,9 @@ class InputEngine(private val service: NacreInputMethodService) {
             if (field != value) {
                 field = value
                 postHocShift.reset()
+                // Leaving Alpha also retires its prediction word and the
+                // completions it published.
+                if (!value) clearAlphaPredictions()
             }
         }
 
@@ -248,6 +272,69 @@ class InputEngine(private val service: NacreInputMethodService) {
     /** True when the text immediately before the cursor is exactly [span]. */
     private fun textBeforeCursorEquals(ic: InputConnection, span: String): Boolean =
         ic.getTextBeforeCursor(span.length, 0)?.toString() == span
+
+    /**
+     * The committed English word the candidate bar currently completes for
+     * the 12-key ABC pad, or null when the bar holds anything else.
+     *
+     * ABC letters commit immediately (iPhone-style direct insertion), so
+     * unlike the QWERTY English layer there is no composing buffer to
+     * predict from — the word lives in the editor, and
+     * [refreshAlphaPredictions] re-derives it from the text before the
+     * cursor after every alpha commit/delete. Tapping a candidate replaces
+     * exactly this word (see commitCandidate); the span is verified against
+     * the editor at commit time — both its text and the cursor's absolute
+     * position ([alphaPredictionEnd], the same anchoring discipline as
+     * [swipeReplace] and the post-hoc ⇧ tracker) — and dropped by any
+     * action that ends the word, so it can never authorize replacing an
+     * identical word somewhere else in the field.
+     */
+    private var alphaPredictionWord: String? = null
+    private var alphaPredictionEnd: Int = -1
+
+    /**
+     * The prefix whose completions the candidate bar currently shows, if
+     * they were published by the ABC path — tracked SEPARATELY from the
+     * span above, because publication is debounced: the bar can still
+     * show the previous word's completions while the span already tracks
+     * the next one. Set only at publish time (inside the prediction job),
+     * so it always describes what is actually on screen; retirement uses
+     * it to recognize — and clear — the ABC-owned bar even after the span
+     * itself is gone.
+     */
+    private var alphaBarPrefix: String? = null
+
+    /**
+     * Clear the candidate bar when (and only when) it currently holds the
+     * ABC path's completions, recognized by their recorded prefix. A bar
+     * another feature has taken over no longer matches and is left alone.
+     */
+    private fun clearAlphaBarIfOwned() {
+        val prefix = alphaBarPrefix ?: return
+        alphaBarPrefix = null
+        if (candidates.isNotEmpty() &&
+            candidates.all { it.reading.equals(prefix, ignoreCase = true) }
+        ) {
+            candidates.clear()
+            selectedCandidateIndex = -1
+        }
+    }
+
+    /** Retire the ABC prediction span and cancel its in-flight job. */
+    private fun dropAlphaPredictionSpan() {
+        alphaPredictionWord = null
+        alphaPredictionEnd = -1
+        englishPredictionJob?.cancel()
+        englishPredictionJob = null
+    }
+
+    /** True when the editor's selection is collapsed exactly at [absoluteEnd]. */
+    private fun cursorIsAt(ic: InputConnection, absoluteEnd: Int): Boolean {
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0) ?: return false
+        return extracted.selectionStart >= 0 &&
+            extracted.selectionStart == extracted.selectionEnd &&
+            extracted.startOffset + extracted.selectionEnd == absoluteEnd
+    }
 
     @Volatile private var swipeDecoderEn: SwipeDecoder? = null
     @Volatile private var swipeDecoderJa: SwipeDecoder? = null
@@ -359,8 +446,8 @@ class InputEngine(private val service: NacreInputMethodService) {
         // branch in commitCandidate and act on the older span.
         symbolReplace = null
         swipeReplace = null
-        englishPredictionJob?.cancel()
-        englishPredictionJob = null
+        dropAlphaPredictionSpan()
+        alphaBarPrefix = null
         predictionJob?.cancel()
         predictionJob = null
         zenzPredictSeq++
@@ -438,6 +525,10 @@ class InputEngine(private val service: NacreInputMethodService) {
             candidates.clear()
             selectedCandidateIndex = -1
         }
+        // The glide publishes its own candidates below — the ABC
+        // prediction span must not outlive the bar it described.
+        dropAlphaPredictionSpan()
+        alphaBarPrefix = null
         if (japanese) {
             if (isConverting) commitSelectedCandidate(ic)
             processJapaneseInput(top.word, ic)
@@ -513,6 +604,8 @@ class InputEngine(private val service: NacreInputMethodService) {
         japaneseEngine.reset()
         clearCandidates()
         clearSwipeTrail()
+        alphaPredictionWord = null
+        alphaPredictionEnd = -1
         alphaCycler.reset()
         // Field change is a resetting action for the post-hoc ⇧ target.
         postHocShift.reset()
@@ -708,6 +801,13 @@ class InputEngine(private val service: NacreInputMethodService) {
         // action moves on; Backspace is the one action that consumes it.
         if (action !is KeyAction.Backspace) swipeReplace = null
 
+        // Same discipline for the ABC pad's prediction word: any action
+        // other than Backspace ends the word (space, punctuation, Enter,
+        // mode/language switches). The word is captured first so the
+        // Space/Enter branches can still record it for history.
+        val alphaWordBeforeAction = alphaPredictionWord
+        if (action !is KeyAction.Backspace) clearAlphaPredictions()
+
         when (action) {
             is KeyAction.Text -> {
                 // Dismiss symbol candidates (、。？！) when typing next character
@@ -831,6 +931,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                         // try to "replace" whatever now precedes the cursor.
                         alphaCycler.reset()
                         deleteOneCharacterBeforeCursor(ic)
+                        refreshAlphaPredictions(ic)
                     }
                 }
             }
@@ -862,6 +963,9 @@ class InputEngine(private val service: NacreInputMethodService) {
                     // keyboard layer happens to be active — see computeEnterOutcome.
                     // This still avoids accidental sends in Slack/Notion/web CLIs
                     // because those compose boxes are themselves flagged multi-line.
+                    if (flickAlphaMode && alphaWordBeforeAction != null) {
+                        recordEnglishSelection(alphaWordBeforeAction)
+                    }
                     performEditorActionOrEnter(ic)
                     if (service.layerManager.currentLayer != Layer.Base) {
                         service.layerManager.resetToBase()
@@ -899,6 +1003,12 @@ class InputEngine(private val service: NacreInputMethodService) {
                     englishComposing = ""
                     clearCandidates()
                 } else {
+                    // ABC pad: the word was committed letter by letter, so
+                    // record it here at its boundary — the pad's Enter and
+                    // candidate-tap paths record the same way.
+                    if (flickAlphaMode && alphaWordBeforeAction != null) {
+                        recordEnglishSelection(alphaWordBeforeAction)
+                    }
                     commitText(" ")
                 }
             }
@@ -1009,6 +1119,8 @@ class InputEngine(private val service: NacreInputMethodService) {
         // Candidate selection is a resetting action for the post-hoc ⇧ target.
         postHocShift.reset()
         swipeReplace = null
+        dropAlphaPredictionSpan()
+        alphaBarPrefix = null
         if (index in candidates.indices) {
             selectedCandidateIndex = index
             ic.setComposingText(candidates[index].surface, 1)
@@ -1046,6 +1158,30 @@ class InputEngine(private val service: NacreInputMethodService) {
                     recordEnglishSelection(candidate.surface)
                     armSwipeReplace(ic, candidate.surface + " ")
                     selectedCandidateIndex = index
+                    return
+                }
+            }
+
+            // ABC pad replacement: the candidates complete a word that is
+            // already COMMITTED (direct insertion keeps no composing
+            // buffer), so delete exactly that word and commit the tapped
+            // completion instead. Consuming the bar retires the span and
+            // its in-flight prediction job first — a late result must not
+            // republish completions behind the commit. The replacement
+            // itself is verified against a live snapshot (the word's text
+            // AND the cursor anchored at the span's recorded end); any
+            // mismatch falls through to ordinary candidate handling.
+            val alphaWord = alphaPredictionWord
+            if (alphaWord != null) {
+                val alphaEnd = alphaPredictionEnd
+                dropAlphaPredictionSpan()
+                if (alphaEnd >= 0 && textBeforeCursorEquals(ic, alphaWord) &&
+                    cursorIsAt(ic, alphaEnd)
+                ) {
+                    ic.deleteSurroundingText(alphaWord.length, 0)
+                    ic.commitText(candidate.surface, 1)
+                    recordEnglishSelection(candidate.surface)
+                    clearCandidates()
                     return
                 }
             }
@@ -1456,7 +1592,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         dictionary?.recordEnglishSelection(word)
     }
 
-    private fun updateEnglishPredictions(prefix: String) {
+    private fun updateEnglishPredictions(prefix: String, alphaBarTag: String? = null) {
         if (isPasswordField) return
         val dict = dictionary ?: return
         if (prefix.isEmpty()) {
@@ -1474,8 +1610,91 @@ class InputEngine(private val service: NacreInputMethodService) {
                 candidates.addAll(predictions)
                 isConverting = false
                 selectedCandidateIndex = if (predictions.isNotEmpty()) 0 else -1
+                // Bar ownership is recorded at PUBLISH time, by the job
+                // that actually landed: [alphaBarTag] is the ABC pad's
+                // prefix, or null when the QWERTY path published (which
+                // ends ABC ownership of the bar).
+                alphaBarPrefix = alphaBarTag
             }
         }
+    }
+
+    /**
+     * Drop the ABC pad's prediction state, clearing the candidate bar when
+     * (and only when) it currently holds those predictions — the bar is
+     * shared, so state owned by another feature must survive.
+     */
+    private fun clearAlphaPredictions() {
+        if (alphaPredictionWord == null && alphaBarPrefix == null) return
+        dropAlphaPredictionSpan()
+        clearAlphaBarIfOwned()
+    }
+
+    /**
+     * Recompute English predictions for the 12-key ABC pad from the word
+     * now committed before the cursor. ABC letters insert immediately, so
+     * [updateFlickPredictions] never fires for them (it is driven by the
+     * kana composing buffer, which stays empty in Alpha mode) — without
+     * this refresh the pad showed no completion candidates at all. Called
+     * after every alpha commit and alpha backspace; a no-op off the pad.
+     * The fetch is bounded to a word's worth of characters, once per tap —
+     * not the per-keystroke 100+ char fetch the latency work removed from
+     * the QWERTY/zenz path.
+     */
+    private fun refreshAlphaPredictions(ic: InputConnection) {
+        if (!flickAlphaMode) return
+        if (isPasswordField) {
+            alphaPredictionWord = null
+            alphaPredictionEnd = -1
+            return
+        }
+        var before = ic.getTextBeforeCursor(ALPHA_PREDICTION_FETCH_CHARS, 0)
+            ?.toString().orEmpty()
+        var word = englishWordBeforeCursor(before)
+        if (word.isNotEmpty() && before.length == ALPHA_PREDICTION_FETCH_CHARS &&
+            word.length == before.length
+        ) {
+            // The fetch came back full AND the letter run fills it, so
+            // the window may have cut a longer word — and a truncated
+            // suffix must never pose as the whole word (a candidate tap
+            // would replace only its tail). Widen once; if the wider
+            // fetch also comes back full of one run, decline to predict
+            // rather than guess. (A short return means the text simply
+            // starts there — the word is complete.)
+            before = ic.getTextBeforeCursor(ALPHA_PREDICTION_FETCH_MAX, 0)
+                ?.toString().orEmpty()
+            word = englishWordBeforeCursor(before)
+            if (before.length == ALPHA_PREDICTION_FETCH_MAX && word.length == before.length) {
+                clearAlphaPredictions()
+                return
+            }
+        }
+        if (word.isEmpty()) {
+            clearAlphaPredictions()
+            return
+        }
+        // Anchor the span to the cursor's absolute position (the
+        // armSwipeReplace formula): selection updates and the candidate
+        // commit both verify against it, so an identical word elsewhere
+        // in the field can never be replaced by mistake. When the editor
+        // cannot report a trustworthy anchor, decline to publish at all:
+        // an unanchored completion could not be applied as a replacement,
+        // so tapping it would append it after the typed prefix instead.
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        val end = if (extracted != null && extracted.selectionStart >= 0 &&
+            extracted.selectionStart == extracted.selectionEnd
+        ) {
+            extracted.startOffset + extracted.selectionEnd
+        } else {
+            -1
+        }
+        if (end < 0) {
+            clearAlphaPredictions()
+            return
+        }
+        alphaPredictionWord = word
+        alphaPredictionEnd = end
+        updateEnglishPredictions(word, alphaBarTag = word)
     }
 
     /** See [pickEnglishCommitText] for why this is more than `englishComposing`. */
@@ -1564,6 +1783,12 @@ class InputEngine(private val service: NacreInputMethodService) {
     }
 
     private fun clearCandidates() {
+        // Generic clearing retires the ABC prediction span too: the
+        // marker must never outlive the bar it describes, or a later
+        // action could mistake another feature's candidates for ABC
+        // completions (or clear them as if they were).
+        dropAlphaPredictionSpan()
+        alphaBarPrefix = null
         predictionJob?.cancel()
         predictionJob = null
         conversionSeq++
@@ -1840,6 +2065,8 @@ class InputEngine(private val service: NacreInputMethodService) {
 
     // Track last flick tap for toggle input (ガラケー打ち)
     private val TOGGLE_TIMEOUT_MS = 800L // Time window for toggle input
+    private val ALPHA_PREDICTION_FETCH_CHARS = 40 // Editor window re-read per ABC tap to recover the current word
+    private val ALPHA_PREDICTION_FETCH_MAX = 200 // One widening step when a longer word may have been cut
     private val ZENZ_PREDICT_MIN_KANA = 4 // Typing-time zenz needs a few kana to beat the engine
     private val ZENZ_PREDICT_DEBOUNCE_MS = 300L // Composing must be stable this long before firing
     private val ZENZ_CONTEXT_FETCH_MARGIN = 40 // Extra chars fetched before the cursor so ZenzContext can align the cap to a sentence boundary
@@ -1981,9 +2208,11 @@ class InputEngine(private val service: NacreInputMethodService) {
      * works. The replace only happens when the character actually before the
      * cursor is the pending cycle entry (guards cursor moves / deletions).
      *
-     * Trade-off vs the old composing route: ABC flick input no longer feeds
-     * the English word predictor/learner — iPhone's ABC side has no composing
-     * prediction either, and immediate insertion is the requested behavior.
+     * Prediction: insertion stays immediate (no composing buffer), so the
+     * English completer is fed from the committed side instead — every
+     * exit below ends in [refreshAlphaPredictions], which re-derives the
+     * current word from the editor and republishes its completions, and a
+     * candidate tap replaces that word (see [alphaPredictionWord]).
      */
     fun processFlickAlpha(
         kana: String,
@@ -1993,6 +2222,14 @@ class InputEngine(private val service: NacreInputMethodService) {
     ) {
         val ic = service.currentInputConnection ?: return
         flickShiftApplied = false
+        // A non-letter commit (the pad's punctuation key, the '@' key's
+        // symbols) ends the word being typed: record it for history before
+        // the prediction refresh below drops it — the QWERTY path records
+        // the same way when punctuation commits its composing buffer.
+        val wordBeforeCommit = alphaPredictionWord
+        if (wordBeforeCommit != null && (kana.length != 1 || !kana[0].isLetter())) {
+            recordEnglishSelection(wordBeforeCommit)
+        }
         val wasConverting = isConverting
         if (wasConverting) commitSelectedCandidate(ic)
 
@@ -2028,6 +2265,7 @@ class InputEngine(private val service: NacreInputMethodService) {
                     }
                     noteAlphaCommit(out, replaced = true)
                     anchorPostHocSpanIfNeeded(ic, out.length)
+                    refreshAlphaPredictions(ic)
                     return
                 }
                 // Cursor moved or the pending char is gone: re-arm as a fresh
@@ -2041,6 +2279,7 @@ class InputEngine(private val service: NacreInputMethodService) {
             ic.commitText(kana, 1)
             noteAlphaCommit(kana, replaced = false)
             anchorPostHocSpanIfNeeded(ic, kana.length)
+            refreshAlphaPredictions(ic)
             return
         }
 
@@ -2050,6 +2289,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         ic.commitText(kana, 1)
         noteAlphaCommit(kana, replaced = false)
         anchorPostHocSpanIfNeeded(ic, kana.length)
+        refreshAlphaPredictions(ic)
     }
 
     /**
@@ -2106,6 +2346,29 @@ class InputEngine(private val service: NacreInputMethodService) {
      */
     fun onSelectionUpdate(newSelStart: Int, newSelEnd: Int) {
         postHocShift.onSelectionChanged(newSelStart, newSelEnd)
+        // The ABC prediction span stays armed only while the cursor sits
+        // collapsed exactly at its recorded end (the swipeReplace rule):
+        // a tap into older text, a drag selection, the app moving the
+        // cursor — anything else retires it, so a later candidate tap can
+        // never replace an identical word somewhere else. Our own alpha
+        // commits report back at the recorded end and keep it armed.
+        // The span's completions retire with it — without their span, a
+        // tap would append the completion after the typed prefix instead
+        // of replacing it. The bar is matched by its PUBLISHED prefix
+        // (alphaBarPrefix), not the span: publication is debounced, so
+        // the bar can still show the previous word's completions while
+        // the span already tracks the next one.
+        if (alphaPredictionWord != null &&
+            !(newSelStart == newSelEnd && newSelEnd == alphaPredictionEnd)
+        ) {
+            dropAlphaPredictionSpan()
+            clearAlphaBarIfOwned()
+        } else if (alphaPredictionWord == null) {
+            // Span already retired by an earlier update: a lagging
+            // ABC-owned bar still ends here. (No job is touched — a
+            // newer session's prediction may be in flight.)
+            clearAlphaBarIfOwned()
+        }
         // The glide replacement span stays armed only while the cursor
         // sits collapsed exactly at its recorded end. Any other selection
         // — a tap into older text, a drag selection, the app moving the
@@ -2140,7 +2403,14 @@ class InputEngine(private val service: NacreInputMethodService) {
             // tracked span the transform acts on.
             alphaCycler.reset()
             confirmFlickToggle()
-            if (tryPostHocCapitalize()) return
+            if (tryPostHocCapitalize()) {
+                // The rewrite changed the word's case: re-derive the
+                // prediction word so its completions — and the history
+                // recording at the next Space/Enter — track the new form
+                // (processAction retired the pre-rewrite span).
+                service.currentInputConnection?.let { refreshAlphaPredictions(it) }
+                return
+            }
         }
         service.layerManager.toggleShift()
     }
@@ -2346,6 +2616,9 @@ class InputEngine(private val service: NacreInputMethodService) {
             }
         } else {
             deleteOneCharacterBeforeCursor(ic)
+            // ABC pad: the shortened word's completions replace the old
+            // ones (no-op off the pad / in kana mode).
+            refreshAlphaPredictions(ic)
         }
     }
 
