@@ -16,6 +16,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import space.manus.nacre.config.SymbolCatalog
 import space.manus.nacre.ime.NacreInputMethodService
 
 private val PanelBg = Color(0xFF0F0F23)
@@ -30,6 +31,7 @@ private data class SymbolCategory(
 
 private val SYMBOL_CATEGORIES = listOf(
     SymbolCategory("🕐", "最近", emptyList()), // Placeholder — filled by recentSymbols
+    SymbolCategory("あ", "日本語", SymbolCatalog.japanesePunctuation),
     SymbolCategory("+-", "算術", listOf(
         "+", "−", "×", "÷", "=", "≠", "≈", "≡", "±", "∓",
         "<", ">", "≤", "≥", "≪", "≫", "∝", "√", "∛", "∜",
@@ -125,6 +127,11 @@ private val SYMBOL_CATEGORIES = listOf(
 private val PROGRAMMING_CATEGORY_INDEX =
     SYMBOL_CATEGORIES.indexOfFirst { it.label == "プログラミング" }.let { if (it < 0) 1 else it }
 
+// Same label lookup for the Japanese-punctuation category — the panel's
+// default tab outside Dev Mode (see SymbolsPanel below).
+private val JAPANESE_CATEGORY_INDEX =
+    SYMBOL_CATEGORIES.indexOfFirst { it.label == "日本語" }.let { if (it < 0) 1 else it }
+
 // Recently used symbols — persisted
 private val recentSymbols = mutableStateListOf<String>()
 private var recentSymbolsLoaded = false
@@ -156,15 +163,16 @@ fun SymbolsPanel(
     LaunchedEffect(Unit) { loadRecentSymbols(service) }
     // Default to recent if available; otherwise, in Shelly Dev Mode, jump
     // straight to "プログラミング" (already has every commonly-needed dev
-    // symbol) instead of the generic "算術" tab — makes symbol access easier
-    // without touching the flick-key layout itself.
+    // symbol); in normal use default to "日本語" — the punctuation set
+    // (、。・「」！？…) a Japanese user opens this panel for. Before the
+    // 日本語 category existed, the default landed on "算術".
     val isDevMode = service.inputEngine.isShellyDevModeActive
     var selectedCategory by remember(isDevMode) {
         mutableIntStateOf(
             when {
                 recentSymbols.isNotEmpty() -> 0
                 isDevMode -> PROGRAMMING_CATEGORY_INDEX
-                else -> 1
+                else -> JAPANESE_CATEGORY_INDEX
             },
         )
     }
@@ -244,6 +252,10 @@ fun SymbolsPanel(
                 }
             }
         }
+
+        // Gboard-style return bar: ABC back to the letters, Space / ⌫
+        // without leaving the panel.
+        PanelFooter(service = service, onDismiss = onDismiss)
     }
 }
 

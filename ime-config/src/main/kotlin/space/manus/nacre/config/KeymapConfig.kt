@@ -69,13 +69,20 @@ object DefaultLayouts {
                 key(".", swipeUp = "！", swipeDown = "。"),
                 KeyDef("⌫", action = KeyAction.Backspace, swipeLeft = "⌫w"),
             ),
-            // Row 4: Shift ↑ ↓ Fn Space Alt Enter
+            // Row 4: Shift ↑ ↓ 😀 #+ Fn Space Alt Enter
+            // Emoji/Symbols are one tap from the letter layer, in the same
+            // positions as the compact layout, so both QWERTY surfaces feel
+            // like the same product (Gboard likewise keeps its emoji key on
+            // the letter layer's bottom row). The space bar gives up width
+            // (3f -> 1.8f) to pay for the two keys; the row total is unchanged.
             listOf(
                 KeyDef("Shift", action = KeyAction.Shift, widthMultiplier = 0.9f),
                 KeyDef("↑", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_UP), widthMultiplier = 0.45f),
                 KeyDef("↓", action = KeyAction.KeyCode(android.view.KeyEvent.KEYCODE_DPAD_DOWN), widthMultiplier = 0.45f),
+                KeyDef("😀", action = KeyAction.Emoji, widthMultiplier = 0.6f),
+                KeyDef("#+", label = "#+", action = KeyAction.Symbols, widthMultiplier = 0.6f),
                 KeyDef("Fn", action = KeyAction.Fn, widthMultiplier = 0.6f),
-                KeyDef(" ", label = "⎵", action = KeyAction.Space, widthMultiplier = 3f,
+                KeyDef(" ", label = "⎵", action = KeyAction.Space, widthMultiplier = 1.8f,
                     swipeUp = "Tab", swipeLeft = "ToggleJa", swipeRight = "ToggleJa"),
                 KeyDef("Alt", action = KeyAction.Alt, widthMultiplier = 0.7f),
                 KeyDef("↵", action = KeyAction.Enter, widthMultiplier = 1.2f),

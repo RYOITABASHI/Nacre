@@ -603,6 +603,21 @@ fun KeyView(
                     .padding(end = 3.dp, top = 1.dp),
             )
         }
+
+        // Bottom corner hint: the swipe-down character (e.g. 。 on "."),
+        // which was previously completely invisible — a user had no way
+        // to discover it short of reading the layout source.
+        val downHintText = keyDef.swipeDown
+        if (downHintText != null) {
+            Text(
+                text = downHintText,
+                color = KeyTextSwipe,
+                fontSize = 9.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 3.dp, bottom = 1.dp),
+            )
+        }
     }
 }
 
