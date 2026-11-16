@@ -836,7 +836,13 @@ class NacreDictionary internal constructor(
      */
     private fun promoteLoanwordCandidate(sorted: MutableList<ConversionCandidate>, kana: String) {
         if (kana.length < 2) return
-        val surfaces = englishDict[kana]?.map { it.surface }?.toSet() ?: return
+        // Same key set as englishMatch: a candidate that arrived via the
+        // long-vowel-normalized key (romaji-typed loanword) must be
+        // promotable too, not just the raw reading's own entries.
+        val surfaces = englishLookupKeys(kana)
+            .flatMap { englishDict[it].orEmpty() }
+            .map { it.surface }
+            .toSet()
         if (surfaces.isEmpty()) return
         val idx = sorted.indexOfFirst { it.surface in surfaces }
         if (idx > LOANWORD_PROMOTE_INDEX) {
@@ -2199,20 +2205,74 @@ class NacreDictionary internal constructor(
         return lo
     }
 
+    /**
+     * Keys under which [englishDict] may hold [kana]'s loanwords: the
+     * reading as typed, plus its long-vowel (ー) spelling when that
+     * differs (see [englishMatch] step 1).
+     */
+    private fun englishLookupKeys(kana: String): List<String> {
+        val normalized = normalizeLongVowelReading(kana)
+        return if (normalized == kana) listOf(kana) else listOf(kana, normalized)
+    }
+
+    /**
+     * The ー spelling of a reading whose long vowels were entered the
+     * romaji way. Doubling a vowel LETTER in romaji surfaces in kana as
+     * the previous syllable followed by its own vowel kana —
+     * "konpyuutaa" composes to こんぴゅうたあ (ぴゅ+う, た+あ), NOT to a
+     * string containing ああ — so the normalization is syllable-based:
+     * a vowel kana that merely lengthens the preceding syllable's vowel
+     * (including the おう/えい spellings) becomes ー. Used ONLY as an
+     * additional English-dictionary lookup key — the user's reading
+     * itself is never rewritten, and Japanese candidate generation
+     * never sees the normalized form.
+     */
+    private fun normalizeLongVowelReading(kana: String): String {
+        if (kana.length < 2) return kana
+        val out = StringBuilder(kana.length)
+        var prevVowel: Char? = null
+        for (c in kana) {
+            val lengtheners = prevVowel?.let { LONG_VOWEL_LENGTHENERS[it] }
+            if (lengtheners != null && c in lengtheners) {
+                out.append('ー')
+                // The long vowel closes the syllable: a vowel kana
+                // after ー starts a new syllable, it does not lengthen
+                // this one further.
+                prevVowel = null
+            } else {
+                out.append(c)
+                prevVowel = KANA_VOWEL[c]
+            }
+        }
+        return out.toString()
+    }
+
     private fun englishMatch(kana: String, limit: Int): List<ConversionCandidate> {
         if (limit <= 0 || kana.length < 2) return emptyList()
         val results = mutableListOf<ConversionCandidate>()
 
-        // 1. Exact match — no penalty
-        val exact = englishDict[kana]
-        if (exact != null) {
-            for (entry in exact.take(limit)) {
-                results.add(ConversionCandidate(
-                    surface = entry.surface,
-                    reading = kana,
-                    cost = entry.cost,
-                ))
+        // 1. Exact match — no penalty. Looked up under the reading as
+        // typed AND under its long-vowel (ー) spelling: romaji typists
+        // spell long vowels by doubling (konpyuutaa → こんぴゅうたあ) or
+        // with おう, while the loanword table is keyed by the ー spelling
+        // (こんぴゅーたー), so the raw key alone never matched and the
+        // English candidate silently never appeared for romaji input.
+        // The candidate keeps the TYPED reading, so selection learning
+        // and history stay keyed by what the user actually entered.
+        val seenSurfaces = mutableSetOf<String>()
+        for (key in englishLookupKeys(kana)) {
+            val exact = englishDict[key] ?: continue
+            for (entry in exact) {
+                if (results.size >= limit) break
+                if (seenSurfaces.add(entry.surface)) {
+                    results.add(ConversionCandidate(
+                        surface = entry.surface,
+                        reading = kana,
+                        cost = entry.cost,
+                    ))
+                }
             }
+            if (results.size >= limit) break
         }
 
         // 2. Prefix match — penalty proportional to remaining characters
@@ -2482,6 +2542,30 @@ class NacreDictionary internal constructor(
 
         /** 0-based slot the best exact-match loanword candidate is promoted to. */
         private const val LOANWORD_PROMOTE_INDEX = 4
+
+        /** Hiragana -> the vowel ('a'/'i'/'u'/'e'/'o') of its syllable, for
+         *  [normalizeLongVowelReading]. ん/っ/ー and non-kana are absent:
+         *  they close the syllable, so a following vowel kana starts a new
+         *  one instead of lengthening. */
+        private val KANA_VOWEL: Map<Char, Char> = HashMap<Char, Char>().apply {
+            for (c in "あかさたなはまやらわがざだばぱ") put(c, 'a')
+            for (c in "いきしちにひみりゐぎじぢびぴ") put(c, 'i')
+            for (c in "うくすつぬふむゆるぐずづぶぷ") put(c, 'u')
+            for (c in "えけせてねへめれゑげぜでべぺ") put(c, 'e')
+            for (c in "おこそとのほもよろをごぞどぼぽ") put(c, 'o')
+            put('ゃ', 'a'); put('ゅ', 'u'); put('ょ', 'o')
+        }
+
+        /** Per syllable vowel, the kana that merely lengthen it when they
+         *  follow: the doubled vowel itself, plus い for e-vowels (えい)
+         *  and う for o-vowels (おう). */
+        private val LONG_VOWEL_LENGTHENERS: Map<Char, Set<Char>> = mapOf(
+            'a' to setOf('あ'),
+            'i' to setOf('い'),
+            'u' to setOf('う'),
+            'e' to setOf('え', 'い'),
+            'o' to setOf('お', 'う'),
+        )
 
         /** Demotion for intrinsic-case words clashing with the typed case. */
         private const val ENGLISH_CASE_MISMATCH_PENALTY = 1200
