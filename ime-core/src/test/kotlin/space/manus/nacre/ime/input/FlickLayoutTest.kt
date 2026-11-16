@@ -84,6 +84,72 @@ class FlickLayoutTest {
     }
 
     @Test
+    fun `number keys are in grid order and taps stay the literal keys`() {
+        // Grid reading order: 1 2 3 / 4 5 6 / 7 8 9 / + 0 . — and a tap
+        // still inserts exactly the key's own character (symbols live on
+        // the flicks only; tap behaviour is unchanged).
+        assertEquals(
+            listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "plus", "0", "dot"),
+            FlickEngine.numberKeys.map { it.id },
+        )
+        assertEquals(
+            listOf("1", "2", "3", "4", "5", "6", "7", "8", "9", "+", "0", "."),
+            FlickEngine.numberKeys.map {
+                FlickEngine.resolveFlick(it, FlickEngine.Direction.Tap)
+            },
+        )
+        val rows = FlickEngine.numberKeys.chunked(3)
+        assertEquals(listOf("1", "2", "3"), rows[0].map { it.tap })
+        assertEquals(listOf("4", "5", "6"), rows[1].map { it.tap })
+        assertEquals(listOf("7", "8", "9"), rows[2].map { it.tap })
+        assertEquals(listOf("+", "0", "."), rows[3].map { it.tap })
+    }
+
+    @Test
+    fun `number key up flicks follow the JIS shift layer`() {
+        // The classic digit pairings (JIS hardware keyboard shift layer):
+        // Shift+1..9 = ! " # $ % & ' ( ). Up is the direction rendered as
+        // the key's sub-label, so this is the discoverable symbol per key.
+        // Shift+0 is unassigned on JIS; 0 takes the phone-keypad * .
+        val expectedUp = mapOf(
+            "1" to "!", "2" to "\"", "3" to "#", "4" to "$", "5" to "%",
+            "6" to "&", "7" to "'", "8" to "(", "9" to ")", "0" to "*",
+        )
+        for ((digit, symbol) in expectedUp) {
+            val key = FlickEngine.numberKeys.first { it.id == digit }
+            assertEquals(
+                symbol,
+                FlickEngine.resolveFlick(key, FlickEngine.Direction.Up),
+            )
+        }
+    }
+
+    @Test
+    fun `plus key carries the full arithmetic set`() {
+        // + − × ÷ = on one key: tap +, up −, down =, left ×, right ÷.
+        val plus = FlickEngine.numberKeys.first { it.id == "plus" }
+        assertEquals("+", FlickEngine.resolveFlick(plus, FlickEngine.Direction.Tap))
+        assertEquals("-", FlickEngine.resolveFlick(plus, FlickEngine.Direction.Up))
+        assertEquals("=", FlickEngine.resolveFlick(plus, FlickEngine.Direction.Down))
+        assertEquals("×", FlickEngine.resolveFlick(plus, FlickEngine.Direction.Left))
+        assertEquals("÷", FlickEngine.resolveFlick(plus, FlickEngine.Direction.Right))
+    }
+
+    @Test
+    fun `number key companion flicks sit beside their primaries`() {
+        // ¥ (left on 4) pairs with $; ) (right on 8) closes the ( pair;
+        // the . key keeps , / : and gains / on the right for dates.
+        val four = FlickEngine.numberKeys.first { it.id == "4" }
+        assertEquals("¥", FlickEngine.resolveFlick(four, FlickEngine.Direction.Left))
+        val eight = FlickEngine.numberKeys.first { it.id == "8" }
+        assertEquals(")", FlickEngine.resolveFlick(eight, FlickEngine.Direction.Right))
+        val dot = FlickEngine.numberKeys.first { it.id == "dot" }
+        assertEquals(",", FlickEngine.resolveFlick(dot, FlickEngine.Direction.Up))
+        assertEquals(":", FlickEngine.resolveFlick(dot, FlickEngine.Direction.Down))
+        assertEquals("/", FlickEngine.resolveFlick(dot, FlickEngine.Direction.Right))
+    }
+
+    @Test
     fun `right strip seats cursor-right second like Gboard`() {
         // Gboard's ▶: right strip, second from the top, directly under
         // ⌫. FlickRightStrip renders rightStripKeys positionally.

@@ -535,31 +535,25 @@ private fun FlickNumberGrid(
             modifier = Modifier.weight(sw),
         )
         Column(modifier = Modifier.weight(1f + 1f + 1f)) {
-            // Row 1: 1 | 2 | 3
-            // Digits commit immediately (iPhone number page) via FlickDirectKey —
-            // they no longer route through the romaji composing buffer.
-            Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                FlickDirectKey(label = "1", service = service, modifier = Modifier.weight(1f), row = 0, column = 1)
-                FlickDirectKey(label = "2", service = service, modifier = Modifier.weight(1f), row = 0, column = 2)
-                FlickDirectKey(label = "3", service = service, modifier = Modifier.weight(1f), row = 0, column = 3)
-            }
-            // Row 2: 4 | 5 | 6
-            Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                FlickDirectKey(label = "4", service = service, modifier = Modifier.weight(1f), row = 1, column = 1)
-                FlickDirectKey(label = "5", service = service, modifier = Modifier.weight(1f), row = 1, column = 2)
-                FlickDirectKey(label = "6", service = service, modifier = Modifier.weight(1f), row = 1, column = 3)
-            }
-            // Row 3: 7 | 8 | 9
-            Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                FlickDirectKey(label = "7", service = service, modifier = Modifier.weight(1f), row = 2, column = 1)
-                FlickDirectKey(label = "8", service = service, modifier = Modifier.weight(1f), row = 2, column = 2)
-                FlickDirectKey(label = "9", service = service, modifier = Modifier.weight(1f), row = 2, column = 3)
-            }
-            // Row 4: + | 0 | .
-            Row(modifier = Modifier.fillMaxWidth().height(h)) {
-                FlickDirectKey(label = "+", service = service, modifier = Modifier.weight(1f), row = 3, column = 1, swipeUp = "-", swipeDown = "=")
-                FlickDirectKey(label = "0", service = service, modifier = Modifier.weight(1f), row = 3, column = 2)
-                FlickDirectKey(label = ".", service = service, modifier = Modifier.weight(1f), row = 3, column = 3, swipeUp = ",", swipeDown = ":")
+            // Digits commit immediately (iPhone number page) — they never
+            // route through the romaji composing buffer. The keys render
+            // through FlickKeyView like the kana grid (same flick grammar,
+            // popup and up-direction sub-label), with directText routing
+            // every resolved character — digit or flick symbol — to
+            // processFlickDirectText. Data: FlickEngine.numberKeys.
+            FlickEngine.numberKeys.chunked(3).forEachIndexed { r, rowKeys ->
+                Row(modifier = Modifier.fillMaxWidth().height(h)) {
+                    rowKeys.forEachIndexed { c, key ->
+                        FlickKeyView(
+                            flickKey = key,
+                            service = service,
+                            modifier = Modifier.weight(1f),
+                            row = r,
+                            column = c + 1,
+                            directText = true,
+                        )
+                    }
+                }
             }
         }
         FlickRightStrip(service = service, rowH = rowH, onFlexPointer = onFlexPointer, modifier = Modifier.weight(sw))
@@ -567,10 +561,13 @@ private fun FlickNumberGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Direct-commit key (number-grid digits, alpha "-"): tap / swipe-up / swipe-down
+// Direct-commit key (the alpha grid's "-" key): tap / swipe-up / swipe-down
 // insert IMMEDIATELY via InputEngine.processFlickDirectText — iPhone-style,
 // never the romaji/flick composing buffer, so no 確定 press is needed.
 // Visuals mirror FlickKeyView; vertical swipes use the shared threshold.
+// (The number grid's keys used to render here too; they moved to
+// FlickKeyView + FlickEngine.numberKeys when they gained 4-direction
+// flick symbols.)
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -1010,6 +1007,13 @@ private fun FlickKeyView(
     column: Int = 0,
     /** ABC grid only: commit immediately (iPhone-style) instead of composing. */
     directAlpha: Boolean = false,
+    /**
+     * ☆123 number grid only: commit the resolved character immediately as
+     * literal text via processFlickDirectText (digits and their flick
+     * symbols alike) — never the composing buffer, never the alpha
+     * predictor/shift machinery.
+     */
+    directText: Boolean = false,
 ) {
     var isPressed by remember { mutableStateOf(false) }
     var flickDir by remember { mutableStateOf(FlickEngine.Direction.Tap) }
@@ -1121,7 +1125,9 @@ private fun FlickKeyView(
                             service.layerManager.toggleShift() // auto-reset after one char
                         }
                         val isTap = resolved == FlickEngine.Direction.Tap
-                        if (directAlpha) {
+                        if (directText) {
+                            service.inputEngine.processFlickDirectText(kana)
+                        } else if (directAlpha) {
                             service.inputEngine.processFlickAlpha(
                                 kana,
                                 flickKeyId = flickKey.id,
