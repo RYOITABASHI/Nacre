@@ -2217,6 +2217,242 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
             .ifEmpty { null }
     }
 
+    // ── AI Writing Tools (local LLM only) ─────────────────────────────
+    //
+    // Writing Tools rewrite text already in the editor, so they are
+    // LOCAL-ONLY by design: the cloud refiner chain is never consulted,
+    // even when a cloud key is configured for voice refinement. That is
+    // also why the load path below deliberately does NOT take
+    // attemptLocalLlmLoad's cloud-configured early return — an explicit
+    // Writing Tools tap is the user asking for the on-device model.
+
+    private val writingLoadLock = Object()
+    private var writingLoadCallbacks: MutableList<(Boolean) -> Unit>? = null
+
+    private fun isModelLoadedSafe(svc: ILlmService): Boolean =
+        try { svc.isModelLoaded } catch (_: Exception) { false }
+
+    /**
+     * Whether a local LLM can serve Writing Tools right now:
+     * READY (model loaded in the :llm process), NEEDS_LOAD (a model
+     * file exists on disk — Qwen3 when selected and downloaded, else
+     * Qwen 2.5 — but is not loaded yet), or NO_MODEL (nothing
+     * downloaded; the panel points the user at Settings → AI Models).
+     */
+    fun writingModelAvailability(): WritingTools.ModelAvailability {
+        val svc = llmService
+        if (svc != null && isModelLoadedSafe(svc)) {
+            return WritingTools.ModelAvailability.READY
+        }
+        val paths = try {
+            space.manus.nacre.ai.ModelDownloader(service).getPreferredLlmModelPaths()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        return if (paths.isEmpty()) {
+            WritingTools.ModelAvailability.NO_MODEL
+        } else {
+            WritingTools.ModelAvailability.NEEDS_LOAD
+        }
+    }
+
+    /**
+     * Load the preferred local LLM for an explicit Writing Tools run.
+     * Single-flight: concurrent callers share one load and every
+     * callback fires (on the main thread) with the shared outcome.
+     * Unlike [attemptLocalLlmLoad] this never skips the load for a
+     * configured cloud refiner, and it does not touch [voiceRefineUiState]
+     * or the VoiceStatus record — those describe the voice pipeline.
+     * A caller that loses interest (panel closed) simply ignores its
+     * callback; the load itself is the same warm-up the voice path does.
+     */
+    fun loadLocalModelForWriting(onDone: (Boolean) -> Unit) {
+        val svc0 = llmService
+        if (svc0 != null && isModelLoadedSafe(svc0)) {
+            onDone(true)
+            return
+        }
+        var startThread = false
+        synchronized(writingLoadLock) {
+            val pending = writingLoadCallbacks
+            if (pending == null) {
+                writingLoadCallbacks = mutableListOf(onDone)
+                startThread = true
+            } else {
+                pending.add(onDone)
+            }
+        }
+        if (!startThread) return
+        Thread {
+            var ok = false
+            try {
+                ensureLlmBound()
+                // Binding is async; wait for the binder to arrive.
+                val bindDeadline = System.currentTimeMillis() + WRITING_BIND_WAIT_MS
+                while (llmServiceAny == null && System.currentTimeMillis() < bindDeadline) {
+                    Thread.sleep(200)
+                }
+                val svc = llmServiceAny
+                if (svc != null) {
+                    ok = loadWithSharedOwnership(svc)
+                }
+            } catch (e: Exception) {
+                writeDiagnostic("loadLocalModelForWriting failed: ${e.message}")
+            }
+            val callbacks = synchronized(writingLoadLock) {
+                val pending = writingLoadCallbacks
+                writingLoadCallbacks = null
+                pending
+            } ?: emptyList()
+            mainHandler.post {
+                for (callback in callbacks) {
+                    try { callback(ok) } catch (_: Exception) {}
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * Load the preferred local model under the SAME single-flight token
+     * ([llmLoadInFlight]) the voice pipeline uses, so a Writing Tools
+     * load and a voice load can never run concurrently — concurrent
+     * loads race loadModel/unloadModel on the shared LlmService and can
+     * unload each other's model mid-generation. If the voice pipeline
+     * is loading, wait for its outcome; load locally only while the
+     * token is ours. Returns true when a model is loaded and
+     * [llmService] is set.
+     */
+    private fun loadWithSharedOwnership(svc: ILlmService): Boolean {
+        if (isModelLoadedSafe(svc)) {
+            llmService = svc
+            return true
+        }
+        // The connect-time voice attempt starts on its own thread just
+        // after the binder arrives; give it a brief chance to claim the
+        // token so this method waits for it instead of racing it. (If
+        // the writing load wins the token anyway, the voice attempt
+        // simply early-returns and retries on the next voice session —
+        // the loads still never overlap.)
+        val claimDeadline = System.currentTimeMillis() + WRITING_CLAIM_WAIT_MS
+        while (!llmLoadInFlight.get() && !isModelLoadedSafe(svc) &&
+            System.currentTimeMillis() < claimDeadline
+        ) {
+            Thread.sleep(100)
+        }
+        // Wait out any voice-pipeline load already in flight.
+        val waitDeadline = System.currentTimeMillis() + WRITING_LOAD_WAIT_MS
+        while (llmLoadInFlight.get() && System.currentTimeMillis() < waitDeadline) {
+            if (isModelLoadedSafe(svc)) {
+                llmService = svc
+                return true
+            }
+            Thread.sleep(300)
+        }
+        if (isModelLoadedSafe(svc)) {
+            llmService = svc
+            return true
+        }
+        if (!llmLoadInFlight.compareAndSet(false, true)) {
+            // A fresh voice load claimed the token first; wait for it
+            // and report whatever state it leaves behind.
+            val settleDeadline = System.currentTimeMillis() + WRITING_LOAD_WAIT_MS
+            while (llmLoadInFlight.get() && System.currentTimeMillis() < settleDeadline) {
+                Thread.sleep(300)
+            }
+            if (isModelLoadedSafe(svc)) {
+                llmService = svc
+                return true
+            }
+            return false
+        }
+        try {
+            val paths = space.manus.nacre.ai.ModelDownloader(service)
+                .getPreferredLlmModelPaths()
+            for (path in paths) {
+                if (tryLoadLlmModel(svc, path)) {
+                    llmService = svc
+                    return true
+                }
+                try { svc.unloadModel() } catch (_: Exception) {}
+            }
+            return false
+        } finally {
+            llmLoadInFlight.set(false)
+        }
+    }
+
+    /**
+     * Blocking local-LLM transform for Writing Tools. Returns the raw
+     * (trimmed) model output, or null when the model is not loaded, is
+     * busy with another generation, times out, or produces a repetition
+     * loop (the PR #64 guard — Qwen3 is also guarded inside LlmService,
+     * Qwen 2.5 is only guarded here). Call off the main thread.
+     *
+     * There is deliberately NO cancellation on this path at all: the
+     * LlmService generation slot is shared with voice refinement and
+     * the AIDL boundary carries no generation ownership, so any
+     * client-issued cancelGeneration can land after our generation
+     * has finished and the slot has been taken by a voice session —
+     * cancelling THAT instead (the service also clears its generating
+     * flag the moment cancel lands, before the worker has exited).
+     * This includes a timeout cancel: acceptance at call time does not
+     * prove ownership at cancel time. So the panel's cancel only
+     * ABANDONS the result (runId invalidation), and the wrapper below
+     * ([transformViaAidlNoCancel]) never cancels on timeout either;
+     * an abandoned/timed-out generation simply ends on its own.
+     */
+    fun transformForWriting(text: String, instruction: String): String? {
+        val svc = llmService ?: return null
+        if (!isModelLoadedSafe(svc)) return null
+        val raw = try {
+            transformViaAidlNoCancel(svc, text, WRITING_TRANSFORM_TIMEOUT_MS, instruction)
+        } catch (_: Exception) {
+            null
+        } ?: return null
+        if (LlmPostProcessor.hasRepetitionLoop(raw)) {
+            writeDiagnostic("transformForWriting: repetition loop rejected")
+            return null
+        }
+        return raw
+    }
+
+    /**
+     * [refineViaAidl] without the timeout cancelGeneration — see
+     * [transformForWriting] for why the writing path must never cancel.
+     * On timeout the generation is left to finish; its late callback
+     * only counts down this call's (already abandoned) latch.
+     */
+    private fun transformViaAidlNoCancel(
+        svc: ILlmService,
+        rawText: String,
+        timeoutMs: Long,
+        instruction: String,
+    ): String? {
+        val latch = CountDownLatch(1)
+        val result = AtomicReference<String?>(null)
+        svc.transform(
+            rawText,
+            instruction,
+            object : ILlmCallback.Stub() {
+                override fun onResult(text: String) {
+                    result.set(text.trim())
+                    latch.countDown()
+                }
+                override fun onPartialResult(text: String) { /* streaming not used here */ }
+                override fun onError(message: String) {
+                    writeDiagnostic("transformViaAidlNoCancel.onError: $message")
+                    latch.countDown()
+                }
+            },
+        )
+        val finished = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+        if (!finished) {
+            writeDiagnostic("transformViaAidlNoCancel: timeout — generation left to finish (no cancel)")
+            return null
+        }
+        return result.get()
+    }
+
     private fun refineViaAidl(
         svc: ILlmService,
         rawText: String,
@@ -2449,6 +2685,15 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
         // LLM refinement timeout. Qwen 2.5 1.5B Q4_K_M on modern Android typically
         // finishes a ~100-char dictation in 1-3s; allow headroom before giving up.
         private const val LLM_REFINE_TIMEOUT_MS = 8_000L
+
+        // AI Writing Tools: the transform IS the feature (no best-effort
+        // fallback like voice refinement), and the target can be up to
+        // WritingTools.MAX_TARGET_CHARS with a 512-token output budget —
+        // allow real generation time; the panel shows progress + cancel.
+        private const val WRITING_TRANSFORM_TIMEOUT_MS = 120_000L
+        private const val WRITING_BIND_WAIT_MS = 15_000L
+        private const val WRITING_CLAIM_WAIT_MS = 800L
+        private const val WRITING_LOAD_WAIT_MS = 180_000L
 
         // Cloud refiner per-attempt timeout. Gemini Pro / Qwen Max usually finish
         // in 500-1500ms; allow a few seconds of tail before falling through to

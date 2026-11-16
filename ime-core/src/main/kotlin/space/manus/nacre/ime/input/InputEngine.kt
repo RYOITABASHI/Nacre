@@ -260,6 +260,18 @@ class InputEngine(private val service: NacreInputMethodService) {
     var isConverting by mutableStateOf(false)
         private set
 
+    /**
+     * True while the engine holds any uncommitted text (romaji/flick
+     * composing, English composing, or an active conversion). AI Writing
+     * Tools require committed text: their target is the editor's
+     * selection or the committed paragraph before the cursor, and an
+     * in-flight composing region would desync both the capture and the
+     * verified replacement.
+     */
+    val hasUncommittedText: Boolean
+        get() = composingKana.isNotEmpty() || composingFlickKana.isNotEmpty() ||
+            englishComposing.isNotEmpty() || isConverting
+
     // Segment boundary adjustment (文節区切り修正)
     // During conversion, segmentBoundary = number of kana chars in current first segment
     private var segmentBoundary: Int = 0
@@ -476,7 +488,19 @@ class InputEngine(private val service: NacreInputMethodService) {
         }
     }
 
+    /**
+     * Monotonic counter of input sessions (every onStartInput, including
+     * restarts). Features that capture editor text and act on it later —
+     * AI Writing Tools — bind the capture to this id and refuse to run
+     * or apply once it no longer matches: the keyboard view (and its
+     * Compose state) survives field switches, so a capture must never
+     * outlive the field it was taken from.
+     */
+    var inputSessionId: Int = 0
+        private set
+
     fun onStartInput(info: EditorInfo?) {
+        inputSessionId++
         editorInfo = info
         composingText = ""
         composingFlickKana = ""
