@@ -686,7 +686,8 @@ class NacreDictionary internal constructor(
         }
 
         // 1. Exact match FIRST (single-word candidates — these should rank highest)
-        addUnique(exactMatch(kana))
+        val typedExact = exactMatch(kana)
+        addUnique(typedExact)
 
         // 2. Viterbi multi-word conversion (best segmentation)
         addUnique(viterbiConvert(kana))
@@ -702,6 +703,21 @@ class NacreDictionary internal constructor(
             val variantViterbi = viterbiConvert(variant).take(5)
             for (c in variantViterbi) {
                 if (seen.add(c.surface)) results.add(c.copy(cost = c.cost + 500))
+            }
+        }
+
+        // 2.6 Long-vowel normalized lookup: for a romaji-typed loanword
+        // (こんぴゅうたあ), merge the main-dictionary entries of the ー
+        // spelling (こんぴゅーたー → コンピューター), floored below the
+        // typed reading's own best exact candidate. See
+        // longVowelNormalizedMatch. The surfaces actually added are
+        // tracked so the final pass can re-enforce the floor on
+        // context-adjusted costs (see enforceNormalizedFloor).
+        val mergedSurfaces = HashSet<String>()
+        for (c in longVowelNormalizedMatch(kana, typedExact.minOfOrNull { it.cost })) {
+            if (seen.add(c.surface)) {
+                results.add(c)
+                mergedSurfaces.add(c.surface)
             }
         }
 
@@ -788,8 +804,27 @@ class NacreDictionary internal constructor(
             results.add(ConversionCandidate(surface = kana, reading = kana, cost = maxCost + 200))
         }
 
-        // Sort: apply user boost + POS context + KenLM rescoring
+        // Sort: apply user boost + POS context + KenLM rescoring.
+        // When the normalized merge added candidates, context-only
+        // costs (POS adjustment, no learning boost) are tracked by
+        // surface so the merge floor can be re-enforced after the
+        // pass-through penalty below — see enforceNormalizedFloor.
+        val typedBestSurface = typedExact.minByOrNull { it.cost }?.surface
+        val trackFloor = mergedSurfaces.isNotEmpty() && typedBestSurface != null
+        val floorContext = HashMap<String, Int>()
         val boosted = results.map { c ->
+            if (trackFloor) {
+                // Deterministic cost of this candidate: applyBoost()'s
+                // minimum-cost clamp (maxOf(100, ...)) applied to the
+                // stage cost, plus the purely additive POS delta.
+                // applyBoost()'s boosts (selection learning, static
+                // bigrams, recency, ...) are all excluded here — each
+                // candidate's own boost delta is preserved because any
+                // floor raise is added to its final cost (see
+                // enforceNormalizedFloor).
+                val contextOnly = posContextCost(c.reading, c.surface, c.cost)
+                floorContext[c.surface] = maxOf(100, c.cost) + (contextOnly - c.cost)
+            }
             var cost = applyBoost(c.reading, c.surface, c.cost)
             cost = posContextCost(c.reading, c.surface, cost)
             c.copy(cost = cost)
@@ -809,6 +844,10 @@ class NacreDictionary internal constructor(
         // by default. Applies to every source merged above — exactMatch ties at
         // the boost floor and all-kana Viterbi paths both produced these at
         // rank 1 in the baseline benchmark.
+        // Snapshot for the floor re-enforcement after the penalty.
+        val prePassThroughCosts: Map<String, Int> =
+            if (trackFloor) boosted.associate { it.surface to it.cost } else emptyMap()
+
         val katakanaForm = hiraganaToKatakana(kana)
         if (boosted.any { it.surface != kana && it.surface != katakanaForm }) {
             for (i in boosted.indices) {
@@ -817,6 +856,24 @@ class NacreDictionary internal constructor(
                     boosted[i] = c.copy(cost = c.cost + PASS_THROUGH_PENALTY)
                 }
             }
+        }
+
+        // Re-enforce the normalized-merge floor now that every
+        // deterministic adjustment has landed: the pass-through
+        // penalty above can raise the typed reading's own best
+        // candidate （ああ → +1500) while a merged candidate （あー)
+        // escapes it, which would otherwise leave the merged
+        // candidate ranked above it.
+        if (trackFloor) {
+            val passThroughDeltas = HashMap<String, Int>()
+            for (c in boosted) {
+                val before = prePassThroughCosts[c.surface] ?: continue
+                if (c.cost != before) passThroughDeltas[c.surface] = c.cost - before
+            }
+            enforceNormalizedFloor(
+                boosted, floorContext, passThroughDeltas,
+                mergedSurfaces, typedBestSurface,
+            )
         }
 
         val sorted = boosted.sortedBy { it.cost }.toMutableList()
@@ -964,7 +1021,8 @@ class NacreDictionary internal constructor(
         addUnique(historyMatchesFor(kana))
 
         // 1. Exact match FIRST (single-word candidates rank highest)
-        addUnique(exactMatch(kana))
+        val typedExact = exactMatch(kana)
+        addUnique(typedExact)
 
         // 2. Viterbi multi-word conversion
         addUnique(viterbiConvert(kana).take(8))
@@ -979,6 +1037,19 @@ class NacreDictionary internal constructor(
                 for (c in variantResults) {
                     if (seen.add(c.surface)) results.add(c.copy(cost = c.cost + 500))
                 }
+            }
+        }
+
+        // 2.6 Long-vowel normalized lookup — same merge as convert()
+        // step 2.6, unconditional (the kana-variant step above is
+        // char-gated; this one is a no-op unless the reading actually
+        // contains a romaji-style doubled vowel). Added surfaces are
+        // tracked for the final-pass floor enforcement.
+        val mergedSurfaces = HashSet<String>()
+        for (c in longVowelNormalizedMatch(kana, typedExact.minOfOrNull { it.cost })) {
+            if (seen.add(c.surface)) {
+                results.add(c)
+                mergedSurfaces.add(c.surface)
             }
         }
 
@@ -1071,12 +1142,34 @@ class NacreDictionary internal constructor(
             }
         }
 
-        // Final sort: apply user boost + POS context + KenLM to all candidates
+        // Final sort: apply user boost + POS context + KenLM to all
+        // candidates. Context-only costs are tracked by surface for
+        // the normalized-merge floor enforcement (see convert()).
+        val typedBestSurface = typedExact.minByOrNull { it.cost }?.surface
+        val trackFloor = mergedSurfaces.isNotEmpty() && typedBestSurface != null
+        val floorContext = HashMap<String, Int>()
         val boosted = results.map { c ->
+            if (trackFloor) {
+                // Deterministic cost of this candidate: applyBoost()'s
+                // minimum-cost clamp (maxOf(100, ...)) applied to the
+                // stage cost, plus the purely additive POS delta.
+                // applyBoost()'s boosts (selection learning, static
+                // bigrams, recency, ...) are all excluded here — each
+                // candidate's own boost delta is preserved because any
+                // floor raise is added to its final cost (see
+                // enforceNormalizedFloor).
+                val contextOnly = posContextCost(c.reading, c.surface, c.cost)
+                floorContext[c.surface] = maxOf(100, c.cost) + (contextOnly - c.cost)
+            }
             var cost = applyBoost(c.reading, c.surface, c.cost)
             cost = posContextCost(c.reading, c.surface, cost)
             c.copy(cost = cost)
         }.toMutableList()
+        if (trackFloor) {
+            enforceNormalizedFloor(
+                boosted, floorContext, emptyMap(), mergedSurfaces, typedBestSurface,
+            )
+        }
 
         kenLmRescore(boosted)
 
@@ -1664,35 +1757,143 @@ class NacreDictionary internal constructor(
 
     // --- Internal ---
 
-    private fun exactMatch(kana: String): List<ConversionCandidate> {
-        val entries = dict[kana] ?: return emptyList()
+    private fun exactMatch(kana: String): List<ConversionCandidate> =
+        exactMatch(kana, candidateReading = kana, extraCost = 0)
+
+    /**
+     * Exact-match candidates looked up under [lookupKey], but recorded
+     * against [candidateReading] (selection learning, history and boost
+     * lookups all key on it) with [extraCost] added. Used by
+     * [longVowelNormalizedMatch], where the dictionary entry lives under
+     * the ー spelling while the user typed — and learns — the
+     * vowel-doubled spelling. [lookupKey] and [candidateReading] always
+     * have the same length there (normalization substitutes one kana
+     * for one ー), so the length-based bonus/take counts are identical
+     * under either.
+     */
+    private fun exactMatch(
+        lookupKey: String,
+        candidateReading: String,
+        extraCost: Int,
+    ): List<ConversionCandidate> {
+        val entries = dict[lookupKey] ?: return emptyList()
         // Exact match bonus: single-word results should beat multi-word Viterbi splits
         // Longer exact matches get bigger bonus (e.g. こんにちは should beat 今日+葉)
         val exactBonus = when {
-            kana.length >= 8 -> -7000
-            kana.length >= 7 -> -6000
-            kana.length >= 5 -> -5000
-            kana.length >= 4 -> -3500
-            kana.length >= 3 -> -2000
+            lookupKey.length >= 8 -> -7000
+            lookupKey.length >= 7 -> -6000
+            lookupKey.length >= 5 -> -5000
+            lookupKey.length >= 4 -> -3500
+            lookupKey.length >= 3 -> -2000
             else -> -1000
         }
         return entries
             .map { entry ->
-                var cost = applyBoost(kana, entry.surface, entry.cost) + exactBonus
-                cost = posContextCost(kana, entry.surface, cost)
+                var cost = applyBoost(candidateReading, entry.surface, entry.cost) + exactBonus + extraCost
+                cost = posContextCost(candidateReading, entry.surface, cost)
                 // Suppress function words (助詞・助動詞) appearing as sole candidates for 2+ char input
-                if (kana.length >= 2 && isFunctionWord(entry.leftGroup) && entry.surface.length <= 1) {
+                if (candidateReading.length >= 2 && isFunctionWord(entry.leftGroup) && entry.surface.length <= 1) {
                     cost += 2000
                 }
                 ConversionCandidate(
                     surface = entry.surface,
-                    reading = kana,
+                    reading = candidateReading,
                     cost = cost,
                     segments = listOf(entry.surface),
                 )
             }
             .sortedBy { it.cost }
-            .take(if (kana.length <= 3) 40 else 20)  // Short readings: show all kanji candidates
+            .take(if (lookupKey.length <= 3) 40 else 20)  // Short readings: show all kanji candidates
+    }
+
+    /**
+     * Main-dictionary candidates for a romaji-typed loanword reading,
+     * looked up under its long-vowel (ー) spelling: "konpyuutaa"
+     * composes to こんぴゅうたあ, but the dictionary entry コンピューター
+     * lives under こんぴゅーたー, so the typed reading's own lookups
+     * return only Viterbi mis-conversions (the English candidate was
+     * rescued the same way in [englishMatch]; the Japanese surface was
+     * not). The merged candidates keep the TYPED reading — selection
+     * learning and history stay keyed by what the user actually
+     * entered, exactly as in [englishMatch].
+     *
+     * Two guards keep the merge from polluting native readings, whose
+     * doubled vowels are genuine （おおきい, こおり, くせい):
+     * [LONG_VOWEL_NORMALIZED_PENALTY], plus a floor — no merged
+     * candidate may outrank the typed reading's own best exact
+     * candidate ([typedBestExactCost], null when the typed reading has
+     * no exact entries, which is the loanword case). The penalty alone
+     * cannot guarantee this: the ー spelling can hold very cheap
+     * unrelated entries (くせー "smelly" at raw cost 293, vs くせい→区政
+     * at 6467), which would otherwise take rank 1. The floor applied
+     * here compares exactMatch-stage costs; because the final pass's
+     * POS adjustment can move the typed candidate afterwards, the
+     * callers re-enforce the same floor on context-adjusted costs —
+     * see [enforceNormalizedFloor].
+     */
+    private fun longVowelNormalizedMatch(
+        kana: String,
+        typedBestExactCost: Int?,
+    ): List<ConversionCandidate> {
+        val normalized = normalizeLongVowelReading(kana)
+        if (normalized == kana) return emptyList()
+        val merged = exactMatch(
+            normalized,
+            candidateReading = kana,
+            extraCost = LONG_VOWEL_NORMALIZED_PENALTY,
+        )
+        if (typedBestExactCost == null) return merged
+        return merged.map { c ->
+            if (c.cost <= typedBestExactCost) c.copy(cost = typedBestExactCost + 1) else c
+        }
+    }
+
+    /**
+     * Re-enforce the [longVowelNormalizedMatch] floor after the
+     * callers' deterministic cost adjustments. The exactMatch-stage
+     * floor alone does not survive them: posContextCost() adjusts a
+     * candidate only when its surface is found in dict[reading], and
+     * merged candidates — stamped with the typed reading but absent
+     * from its entry list — escape the adjustment, so a POS penalty
+     * on the typed reading's own best candidate （区政 after
+     * committing の) would silently lift a merged candidate
+     * （くせー) above it; convert()'s pass-through penalty has the
+     * same shape （ああ is demoted +1500 while merged あー is not).
+     *
+     * The comparison space is each candidate's deterministic cost:
+     * [floorContext] (stage cost run through applyBoost()'s
+     * minimum-cost clamp of 100 — cheap entries can have negative
+     * stage costs after the length bonus — with the POS adjustment
+     * applied and applyBoost()'s boosts NOT applied) plus
+     * its pass-through delta in convert().
+     * Any raise is added to the candidate's current cost, so every
+     * candidate keeps its own learning (and KenLM) delta — a merged
+     * candidate the user has actually learned can still climb past
+     * the floor, exactly as selection learning intends. Costs are
+     * keyed by surface (unique within a result list) so convert()'s
+     * KenLM candidate filter, which removes entries between the
+     * passes, cannot misalign them.
+     */
+    private fun enforceNormalizedFloor(
+        boosted: MutableList<ConversionCandidate>,
+        floorContext: Map<String, Int>,
+        passThroughDeltas: Map<String, Int>,
+        mergedSurfaces: Set<String>,
+        typedBestSurface: String?,
+    ) {
+        if (mergedSurfaces.isEmpty() || typedBestSurface == null) return
+        if (boosted.none { it.surface == typedBestSurface }) return
+        val typedContext = floorContext[typedBestSurface] ?: return
+        val floor = typedContext + (passThroughDeltas[typedBestSurface] ?: 0)
+        for (i in boosted.indices) {
+            val c = boosted[i]
+            if (c.surface !in mergedSurfaces) continue
+            val context = floorContext[c.surface] ?: continue
+            val base = context + (passThroughDeltas[c.surface] ?: 0)
+            if (base <= floor) {
+                boosted[i] = c.copy(cost = c.cost + (floor + 1 - base))
+            }
+        }
     }
 
     private fun prefixMatch(kana: String, limit: Int): List<ConversionCandidate> {
@@ -2223,9 +2424,10 @@ class NacreDictionary internal constructor(
      * string containing ああ — so the normalization is syllable-based:
      * a vowel kana that merely lengthens the preceding syllable's vowel
      * (including the おう/えい spellings) becomes ー. Used ONLY as an
-     * additional English-dictionary lookup key — the user's reading
-     * itself is never rewritten, and Japanese candidate generation
-     * never sees the normalized form.
+     * additional lookup key — for the English dictionary
+     * ([englishLookupKeys]) and for the main dictionary
+     * ([longVowelNormalizedMatch]) — the user's reading itself is
+     * never rewritten, and merged candidates keep the typed reading.
      */
     private fun normalizeLongVowelReading(kana: String): String {
         if (kana.length < 2) return kana
@@ -2542,6 +2744,20 @@ class NacreDictionary internal constructor(
 
         /** 0-based slot the best exact-match loanword candidate is promoted to. */
         private const val LOANWORD_PROMOTE_INDEX = 4
+
+        /**
+         * Cost penalty for main-dictionary candidates merged via the
+         * long-vowel-normalized reading ([longVowelNormalizedMatch]),
+         * applied on top of the floor described there. Sized from
+         * measured cost bands (harness, empty learning): loanword
+         * surfaces land ~2000-6000 （サーバー 2174, コンピューター ~1600),
+         * far above the typed reading's Viterbi mis-conversions
+         * (≳13000), so with the penalty they stay real candidates;
+         * native readings are protected by the floor, not by this
+         * value alone (the ー spelling can hold arbitrarily cheap
+         * unrelated entries — くせー at raw cost 293).
+         */
+        private const val LONG_VOWEL_NORMALIZED_PENALTY = 1500
 
         /** Hiragana -> the vowel ('a'/'i'/'u'/'e'/'o') of its syllable, for
          *  [normalizeLongVowelReading]. ん/っ/ー and non-kana are absent:
