@@ -236,6 +236,12 @@ fun NacreSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // --- Selection learning data ---
+        SectionHeader("学習データ")
+        LearningDataSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // --- AI Models ---
         SectionHeader("AI Models")
         StoragePermissionCard()
@@ -1139,6 +1145,50 @@ private fun WordRegistrationSection() {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LearningDataSection() {
+    val context = LocalContext.current
+    val udPrefs = remember { context.getSharedPreferences("nacre_user_dict", Context.MODE_PRIVATE) }
+    var requested by remember { mutableStateOf(udPrefs.getBoolean("clear_learning", false)) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                "変換で選んだ候補の記録（選択回数・最近使った候補・履歴）です。端末内にだけ保存され、変換候補の並びに使われます。登録した単語（単語登録）は消えません。",
+                color = NacreTextDim,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(10.dp))
+            Button(
+                onClick = {
+                    // The learned stores live in the IME process's memory;
+                    // flag the request and let the service clear them on
+                    // the next keyboard open (same pattern as "dirty").
+                    udPrefs.edit().putBoolean("clear_learning", true).apply()
+                    requested = true
+                },
+                enabled = !requested,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF8E3B3B)),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("学習データを消去", color = Color.White)
+            }
+            if (requested) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "消去を受け付けました。次にキーボードを開いたときに消去されます。",
+                    color = NacreTextDim,
+                    fontSize = 11.sp,
+                )
             }
         }
     }

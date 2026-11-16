@@ -228,6 +228,26 @@ class NacreMozcEngine(private val context: Context) {
         }
     }
 
+    /**
+     * Erase Mozc's own learned user history and prediction data — the
+     * data [learn] feeds with every selection the user makes. These are
+     * top-level Input commands (not session commands). Callers run this
+     * on the dictionary's learn executor so it is ordered after any
+     * queued learn() submissions, which could otherwise resurrect a
+     * just-cleared selection.
+     */
+    @Synchronized
+    fun clearLearning() {
+        if (!ensureReady()) return
+        try {
+            eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_HISTORY).setId(sessionId))
+            eval(Input.newBuilder().setType(Input.CommandType.CLEAR_USER_PREDICTION).setId(sessionId))
+            Log.i(TAG, "clearLearning: user history/prediction cleared")
+        } catch (e: Throwable) {
+            Log.e(TAG, "clearLearning failed", e)
+        }
+    }
+
     private fun findCandidateId(output: Output?, surface: String): Int? {
         if (output == null) return null
         output.allCandidateWords?.candidatesList.orEmpty()
