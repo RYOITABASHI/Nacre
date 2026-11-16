@@ -1202,8 +1202,12 @@ class InputEngine(private val service: NacreInputMethodService) {
                 englishComposing = ""
                 composingFlickKana = ""
             } else {
-                dictionary?.recordSelection(candidate)
-                recordJapanesePhrase(candidate.reading, candidate.surface)
+                // SPEC: password fields disable history/learning — a
+                // selection there must never reach the learned stores.
+                if (!isPasswordField) {
+                    dictionary?.recordSelection(candidate)
+                    recordJapanesePhrase(candidate.reading, candidate.surface)
+                }
             }
             composingText = ""
             composingKana = ""
@@ -1414,12 +1418,14 @@ class InputEngine(private val service: NacreInputMethodService) {
         if (candidates.isNotEmpty() && selectedCandidateIndex in candidates.indices) {
             val candidate = candidates[selectedCandidateIndex]
             ic.commitText(candidate.surface, 1)
-            dictionary?.recordSelection(candidate)
-            recordJapanesePhrase(candidate.reading, candidate.surface)
+            if (!isPasswordField) {
+                dictionary?.recordSelection(candidate)
+                recordJapanesePhrase(candidate.reading, candidate.surface)
+            }
         } else {
             val kana = japaneseEngine.romajiToHiragana(composingText, finalize = true)
             ic.commitText(kana, 1)
-            recordJapanesePhrase(kana, kana)
+            if (!isPasswordField) recordJapanesePhrase(kana, kana)
         }
         composingText = ""
         composingFlickKana = ""
@@ -1451,6 +1457,18 @@ class InputEngine(private val service: NacreInputMethodService) {
     fun registerUserWord(reading: String, surface: String) {
         if (reading.isBlank() || surface.isBlank()) return
         (dictionary as? NacreDictionary)?.registerUserWord(reading.trim(), surface.trim())
+    }
+
+    /**
+     * Erase all learned ranking data (Settings action, via the service).
+     * Returns false when the dictionary is not published yet — the
+     * caller must keep the request pending and retry later instead of
+     * dropping it.
+     */
+    fun clearSelectionLearning(): Boolean {
+        val dict = dictionary as? NacreDictionary ?: return false
+        dict.clearSelectionLearning()
+        return true
     }
 
     fun reloadUserDictionary() {
@@ -1770,7 +1788,7 @@ class InputEngine(private val service: NacreInputMethodService) {
         ic.commitText(kana, 1)
         // Update bigram context
         (dictionary as? NacreDictionary)?.updateContext(kana)
-        recordJapanesePhrase(kana, kana)
+        if (!isPasswordField) recordJapanesePhrase(kana, kana)
         composingText = ""
         composingFlickKana = ""
         composingKana = ""
@@ -2512,17 +2530,6 @@ class InputEngine(private val service: NacreInputMethodService) {
             DakutenType.Small -> FlickEngine.applySmall(lastChar)
         } ?: return
 
-        // A transform edits the kana composition, but during a conversion
-        // the editor is showing a candidate SURFACE while the candidate
-        // list / selection / fullKana still describe the pre-transform
-        // kana — rewriting the buffer here would desync the two, and the
-        // updatePredictions() below would land mid-conversion and clear
-        // isConverting. Revert to the kana composition first (the same
-        // "back to kana" semantics as backspace during conversion), then
-        // transform the kana itself. Decided only after the transform is
-        // known to apply, so a no-op press never cancels a conversion.
-        if (isConverting) cancelConversion(ic)
-
         composingFlickKana = composingFlickKana.dropLast(1) + replaced
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
@@ -2550,9 +2557,6 @@ class InputEngine(private val service: NacreInputMethodService) {
         val ic = service.currentInputConnection ?: return
         val lastChar = composingFlickKana.last()
         val replaced = FlickEngine.cycleKanaForm(lastChar) ?: return
-        // See processFlickDakuten: never rewrite the kana buffer under a
-        // live conversion — revert to the kana composition first.
-        if (isConverting) cancelConversion(ic)
         composingFlickKana = composingFlickKana.dropLast(1) + replaced
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)

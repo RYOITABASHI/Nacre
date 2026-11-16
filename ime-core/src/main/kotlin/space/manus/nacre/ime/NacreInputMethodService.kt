@@ -349,6 +349,17 @@ class NacreInputMethodService :
             inputEngine.reloadUserDictionary()
             udPrefs.edit().putBoolean("dirty", false).apply()
         }
+        // 学習データ消去 requested from Settings: the in-memory learned
+        // stores live here in the IME process, so the clear must run here
+        // (wiping the prefs alone would be overwritten by the next save).
+        // The flag is consumed only when the dictionary actually cleared
+        // — if it is not published yet (async load), the request stays
+        // pending and is retried on the next keyboard open.
+        if (udPrefs.getBoolean("clear_learning", false)) {
+            if (inputEngine.clearSelectionLearning()) {
+                udPrefs.edit().putBoolean("clear_learning", false).apply()
+            }
+        }
         // zenz warm-up: the :llm binding is lazy (first voice/LLM use), which
         // left the neural converter unloaded until well into a typing session
         // — the first conversions were always engine-only and the load only

@@ -66,6 +66,14 @@ class NacreDictionary internal constructor(
     // User learning: boost for selected candidates (thread-safe)
     private val userBoost = ConcurrentHashMap<String, Int>(1000)
 
+    // Selection learning with per-entry recency (see ConversionLearning):
+    // (reading, surface) → selection count + sequence of the last pick.
+    // userBoost above is the legacy counter; both are updated by
+    // recordSelection() and the effective count is the max of the two, so
+    // pre-existing learned counts survive the migration.
+    private val conversionLearning = ConcurrentHashMap<String, ConversionLearning.Entry>(1000)
+    private val learningSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     // Bigram learning: "prevSurface→reading:surface" → count
     private val bigramBoost = ConcurrentHashMap<String, Int>(500)
 
@@ -161,8 +169,17 @@ class NacreDictionary internal constructor(
         val mozcNative: Boolean,
     )
 
+    // Generation of the learning state predict() results were computed
+    // from. Bumped (under predictCacheLock) by every invalidation, so a
+    // predict() that started before an invalidation can detect it and
+    // refrain from caching its now-stale result afterward.
+    private var predictStateGeneration = 0L
+
     private fun bumpPredictStateVersion() {
-        synchronized(predictCacheLock) { predictCache.clear() }
+        synchronized(predictCacheLock) {
+            predictCache.clear()
+            predictStateGeneration++
+        }
     }
     private var savePending = false
     private var lastSaveTime = 0L
@@ -866,9 +883,20 @@ class NacreDictionary internal constructor(
         // LlmReranker copies before reordering), so sharing the instance is
         // safe.
         val key = PredictCacheKey(kana, romaji, useMozcNative())
-        synchronized(predictCacheLock) { predictCache[key] }?.let { return it }
+        val generation: Long
+        synchronized(predictCacheLock) {
+            predictCache[key]?.let { return it }
+            generation = predictStateGeneration
+        }
         val result = predictInternal(kana, romaji)
-        synchronized(predictCacheLock) { predictCache[key] = result }
+        // Cache only if no invalidation landed while computing: a result
+        // derived from pre-invalidation learning state (e.g. a Mozc
+        // ranking captured just before a learning clear completed) must
+        // never be memoized after the fact, or the stale ranking would
+        // keep resurfacing on later cache hits.
+        synchronized(predictCacheLock) {
+            if (generation == predictStateGeneration) predictCache[key] = result
+        }
         return result
     }
 
@@ -894,7 +922,17 @@ class NacreDictionary internal constructor(
                 val seen = mutableSetOf<String>()
                 val merged = ArrayList<ConversionCandidate>(historyMatches.size + mozc.size + 5)
                 for (h in historyMatches) if (seen.add(h.surface)) merged.add(h)
-                for (c in mozc) if (seen.add(c.surface)) merged.add(c)
+                // Mozc candidates carry no cost (their list order IS
+                // Mozc's ranking), so the legacy path's cost-based boost
+                // never reached them — on the Mozc path the only Nacre
+                // learning signal was the history prepend above, which is
+                // why learned surfaces felt weak there. Apply the same
+                // selection-learning signal as a stable re-rank: learned
+                // surfaces bubble up by their boost, unlearned ones keep
+                // Mozc's relative order exactly (sortedByDescending is
+                // stable, and equal boosts compare equal).
+                val rankedMozc = mozc.sortedByDescending { learningBoostFor(kana, it.surface) }
+                for (c in rankedMozc) if (seen.add(c.surface)) merged.add(c)
                 // English loanword candidates are Nacre-side data Mozc knows
                 // nothing about; merge them here too so the live candidate
                 // bar offers e.g. "computer" for こんぴゅーたー on this path
@@ -1045,6 +1083,14 @@ class NacreDictionary internal constructor(
         bumpPredictStateVersion()
         val key = "${candidate.reading}:${candidate.surface}"
         userBoost[key] = (userBoost[key] ?: 0) + 1
+
+        // Selection learning with recency: same selection, recorded with
+        // a global sequence number so applyBoost() can weigh how recent
+        // this pick was against competing surfaces for the same reading.
+        ConversionLearning.record(
+            conversionLearning, candidate.reading, candidate.surface,
+            learningSeq.incrementAndGet(),
+        )
 
         // Bigram
         if (lastCommittedSurface.isNotEmpty()) {
@@ -1314,6 +1360,77 @@ class NacreDictionary internal constructor(
         }
     }
 
+    /**
+     * How many times the user has selected [surface] for [reading]
+     * (effective count across the legacy counter and the recency store).
+     * O(1); safe to call from candidate-insertion paths.
+     */
+    fun selectionCountFor(reading: String, surface: String): Int =
+        ConversionLearning.effectiveCount(
+            userBoost["$reading:$surface"] ?: 0,
+            conversionLearning[ConversionLearning.key(reading, surface)],
+        )
+
+    /**
+     * The selection-learning boost for one candidate, without any base
+     * cost: frequency + recency (ConversionLearning) plus the recent-
+     * history position boost. Used where candidates arrive pre-ranked
+     * with no meaningful cost of their own (the Mozc-native branch of
+     * predict()). O(1) map lookups plus a bounded scan of the ≤200-entry
+     * recent history — the same scan applyBoost() already performs per
+     * candidate on the legacy path.
+     */
+    fun learningBoostFor(reading: String, surface: String): Int =
+        ConversionLearning.boost(
+            userBoost["$reading:$surface"] ?: 0,
+            conversionLearning[ConversionLearning.key(reading, surface)],
+            learningSeq.get(),
+        ) + recentHistoryBoost(reading, surface)
+
+    /**
+     * Erase ALL learned ranking data (selection counts/recency, bigram /
+     * trigram boosts, recent history, phrase memory, English history) and
+     * persist the cleared state immediately. The registered user
+     * dictionary is NOT learning data and is left untouched. Called from
+     * the Settings "学習データを消去" action via the service.
+     */
+    fun clearSelectionLearning() {
+        userBoost.clear()
+        bigramBoost.clear()
+        trigramBoost.clear()
+        conversionLearning.clear()
+        recentHistory.clear()
+        synchronized(englishHistoryLock) { recentEnglishHistory.clear() }
+        englishBigramBoost.clear()
+        lastCommittedEnglish = ""
+        phraseMemory.clear()
+        committedContext.clear()
+        lastRightGroup = 0
+        bumpPredictStateVersion()
+        savePhraseMemory()
+        saveUserBoost()
+        savePending = false
+
+        // Native Mozc keeps its own learned history (fed by learn());
+        // erase it too, queued on the learn executor so a pending
+        // learn() submission cannot resurrect a just-cleared selection.
+        // NOT gated on the Mozc toggle: history learned while Mozc was
+        // enabled must not reappear if the user clears while it is
+        // disabled and later re-enables it. (androidContext is null only
+        // in JVM tests, where no native engine can exist.)
+        if (androidContext != null) {
+            mozcLearnExecutor.execute {
+                runCatching { mozcEngine.clearLearning() }
+                    .onFailure { Log.e("NacreDictionary", "mozcEngine.clearLearning failed", it) }
+                // The native ranking just changed: predictions memoized
+                // while this clear was queued may hold the pre-clear
+                // Mozc order — invalidate again now that it has landed
+                // (same pattern as the learn() task in recordSelection).
+                bumpPredictStateVersion()
+            }
+        }
+    }
+
     // --- Connection cost ---
 
     /**
@@ -1351,16 +1468,16 @@ class NacreDictionary internal constructor(
             staticBigrams["$lastCommittedSurface→$key"] ?: 0
         } else 0
 
-        // First use gets the biggest boost (diminishing returns after)
-        // 1st use: 2000, 2nd: 3500, 3rd: 4500, 4th: 5200, 5th+: 5500
-        val unigramBoostVal = when {
-            unigramCount >= 5 -> 5500
-            unigramCount >= 4 -> 5200
-            unigramCount >= 3 -> 4500
-            unigramCount >= 2 -> 3500
-            unigramCount >= 1 -> 2000
-            else -> 0
-        }
+        // Frequency + recency from selection learning (see
+        // ConversionLearning): the frequency table is the one this code
+        // always used (1st use 2000 … 5th+ 5500, saturating), and the
+        // recency component lets a recently-picked surface outrank an
+        // equally-frequent stale one. Bounded at ConversionLearning.MAX_BOOST.
+        val unigramBoostVal = ConversionLearning.boost(
+            unigramCount,
+            conversionLearning[ConversionLearning.key(reading, surface)],
+            learningSeq.get(),
+        )
         val bigramBoostVal = minOf(bigramCount, 4) * 2500
         val trigramBoostVal = minOf(trigramCount, 3) * 3500
         val recentBoost = recentHistoryBoost(reading, surface)
@@ -2759,6 +2876,12 @@ class NacreDictionary internal constructor(
                 }
             }
 
+            val learningData = store.getString("conversion_learning")
+            if (learningData != null) {
+                conversionLearning.putAll(ConversionLearning.parse(learningData))
+                learningSeq.set(conversionLearning.values.maxOfOrNull { it.lastSeq } ?: 0L)
+            }
+
             val bigramData = store.getString("bigram")
             if (bigramData != null) {
                 for (line in bigramData.split('\n')) {
@@ -2845,6 +2968,10 @@ class NacreDictionary internal constructor(
             }
 
             store.putString("boost", data)
+            store.putString(
+                "conversion_learning",
+                ConversionLearning.serialize(conversionLearning.values),
+            )
             store.putString("bigram", bigramData)
             store.putString("trigram", trigramData)
             store.putString("history", historyData)
