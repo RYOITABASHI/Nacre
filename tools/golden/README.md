@@ -29,7 +29,7 @@ prompt token ids, the generated token ids, and the generated text.
   ids and generated token ids must match the recorded golden exactly.**
   (Baseline sanity: the recorded golden reproduces the known zenz
   top-1 accuracy of 81.0% on the benchmark.)
-- `golden/qwen.tsv` — 20 prompts (the production ChatML refinement
+- `golden/qwen.tsv` — 30 prompts (the production ChatML refinement
   prompt: `DICTATION_CLEANUP_INSTRUCTION` extracted from
   `LlmPostProcessor.kt` by `make_prompts.py`, plus fixed raw-ASR samples
   in `qwen_samples.txt`). **Gate: outputs must match; a diff is only
