@@ -262,6 +262,10 @@ fun EmojiPanel(
                 }
             }
         }
+
+        // Gboard-style return bar: ABC back to the letters, Space / ⌫
+        // without leaving the panel.
+        PanelFooter(service = service, onDismiss = onDismiss)
     }
 }
 
