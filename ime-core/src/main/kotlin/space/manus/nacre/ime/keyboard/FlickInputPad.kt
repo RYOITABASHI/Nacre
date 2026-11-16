@@ -51,19 +51,19 @@ private enum class FlickMode { Kana, Alpha, Numbers }
  *
  * The flanking columns follow GBOARD's Japanese 12-key instead
  * (owner's own Gboard, screenshot-verified): the left column is
- * ↩ / ◀ / ☺記 / あa1 — the top slot is an inert placeholder (Nacre
- * has no undo yet), ◀ sits in the left column SECOND from the top
- * and ▶ in the right strip SECOND from the top, both flanking the
- * た row, and mode switching is consolidated into the single あa1
- * key at the bottom of the left column, which cycles
+ * 📋 / ◀ / ☺記 / あa1 — ◀ sits in the left column SECOND from the
+ * top and ▶ in the right strip SECOND from the top, both flanking
+ * the た row, and mode switching is consolidated into the single
+ * あa1 key at the bottom of the left column, which cycles
  * kana → alpha → numbers → kana (the former ☆123 / ABC / あいう
- * direct keys were retired by owner decision, 2026-11-16). The
- * right strip holds four equal slots (⌫ / ▶ / 空白 / 改行);
- * PR #46's iPhone-style tall 改行 gave way to Gboard's equal strip.
- * Below the grid, a slim 44dp row holds only 📋 (clipboard / palette),
- * the one Nacre-only function with no home in either stock layout.
- * Layout: candidate bar → [left column | 3-col grid | right strip] →
- * bottom row (📋).
+ * direct keys were retired by owner decision, 2026-11-16). The top
+ * slot departs from Gboard: its ↩ (undo) seat held an inert
+ * placeholder (Nacre has no undo) until 📋 moved into it
+ * (2026-11-16) from the full-width bottom row it used to occupy —
+ * that row is gone, so the pad now ends at the grid. The right
+ * strip holds four equal slots (⌫ / ▶ / 空白 / 改行); PR #46's
+ * iPhone-style tall 改行 gave way to Gboard's equal strip.
+ * Layout: candidate bar → [left column | 3-col grid | right strip].
  */
 @Composable
 fun FlickInputPad(
@@ -118,6 +118,8 @@ fun FlickInputPad(
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
+                onCommandPalette = onCommandPalette,
             )
             FlickMode.Alpha -> FlickAlphaGrid(
                 service = service,
@@ -126,6 +128,8 @@ fun FlickInputPad(
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
+                onCommandPalette = onCommandPalette,
             )
             FlickMode.Numbers -> FlickNumberGrid(
                 service = service,
@@ -134,15 +138,10 @@ fun FlickInputPad(
                 onSymbols = { showSymbols = true },
                 onEmoji = { showEmoji = true },
                 onFlexPointer = onFlexPointer,
+                onClipboard = onClipboard,
+                onCommandPalette = onCommandPalette,
             )
         }
-
-        // Bottom row (44dp): Nacre-only 📋, full width — see FlickPadBottomRow
-        FlickPadBottomRow(
-            service = service,
-            onClipboard = onClipboard,
-            onCommandPalette = onCommandPalette,
-        )
     }
 }
 
@@ -168,6 +167,8 @@ private fun FlickKanaGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
+    onCommandPalette: () -> Unit,
 ) {
     val kanaKeys = FlickEngine.kanaKeys
     val rowH = FLICK_ROW_HEIGHT * keyboardHeightScale(service.configRepository)
@@ -188,6 +189,8 @@ private fun FlickKanaGrid(
             onSetMode = onSetMode,
             onSymbols = onSymbols,
             onEmoji = onEmoji,
+            onClipboard = onClipboard,
+            onCommandPalette = onCommandPalette,
             rowH = rowH,
             modifier = Modifier.weight(sw),
         )
@@ -222,17 +225,20 @@ private fun FlickKanaGrid(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Left column (Gboard): ↩ slot / ◀ / 絵記 / あa1 — four equal slots
-// over the grid's height, rendered positionally from
-// FlickEngine.sideColumnKeys (unit-tested). The top slot is an inert
-// placeholder reserving Gboard's ↩ undo position (Nacre has no undo
-// implementation yet, so nothing is wired to it). ◀ takes the second
-// slot, Gboard's arrow position; 絵記 the third. The あa1 key closes
-// the column at the pad's bottom edge and is the ONLY mode key: it
-// cycles kana → alpha → numbers → kana. It replaces the ☆123 / ABC /
-// あいう direct keys (owner decision, 2026-11-16) — the mode keys
-// used to sit directly above 絵記, and a downward overshoot when
-// switching back to kana kept opening the emoji panel instead.
+// Left column: 📋 / ◀ / 絵記 / あa1 — four equal slots over the
+// grid's height, rendered positionally from
+// FlickEngine.sideColumnKeys (unit-tested). The lower three follow
+// Gboard: ◀ takes the second slot, Gboard's arrow position; 絵記
+// the third. The あa1 key closes the column at the pad's bottom
+// edge and is the ONLY mode key: it cycles kana → alpha →
+// numbers → kana. It replaces the ☆123 / ABC / あいう direct keys
+// (owner decision, 2026-11-16) — the mode keys used to sit directly
+// above 絵記, and a downward overshoot when switching back to kana
+// kept opening the emoji panel instead. The top slot is the one
+// departure from Gboard: its ↩ undo seat was an inert placeholder
+// (Nacre has no undo) until 📋 moved into it (owner, 2026-11-16)
+// from the full-width bottom row below the grid, which is gone —
+// the pad is one row shorter for it.
 // ─────────────────────────────────────────────────────────────────
 
 /** Cycle order of the consolidated あa1 switch key: kana → alpha → numbers → kana. */
@@ -249,16 +255,16 @@ private fun FlickSideColumn(
     onSetMode: (FlickMode) -> Unit,
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
+    onClipboard: () -> Unit,
+    onCommandPalette: () -> Unit,
     rowH: Float,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.height((rowH * 4).dp)) {
         FlickEngine.sideColumnKeys.forEach { key ->
             when (key) {
-                FlickEngine.SideColumnKey.UndoSlot ->
-                    // Reserved for Gboard's ↩ (undo) — inert until
-                    // Nacre has an undo implementation to wire here.
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth())
+                FlickEngine.SideColumnKey.Clipboard ->
+                    FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(1f).fillMaxWidth())
                 FlickEngine.SideColumnKey.CursorLeft ->
                     FlickCursorKey(service = service, direction = SwipeDirection.Left, modifier = Modifier.weight(1f).fillMaxWidth())
                 FlickEngine.SideColumnKey.Emoji ->
@@ -420,6 +426,8 @@ private fun FlickAlphaGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
+    onCommandPalette: () -> Unit,
 ) {
     val rowH = FLICK_ROW_HEIGHT * keyboardHeightScale(service.configRepository)
     val h = rowH.dp
@@ -460,6 +468,8 @@ private fun FlickAlphaGrid(
             onSetMode = onSetMode,
             onSymbols = onSymbols,
             onEmoji = onEmoji,
+            onClipboard = onClipboard,
+            onCommandPalette = onCommandPalette,
             rowH = rowH,
             modifier = Modifier.weight(sw),
         )
@@ -505,6 +515,8 @@ private fun FlickNumberGrid(
     onSymbols: () -> Unit,
     onEmoji: () -> Unit,
     onFlexPointer: () -> Unit,
+    onClipboard: () -> Unit,
+    onCommandPalette: () -> Unit,
 ) {
     val rowH = FLICK_ROW_HEIGHT * keyboardHeightScale(service.configRepository)
     val h = rowH.dp
@@ -517,6 +529,8 @@ private fun FlickNumberGrid(
             onSetMode = onSetMode,
             onSymbols = onSymbols,
             onEmoji = onEmoji,
+            onClipboard = onClipboard,
+            onCommandPalette = onCommandPalette,
             rowH = rowH,
             modifier = Modifier.weight(sw),
         )
@@ -832,11 +846,13 @@ private fun FlickSpaceKey(
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Clipboard-stock key — tap opens the saved clipboard history panel (pinned
+// Clipboard key — tap opens the saved clipboard history panel (pinned
 // clips); long-press (>=350ms, same pattern as the symbol/space keys) opens
 // the command palette. The palette was previously unreachable from the
 // 12-key pad (it needed Fn+Space, and this pad has no Fn key). The sub-label
-// under the icon advertises the long-press.
+// under the icon advertises the long-press. The key sits at the TOP of the
+// left column; it used to span a full-width row below the grid until the
+// owner moved it into the column's then-empty top slot (2026-11-16).
 // ─────────────────────────────────────────────────────────────────
 
 @Composable
@@ -1543,36 +1559,5 @@ private fun FlickModKeyView(
             suppressed = isPressed,
             modifier = Modifier.matchParentSize(),
         )
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Bottom row
-// ─────────────────────────────────────────────────────────────────
-
-/**
- * Bottom row: 📋 alone, one full-width key at 44dp tall.
- *
- * The cursor arrows used to live here (◀ ▶ 📋 until the Gboard-arrow
- * change); they moved to Gboard's positions in the side columns
- * (◀ second in the left column, ▶ second in the right strip), which
- * left this row to the one Nacre-only function with no stock home:
- * - 📋: clipboard (tap) / command palette (long-press). Full width
- *   keeps it the easiest target on the pad for the tap-input owner.
- */
-@Composable
-private fun FlickPadBottomRow(
-    service: NacreInputMethodService,
-    onClipboard: () -> Unit,
-    onCommandPalette: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(44.dp)
-            .padding(top = 2.dp),
-    ) {
-        // 📋 — clipboard (tap) / command palette (long-press)
-        FlickClipboardKey(service = service, onClipboard = onClipboard, onCommandPalette = onCommandPalette, modifier = Modifier.weight(1f))
     }
 }
