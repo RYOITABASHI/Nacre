@@ -9,25 +9,29 @@ object FlickEngine {
     enum class Direction { Tap, Left, Up, Right, Down }
 
     /**
-     * Keys of the pad's left column, top to bottom — Gboard's Japanese
-     * 12-key column (owner's own Gboard, screenshot-verified):
-     * ↩ undo / ◀ / ☺記 / あa1. Nacre has no undo implementation, so
-     * the top slot stays an inert [SideColumnKey.UndoSlot] placeholder
-     * reserving Gboard's ↩ position; the real keys keep their Gboard
-     * slots — CursorLeft SECOND (flanking the た row), Emoji THIRD,
-     * and the consolidated ModeCycle key LAST, at the pad's bottom
-     * edge. ModeCycle replaces the former ☆123 / ABC / あいう direct
-     * keys (owner decision, 2026-11-16): one key cycles
-     * kana → alpha → numbers → kana, so mode switching has a single
-     * home and a downward overshoot can no longer land on 絵記.
+     * Keys of the pad's left column, top to bottom: 📋 / ◀ / ☺記 /
+     * あa1. The lower three keep Gboard's Japanese 12-key slots
+     * (owner's own Gboard, screenshot-verified) — CursorLeft SECOND
+     * (flanking the た row), Emoji THIRD, and the consolidated
+     * ModeCycle key LAST, at the pad's bottom edge. ModeCycle
+     * replaces the former ☆123 / ABC / あいう direct keys (owner
+     * decision, 2026-11-16): one key cycles kana → alpha → numbers
+     * → kana, so mode switching has a single home and a downward
+     * overshoot can no longer land on 絵記. The TOP slot departs
+     * from Gboard: Gboard seats ↩ (undo) there, but Nacre has no
+     * undo implementation, so the slot held an inert placeholder
+     * until the owner moved 📋 into it (2026-11-16) — the clipboard
+     * key used to span a full-width row below the grid, and that
+     * row is gone. If undo is ever built it needs a new home; the
+     * ↩ seat is no longer reserved.
      * FlickSideColumn renders this list positionally; the column
      * divides the grid height into four equal row slots (50dp at
      * scale 1.0). Pinned by FlickLayoutTest.
      */
-    enum class SideColumnKey { UndoSlot, CursorLeft, Emoji, ModeCycle }
+    enum class SideColumnKey { Clipboard, CursorLeft, Emoji, ModeCycle }
 
     val sideColumnKeys: List<SideColumnKey> = listOf(
-        SideColumnKey.UndoSlot,
+        SideColumnKey.Clipboard,
         SideColumnKey.CursorLeft,
         SideColumnKey.Emoji,
         SideColumnKey.ModeCycle,

@@ -15,13 +15,14 @@ import org.junit.Test
  *     ま や ら
  *     ゛゜小 わ 、。？！   (゛゜小 is the dedicated DakutenKeyView)
  *
- * flanked by the left column (↩ slot / ◀ / 絵記 / あa1) and the
+ * flanked by the left column (📋 / ◀ / 絵記 / あa1) and the
  * right strip (⌫ / ▶ / 空白 / 改行). The kana grid follows the iPhone
  * arrangement; the flanking columns follow Gboard's Japanese 12-key
  * (◀ second in the left column, ▶ second in the right strip, both
  * flanking the た row; mode switching consolidated into the single
  * あa1 key at the bottom of the left column — owner's own Gboard,
- * screenshot-verified).
+ * screenshot-verified), except the top slot: Gboard's ↩ seat holds
+ * 📋, moved up from the abolished full-width bottom row.
  * If the data order ever drifts, the rendered pad silently stops being
  * the stock arrangement — this test pins it.
  * Behavioural parity (cycles, tap counts, dakuten) lives in FlickParityTest.
@@ -55,18 +56,21 @@ class FlickLayoutTest {
     }
 
     @Test
-    fun `left column seats cursor-left second like Gboard`() {
-        // Gboard's left column: ↩ / ◀ / ☺記 / あa1. Nacre has no undo
-        // implementation, so the top slot is the inert UndoSlot
-        // placeholder reserving the ↩ position; ◀ stays second from
-        // the top, flanking the た row; 絵記 is third; and the
-        // consolidated あa1 cycle key (ModeCycle) closes the column at
-        // the bottom. The former ☆123 / ABC / あいう direct keys are
-        // gone (owner decision, 2026-11-16). FlickSideColumn renders
+    fun `left column seats clipboard on top and cursor-left second`() {
+        // Gboard's left column: ↩ / ◀ / ☺記 / あa1. Nacre keeps the
+        // lower three Gboard slots — ◀ second from the top, flanking
+        // the た row; 絵記 third; the consolidated あa1 cycle key
+        // (ModeCycle) closing the column at the bottom — but the top
+        // slot departs: Nacre has no undo implementation, and the
+        // inert placeholder that reserved Gboard's ↩ position gave
+        // way to 📋 (owner, 2026-11-16), moved up from the full-width
+        // bottom row it used to span (that row is gone). The former
+        // ☆123 / ABC / あいう direct keys are also gone (owner
+        // decision, 2026-11-16). FlickSideColumn renders
         // sideColumnKeys positionally.
         assertEquals(
             listOf(
-                FlickEngine.SideColumnKey.UndoSlot,
+                FlickEngine.SideColumnKey.Clipboard,
                 FlickEngine.SideColumnKey.CursorLeft,
                 FlickEngine.SideColumnKey.Emoji,
                 FlickEngine.SideColumnKey.ModeCycle,
