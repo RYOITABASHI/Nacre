@@ -943,14 +943,31 @@ class InputEngine(private val service: NacreInputMethodService) {
                     commitSelectedCandidate(ic)
                 } else if (composingFlickKana.isNotEmpty()) {
                     // Flick mode: commit kana as-is
-                    ic.commitText(composingFlickKana, 1)
-                    if (flickAlphaMode) recordEnglishSelection(composingFlickKana)
-                    else recordJapanesePhrase(composingFlickKana, composingFlickKana)
+                    val pendingKana = composingFlickKana
+                    ic.commitText(pendingKana, 1)
+                    if (flickAlphaMode) recordEnglishSelection(pendingKana)
+                    else {
+                        recordJapanesePhrase(pendingKana, pendingKana)
+                        // Feed the next-word predictor's context, like
+                        // finishComposing does for QWERTY as-is commits —
+                        // without it predictNextWord had nothing to work
+                        // from after a flick Enter commit.
+                        (dictionary as? NacreDictionary)?.updateContext(pendingKana)
+                    }
                     composingFlickKana = ""
                     composingKana = ""
                     clearCandidates()
+                    // As-is commits show next-word predictions like
+                    // candidate commits do (commitCandidate /
+                    // commitSelectedCandidate); this path silently
+                    // skipped them, so on the flick pad predictions
+                    // seemed to never appear after Enter.
+                    if (!flickAlphaMode) showNextWordPredictions()
                 } else if (composingText.isNotEmpty()) {
                     finishComposing(ic)
+                    // Same as the flick branch above: an as-is commit is
+                    // still a commit — show next-word predictions.
+                    showNextWordPredictions()
                 } else if (englishComposing.isNotEmpty()) {
                     // Commit English composing text as-is
                     ic.commitText(englishComposing, 1)
