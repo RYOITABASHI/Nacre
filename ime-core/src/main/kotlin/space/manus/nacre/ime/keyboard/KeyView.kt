@@ -39,6 +39,7 @@ import space.manus.nacre.ime.input.SwipeDecoder
 import space.manus.nacre.ime.input.SwipeDirection
 import space.manus.nacre.ime.input.SwipeKeyBox
 import space.manus.nacre.ime.input.SwipeTracePoint
+import space.manus.nacre.ime.input.isSameKeyBounce
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -160,6 +161,12 @@ fun KeyView(
     // punctuation). Mod/special keys (Shift, Space, Fn, …) get none.
     val isCharacterKey = keyDef.action is KeyAction.Text && keyDef.primary.length == 1
     var pressPopupChar by remember { mutableStateOf<String?>(null) }
+    // Pointer-event release time of this key's last accepted tap,
+    // consulted by the same-key bounce guard in the tap branch below
+    // (SameKeyBounce.kt).
+    // A plain remembered value: it drives no UI, so it must not be
+    // snapshot state that triggers recomposition.
+    val lastTapReleaseMs = remember { longArrayOf(0L) }
 
     // Glide (swipe) typing: QWERTY letter keys publish their geometry to
     // the input engine's registry, so a glide starting on any letter can be
@@ -204,6 +211,11 @@ fun KeyView(
                         pressPopupChar = currentDisplayLabel
                     }
                     val downTime = System.currentTimeMillis()
+                    // Pointer-event time of this DOWN (monotonic clock),
+                    // for the same-key bounce guard: event times, never
+                    // handler execution times, so UI-thread load cannot
+                    // compress a legitimate release→down gap.
+                    val downEventMs = down.uptimeMillis
 
                     val isFnAction = keyDef.action is KeyAction.Fn
                     if (isFnAction) {
@@ -247,6 +259,10 @@ fun KeyView(
                     // distinguishes a finished glide from a cancelled one
                     // in the finally block below.
                     var glideCompleted = false
+                    // Pointer-event time of the observed release (same
+                    // monotonic clock as downEventMs); 0 while no release
+                    // has been observed. Feeds the bounce guard.
+                    var releaseEventMs = 0L
                     if (glideArmed) {
                         glideBoxes = engine.swipeGeometry.snapshot()
                         glideJapanese = service.layerManager.isJapanese
@@ -359,6 +375,7 @@ fun KeyView(
                             } else {
                                 change.consume()
                                 glideCompleted = true
+                                releaseEventMs = change.uptimeMillis
                                 break
                             }
                         }
@@ -462,9 +479,34 @@ fun KeyView(
                             service.inputEngine.processSwipe(keyDef, direction)
                         }
                         else -> {
-                            feedback.onKeyPress(keyDef.action)
-                            service.keyLighting.onKeyPress(keyDef.primary, column)
-                            service.inputEngine.processKey(keyDef)
+                            // Same-key bounce guard: a character-key tap
+                            // carrying the physical signature of a
+                            // touch-controller re-delivery (it began
+                            // almost immediately after this key's
+                            // previous accepted tap AND lasted only a
+                            // few ms — both in pointer-event times) is
+                            // not a new keystroke: swallow the gesture
+                            // whole, or a run of identical consonants
+                            // (ttt / nnn) gains a letter and its っ/ん
+                            // doubles. A deliberate fast re-tap is held
+                            // for a real duration and always passes.
+                            // See SameKeyBounce.kt.
+                            if (isCharacterKey &&
+                                isSameKeyBounce(
+                                    lastTapReleaseMs[0],
+                                    downEventMs,
+                                    releaseEventMs,
+                                )
+                            ) {
+                                // Bounce: the gesture never happened.
+                            } else {
+                                feedback.onKeyPress(keyDef.action)
+                                service.keyLighting.onKeyPress(keyDef.primary, column)
+                                service.inputEngine.processKey(keyDef)
+                                if (isCharacterKey && releaseEventMs > 0L) {
+                                    lastTapReleaseMs[0] = releaseEventMs
+                                }
+                            }
                         }
                     }
                 }
