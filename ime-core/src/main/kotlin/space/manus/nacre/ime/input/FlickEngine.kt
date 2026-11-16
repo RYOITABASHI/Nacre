@@ -115,6 +115,48 @@ object FlickEngine {
     )
 
     /**
+     * The ☆123 number grid's keys, in grid reading order (1-9, then the
+     * bottom row + / 0 / .). FlickNumberGrid renders this list positionally
+     * through the same FlickKeyView as the kana grid, and every resolved
+     * character commits immediately via processFlickDirectText — the tap
+     * stays the digit itself, exactly as before symbols were added.
+     *
+     * Symbol assignment (owner request, 2026-11-16: symbols on flicks, not
+     * on a tap cycle — the kana keys' flick grammar):
+     * - UP carries each digit's classic pair symbol from the JIS keyboard
+     *   shift layer (Shift+1 = ！, 2 = ", 3 = #, 4 = $, 5 = %, 6 = &, 7 = ',
+     *   8 = (, 9 = )) — the same pairing a Japanese user already knows from
+     *   hardware keyboards. Up is also the one direction the key renders as
+     *   its small sub-label, kana-style, so the primary symbol is the
+     *   discoverable one. JIS leaves Shift+0 unassigned; 0 takes * , the
+     *   phone-keypad companion of 0 (the *, 0, # bottom row).
+     * - Companions are added only where a natural pair or set exists:
+     *   ¥ beside $ on 4 (the JP currency pair), ) beside ( on 8 so the
+     *   bracket pair closes on one key, and the arithmetic set completed
+     *   on the + key itself (up − and down = predate this change as
+     *   vertical swipes; left × and right ÷ are new), so + − × ÷ = all
+     *   live on one key. The . key keeps its existing up , / down : and
+     *   gains / on the right for dates (2026/11/16) without leaving the
+     *   number grid. Every other direction stays unassigned rather than
+     *   stuffed with an arbitrary symbol.
+     * Pinned by FlickLayoutTest.
+     */
+    val numberKeys: List<FlickKey> = listOf(
+        FlickKey("1", "1", "1", up = "!"),
+        FlickKey("2", "2", "2", up = "\""),
+        FlickKey("3", "3", "3", up = "#"),
+        FlickKey("4", "4", "4", left = "¥", up = "$"),
+        FlickKey("5", "5", "5", up = "%"),
+        FlickKey("6", "6", "6", up = "&"),
+        FlickKey("7", "7", "7", up = "'"),
+        FlickKey("8", "8", "8", up = "(", right = ")"),
+        FlickKey("9", "9", "9", up = ")"),
+        FlickKey("plus", "+", "+", left = "×", up = "-", right = "÷", down = "="),
+        FlickKey("0", "0", "0", up = "*"),
+        FlickKey("dot", ".", ".", up = ",", right = "/", down = ":"),
+    )
+
+    /**
      * The effective multi-tap cycle for a key: the explicit [FlickKey.tapCycle]
      * when present, otherwise the flick cross in tap→left→up→right→down order.
      * Mirrors the fallback chain in InputEngine.processFlickKana.
