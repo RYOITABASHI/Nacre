@@ -1,6 +1,8 @@
 package space.manus.nacre.ime.keyboard
 
 import android.content.Intent
+import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.InputConnection
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -22,8 +24,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.launch
+import space.manus.nacre.ai.RefinePresets
 import space.manus.nacre.ime.NacreInputMethodService
 import space.manus.nacre.ime.input.TextTransformer
+import space.manus.nacre.ime.input.VoiceAppCategory
+import space.manus.nacre.ime.input.VoiceToneResolver
+import space.manus.nacre.ime.input.WritingTools
 
 private val PaletteBackground = Color(0xFF0F0F23)
 private val SearchFieldBg = Color(0xFF16213E)
@@ -63,8 +69,27 @@ fun CommandPalette(
         return
     }
 
+    // AI Writing Tools panel inside the palette (same pattern as the
+    // clipboard panel above).
+    var writingLaunch by remember { mutableStateOf<WritingLaunch?>(null) }
+    val launch = writingLaunch
+    if (launch != null) {
+        WritingToolsPanel(
+            service = service,
+            launch = launch,
+            onBack = { writingLaunch = null },
+            onDismissAll = onDismiss,
+        )
+        return
+    }
+
     val commands = remember(service) {
-        buildCommandList(service, onDismiss = onDismiss, onShowClipboard = { showClipboard = true })
+        buildCommandList(
+            service,
+            onDismiss = onDismiss,
+            onShowClipboard = { showClipboard = true },
+            onOpenWriting = { writingLaunch = it },
+        )
     }
 
     val filtered = remember(query, commands) {
@@ -182,8 +207,12 @@ private fun buildCommandList(
     service: NacreInputMethodService,
     onDismiss: () -> Unit,
     onShowClipboard: () -> Unit,
+    onOpenWriting: (WritingLaunch) -> Unit,
 ): List<CommandItem> {
     val items = mutableListOf<CommandItem>()
+
+    // AI Writing Tools (local LLM) come first when available.
+    items.addAll(buildWritingItems(service, onOpenWriting))
 
     // Built-in commands
     items.add(
@@ -326,4 +355,193 @@ private fun buildCommandList(
     }
 
     return items
+}
+
+/**
+ * The AI Writing Tools section of the palette. The target is captured
+ * NOW (palette open): the selection when there is one, otherwise the
+ * paragraph before the cursor — see [WritingTools] for the rule.
+ *
+ * Password fields get NO section and NO text extraction at all (SPEC:
+ * no AI features in password fields). While the engine holds
+ * uncommitted text the section collapses to a hint row, because the
+ * target must be committed text. When no LLM model is downloaded the
+ * section is a single row into the panel's guidance view.
+ */
+private fun buildWritingItems(
+    service: NacreInputMethodService,
+    onOpenWriting: (WritingLaunch) -> Unit,
+): List<CommandItem> {
+    if (service.inputEngine.isPasswordField) return emptyList()
+
+    val sessionId = service.inputEngine.inputSessionId
+    val politeStyle = resolveWritingPoliteStyle(service)
+    val availability = service.voiceInputManager.writingModelAvailability()
+
+    if (service.inputEngine.hasUncommittedText) {
+        return listOf(
+            CommandItem(
+                name = "✦ AIライティング",
+                trigger = "writing — 未確定の文字を確定すると使えます",
+                type = CommandType.BuiltIn,
+                action = {
+                    onOpenWriting(
+                        WritingLaunch(
+                            target = null,
+                            initialOp = null,
+                            politeStyle = politeStyle,
+                            availability = availability,
+                            selectionTooLong = false,
+                            sessionId = sessionId,
+                        ),
+                    )
+                },
+            ),
+        )
+    }
+
+    val ic = service.currentInputConnection ?: return emptyList()
+    val selection = readSelection(ic)
+    // Only fetch the paragraph when there is no selection to act on.
+    val textBeforeCursor = if (selection.isNullOrEmpty()) {
+        try {
+            ic.getTextBeforeCursor(WritingTools.MAX_TARGET_CHARS + 64, 0)?.toString()
+        } catch (_: Exception) {
+            null
+        }
+    } else {
+        null
+    }
+
+    return when (val resolution = WritingTools.resolveTarget(selection, textBeforeCursor)) {
+        is WritingTools.TargetResolution.Found -> {
+            val target = resolution.target
+            if (availability == WritingTools.ModelAvailability.NO_MODEL) {
+                listOf(
+                    CommandItem(
+                        name = "✦ AIライティング",
+                        trigger = "writing — AIモデル未ダウンロード（タップで案内）",
+                        type = CommandType.BuiltIn,
+                        action = {
+                            onOpenWriting(
+                                WritingLaunch(
+                                    target = target,
+                                    initialOp = null,
+                                    politeStyle = politeStyle,
+                                    availability = availability,
+                                    selectionTooLong = false,
+                                    sessionId = sessionId,
+                                ),
+                            )
+                        },
+                    ),
+                )
+            } else {
+                val preview = target.text.replace("\n", " ").take(24)
+                WritingTools.Op.values().map { op ->
+                    CommandItem(
+                        name = "✦ ${op.label}",
+                        trigger = "AI ${op.keywords} — 対象: $preview",
+                        type = CommandType.BuiltIn,
+                        action = {
+                            onOpenWriting(
+                                WritingLaunch(
+                                    target = target,
+                                    initialOp = op,
+                                    politeStyle = politeStyle,
+                                    availability = availability,
+                                    selectionTooLong = false,
+                                    sessionId = sessionId,
+                                ),
+                            )
+                        },
+                    )
+                }
+            }
+        }
+
+        WritingTools.TargetResolution.SelectionTooLong,
+        WritingTools.TargetResolution.None,
+        -> listOf(
+            CommandItem(
+                name = "✦ AIライティング",
+                trigger = if (resolution == WritingTools.TargetResolution.SelectionTooLong) {
+                    "writing — 選択が長すぎます（${WritingTools.MAX_TARGET_CHARS}文字まで）"
+                } else {
+                    "writing — テキストを選択するか、文章を入力すると使えます"
+                },
+                type = CommandType.BuiltIn,
+                action = {
+                    onOpenWriting(
+                        WritingLaunch(
+                            target = null,
+                            initialOp = null,
+                            politeStyle = politeStyle,
+                            availability = availability,
+                            selectionTooLong =
+                                resolution == WritingTools.TargetResolution.SelectionTooLong,
+                            sessionId = sessionId,
+                        ),
+                    )
+                },
+            ),
+        )
+    }
+}
+
+/**
+ * The current selection, or null when there is none. Primary read is
+ * getSelectedText; the fallback mirrors the TextTransformer commands'
+ * extracted-text read for editors that don't answer getSelectedText.
+ */
+private fun readSelection(ic: InputConnection): String? {
+    try {
+        val selected = ic.getSelectedText(0)?.toString()
+        if (!selected.isNullOrEmpty()) return selected
+    } catch (_: Exception) {
+        // fall through to the extracted-text read
+    }
+    return try {
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        val full = extracted?.text ?: return null
+        val start = extracted.selectionStart
+        val end = extracted.selectionEnd
+        if (start >= 0 && end > start && end <= full.length) {
+            full.substring(start, end)
+        } else {
+            null
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/**
+ * The 丁寧に style for this field, resolved from the per-app voice
+ * tone exactly like VoiceInputManager.resolveSessionPreset does for a
+ * voice session: session override (none here) → per-app category
+ * mapping in auto mode → the standing manual preset.
+ */
+private fun resolveWritingPoliteStyle(
+    service: NacreInputMethodService,
+): WritingTools.PoliteStyle {
+    val manualId = RefinePresets.activeId(service)
+    val auto = RefinePresets.autoByAppEnabled(service)
+    val pkg = try {
+        service.currentInputEditorInfo?.packageName
+    } catch (_: Exception) {
+        null
+    }
+    val category = VoiceToneResolver.categorize(pkg)
+    val mapping = VoiceAppCategory.values().associateWith {
+        RefinePresets.categoryPresetId(service, it.name)
+    }
+    val resolved = VoiceToneResolver.resolvePreset(
+        sessionOverrideId = null,
+        autoEnabled = auto,
+        manualId = manualId,
+        category = category,
+        autoMapping = mapping,
+    )
+    return WritingTools.politeStyleFor(resolved.presetId)
 }
