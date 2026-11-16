@@ -2512,6 +2512,17 @@ class InputEngine(private val service: NacreInputMethodService) {
             DakutenType.Small -> FlickEngine.applySmall(lastChar)
         } ?: return
 
+        // A transform edits the kana composition, but during a conversion
+        // the editor is showing a candidate SURFACE while the candidate
+        // list / selection / fullKana still describe the pre-transform
+        // kana — rewriting the buffer here would desync the two, and the
+        // updatePredictions() below would land mid-conversion and clear
+        // isConverting. Revert to the kana composition first (the same
+        // "back to kana" semantics as backspace during conversion), then
+        // transform the kana itself. Decided only after the transform is
+        // known to apply, so a no-op press never cancels a conversion.
+        if (isConverting) cancelConversion(ic)
+
         composingFlickKana = composingFlickKana.dropLast(1) + replaced
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
@@ -2539,6 +2550,9 @@ class InputEngine(private val service: NacreInputMethodService) {
         val ic = service.currentInputConnection ?: return
         val lastChar = composingFlickKana.last()
         val replaced = FlickEngine.cycleKanaForm(lastChar) ?: return
+        // See processFlickDakuten: never rewrite the kana buffer under a
+        // live conversion — revert to the kana composition first.
+        if (isConverting) cancelConversion(ic)
         composingFlickKana = composingFlickKana.dropLast(1) + replaced
         composingKana = composingFlickKana
         ic.setComposingText(composingFlickKana, 1)
