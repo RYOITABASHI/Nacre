@@ -33,7 +33,8 @@ class SherpaRecognizer {
     /**
      * Initialize the recognizer with model files from the given directory.
      * @param modelDir Directory containing model.int8.onnx or model.onnx, plus tokens.txt
-     * @param vadModelPath Path to silero_vad.onnx
+     * @param vadModelPath Path to the Silero VAD model (v6 preferred;
+     * legacy v5-era file also works — see ModelDownloader.getVadModelPath)
      */
     fun initialize(modelDir: String, vadModelPath: String): Boolean {
         try {
@@ -48,6 +49,11 @@ class SherpaRecognizer {
             )
             recognizer = OfflineRecognizer(config = config)
 
+            // Thresholds are the v5-era values, kept deliberately: desktop
+            // fixture checks against Silero VAD v6.2.3 on sherpa-onnx 1.12.34
+            // (2026-11-16, tools/vad_fixture_check.py) showed identical
+            // segment decisions on clean speech and better noise rejection,
+            // so no endpointing retune was warranted for the v6 swap.
             val vadConfig = VadModelConfig(
                 sileroVadModelConfig = SileroVadModelConfig(
                     model = vadModelPath,

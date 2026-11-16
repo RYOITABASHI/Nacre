@@ -2058,7 +2058,7 @@ private fun WhisperModelSection() {
                 }
             } else {
                 Text(
-                    "Place an ASR model directory (ReazonSpeech/SenseVoice) + silero_vad.onnx in /sdcard/Download/",
+                    "Place an ASR model directory (ReazonSpeech/SenseVoice) + silero_vad_v6.onnx in /sdcard/Download/",
                     color = NacreTextDim, fontSize = 12.sp,
                 )
                 if (modelDir == null) {

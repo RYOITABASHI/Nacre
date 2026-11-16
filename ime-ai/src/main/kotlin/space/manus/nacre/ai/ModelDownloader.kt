@@ -16,7 +16,7 @@ import java.net.URL
  *
  * Models:
  * - SenseVoice int8: ~229MB (model.int8.onnx + tokens.txt in a directory)
- * - Silero VAD: ~629KB (silero_vad.onnx)
+ * - Silero VAD v6: ~2.3MB (silero_vad_v6.onnx; legacy silero_vad.onnx accepted as fallback)
  * - KenLM 5-gram: ~561MB (japanese-5gram.klm)
  */
 class ModelDownloader(private val context: Context) {
@@ -290,10 +290,37 @@ class ModelDownloader(private val context: Context) {
 
     /**
      * Get Silero VAD model path if it exists.
+     *
+     * Prefers the v6 model ([VAD_V6_FILENAME]). The legacy v5-era file
+     * ([VAD_FILENAME]) is still accepted, so a device whose v6 download
+     * has not completed (or has failed) keeps working exactly as before —
+     * the VAD is never a hard dependency of the upgrade.
      */
     fun getVadModelPath(): String? {
-        Log.i(TAG, "getVadModelPath: searching for silero_vad.onnx")
+        val v6 = findVadV6Path()
+        if (v6 != null) {
+            Log.i(TAG, "getVadModelPath: using Silero VAD v6 at $v6")
+            return v6
+        }
+        Log.i(TAG, "getVadModelPath: no valid v6 file, searching for legacy silero_vad.onnx")
         return findModelFile(VAD_FILENAME)
+    }
+
+    /**
+     * Locate the v6 VAD file, accepting only the exact published size
+     * ([VAD_V6_BYTES]). The downloader renames its .tmp into place without
+     * a length check, so a truncated v6 download is a real possibility —
+     * and it must never mask a working legacy model, nor hide a valid v6
+     * copy sitting in a later search location. The size predicate is
+     * therefore applied during the candidate search itself, not just to
+     * whichever file the search happens to find first.
+     */
+    private fun findVadV6Path(): String? {
+        val valid = findModelFile(VAD_V6_FILENAME) { it.length() == VAD_V6_BYTES }
+        if (valid == null && findModelFile(VAD_V6_FILENAME) != null) {
+            Log.w(TAG, "findVadV6Path: v6-named file(s) present but none matches the expected size $VAD_V6_BYTES; ignoring")
+        }
+        return valid
     }
 
     // ---- KenLM model ----
@@ -477,8 +504,28 @@ class ModelDownloader(private val context: Context) {
             // depends on /sdcard + MANAGE_EXTERNAL_STORAGE (which is lost on
             // reinstall — without the VAD, loadModel is skipped and ASR silently
             // falls back to the system SpeechRecognizer).
-            if (getVadModelPath() == null) {
-                downloadModelInternal(url = VAD_URL, modelName = "Silero VAD", fileName = VAD_FILENAME)
+            // Target is the v6 model. If its download fails, fall back to the
+            // legacy file so a fresh install is never left without a VAD;
+            // devices that already hold the legacy file keep using it (via
+            // getVadModelPath) until the v6 download lands.
+            if (findVadV6Path() == null) {
+                // Drop a wrong-size leftover at the download target first:
+                // downloadModelInternal treats any existing non-empty target
+                // as complete, so without this a truncated v6 file would
+                // block its own repair forever.
+                val stale = File(getModelsDir(), VAD_V6_FILENAME)
+                if (stale.exists() && stale.length() != VAD_V6_BYTES) {
+                    Log.w(TAG, "Removing wrong-size VAD v6 leftover (${stale.length()} bytes)")
+                    stale.delete()
+                }
+                downloadModelInternal(url = VAD_V6_URL, modelName = "Silero VAD v6", fileName = VAD_V6_FILENAME)
+                // Decide by the validated lookup, not the download result:
+                // downloadModelInternal can report success for a truncated
+                // body (it never checks the received length), so re-check
+                // whether any usable VAD exists before giving up.
+                if (getVadModelPath() == null) {
+                    downloadModelInternal(url = VAD_URL, modelName = "Silero VAD", fileName = VAD_FILENAME)
+                }
             }
             // ASR is the highest-leverage model — provision the ja-specialized
             // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
@@ -650,16 +697,16 @@ class ModelDownloader(private val context: Context) {
      * 3. Recursive scan of /sdcard (max depth 4)
      * 4. MediaStore query
      */
-    private fun findModelFile(filename: String): String? {
+    private fun findModelFile(filename: String, accept: (File) -> Boolean = { true }): String? {
         Log.i(TAG, "findModelFile: searching for '$filename'")
 
         val externalModels = context.getExternalFilesDir(null)?.let { File(it, "models/$filename") }
-        if (externalModels != null && externalModels.exists() && externalModels.length() > 0) {
+        if (externalModels != null && externalModels.exists() && externalModels.length() > 0 && accept(externalModels)) {
             return externalModels.absolutePath
         }
 
         val internal = File(context.filesDir, "models/$filename")
-        if (internal.exists() && internal.length() > 0) return internal.absolutePath
+        if (internal.exists() && internal.length() > 0 && accept(internal)) return internal.absolutePath
 
         val sdcard = android.os.Environment.getExternalStorageDirectory()
         val downloads = android.os.Environment.getExternalStoragePublicDirectory(
@@ -679,14 +726,14 @@ class ModelDownloader(private val context: Context) {
             val exists = try { path.exists() } catch (_: Exception) { false }
             val readable = try { path.canRead() } catch (_: Exception) { false }
             val size = try { if (exists) path.length() else 0L } catch (_: Exception) { 0L }
-            if (exists && readable && size > 0) {
+            if (exists && readable && size > 0 && accept(path)) {
                 Log.i(TAG, "findModelFile: FOUND at ${path.absolutePath}")
                 return path.absolutePath
             }
         }
 
         try {
-            val found = scanForFile(sdcard, filename, maxDepth = 4)
+            val found = scanForFile(sdcard, filename, maxDepth = 4, accept = accept)
             if (found != null) {
                 Log.i(TAG, "findModelFile: FOUND via scan at ${found.absolutePath}")
                 return found.absolutePath
@@ -696,7 +743,7 @@ class ModelDownloader(private val context: Context) {
         }
 
         try {
-            val found = findViaMediaStore(filename)
+            val found = findViaMediaStore(filename, accept)
             if (found != null) {
                 Log.i(TAG, "findModelFile: FOUND via MediaStore at ${found.absolutePath}")
                 return found.absolutePath
@@ -709,7 +756,7 @@ class ModelDownloader(private val context: Context) {
         return null
     }
 
-    private fun findViaMediaStore(filename: String): File? {
+    private fun findViaMediaStore(filename: String, accept: (File) -> Boolean = { true }): File? {
         val resolver = context.contentResolver
         val collection = android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI
         val projection = arrayOf(
@@ -721,16 +768,16 @@ class ModelDownloader(private val context: Context) {
         val selectionArgs = arrayOf(filename)
 
         resolver.query(collection, projection, selection, selectionArgs, null)?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                val idCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Downloads._ID)
-                val sizeCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Downloads.SIZE)
+            val idCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Downloads._ID)
+            val sizeCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Downloads.SIZE)
+            while (cursor.moveToNext()) {
                 val id = cursor.getLong(idCol)
                 val size = cursor.getLong(sizeCol)
 
                 val uri = android.content.ContentUris.withAppendedId(collection, id)
                 val internalFile = File(getModelsDir(), filename)
 
-                if (internalFile.exists() && internalFile.length() == size) {
+                if (internalFile.exists() && internalFile.length() == size && accept(internalFile)) {
                     return internalFile
                 }
 
@@ -745,23 +792,35 @@ class ModelDownloader(private val context: Context) {
                 }
 
                 if (internalFile.exists() && internalFile.length() > 0) {
-                    return internalFile
+                    if (accept(internalFile)) {
+                        return internalFile
+                    }
+                    // This row's copy is unusable for the caller (e.g. a
+                    // truncated VAD v6): keep scanning later rows rather
+                    // than letting it mask a valid copy. With the default
+                    // accept-everything predicate this is unreachable, so
+                    // first-match behavior is preserved for other models.
+                    continue
                 }
+
+                // The row produced no file at all: preserve the historical
+                // behavior of giving up on the first match.
+                return null
             }
         }
         return null
     }
 
-    private fun scanForFile(root: File, filename: String, maxDepth: Int): File? {
+    private fun scanForFile(root: File, filename: String, maxDepth: Int, accept: (File) -> Boolean = { true }): File? {
         if (maxDepth <= 0 || !root.isDirectory) return null
         val skipDirs = setOf("Android", ".thumbnails", ".cache", "cache", "DCIM", "Pictures", "Music", "Ringtones", "Alarms", "Notifications")
         val children = root.listFiles() ?: return null
         for (f in children) {
-            if (f.isFile && f.name == filename) return f
+            if (f.isFile && f.name == filename && accept(f)) return f
         }
         for (f in children) {
             if (f.isDirectory && f.name !in skipDirs && !f.name.startsWith(".")) {
-                val found = scanForFile(f, filename, maxDepth - 1)
+                val found = scanForFile(f, filename, maxDepth - 1, accept)
                 if (found != null) return found
             }
         }
@@ -807,8 +866,20 @@ class ModelDownloader(private val context: Context) {
         const val REAZON_DECODER_URL = "$MODELS_BASE_URL/reazonspeech-ja-decoder.onnx"
         const val REAZON_JOINER_URL = "$MODELS_BASE_URL/reazonspeech-ja-joiner.int8.onnx"
         const val VAD_URL = "$MODELS_BASE_URL/silero_vad.onnx"
+        const val VAD_V6_URL = "$MODELS_BASE_URL/silero_vad_v6.onnx"
+        // Silero VAD v6.2.3 (snakers4/silero-vad, MIT) — the wheel's
+        // silero_vad/data/silero_vad.onnx, mirrored into the v0.1.0-models
+        // release as silero_vad_v6.onnx: 2,327,524 bytes, sha256
+        // 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3.
+        // Compatibility verified 2026-11-16 against the pinned sherpa-onnx
+        // 1.12.34: it loads via the (input/state/sr) path with the 64-sample
+        // context prepend, and at the existing VadModelConfig thresholds it
+        // reproduces the legacy model's segment decisions on speech fixtures
+        // while rejecting noise better (tools/vad_fixture_check.py).
+        const val VAD_V6_BYTES = 2_327_524L
         const val REAZON_TOKENS_URL = "$MODELS_BASE_URL/reazonspeech-ja-tokens.txt"
         const val VAD_FILENAME = "silero_vad.onnx"
+        const val VAD_V6_FILENAME = "silero_vad_v6.onnx"
         const val KENLM_FILENAME = "japanese-5gram.klm"
         const val COMPACT_KENLM_FILENAME = "japanese-compact.klm"
         const val LLM_FILENAME = "gemma-4-E2B-it-Q4_K_M.gguf"
