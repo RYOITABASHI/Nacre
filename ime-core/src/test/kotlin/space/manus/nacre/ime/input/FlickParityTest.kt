@@ -226,6 +226,40 @@ class FlickParityTest {
         assertNull(cycler.tap("abc", abc, startIndex = 0, nowMs = 200L))
     }
 
+    /**
+     * Mirrors the FIXED committed-text backspace route (processAction's
+     * fall-through): reset the cycler, then delete the character. The
+     * 12-key pad's ⌫ takes this route in ABC mode because the pending
+     * character is already committed and nothing is composing — it does
+     * NOT pass through processFlickBackspace, which was the only route
+     * that reset the cycler.
+     */
+    private fun backspaceAlpha(editor: FakeEditor, cycler: AlphaTapCycler) {
+        cycler.reset()
+        editor.text.deleteCharAt(editor.text.length - 1)
+    }
+
+    @Test
+    fun `alpha character deleted by backspace does not resurrect as a replace`() {
+        val editor = FakeEditor()
+        val cycler = AlphaTapCycler(timeoutMs = 800L)
+        val abc = listOf("a", "b", "c")
+        // Pre-existing text ending in 'a' — the coincidence case: after the
+        // pending 'a' is deleted, the character before the cursor is an
+        // OLDER 'a', which satisfies the replace guard's expectedPrev check.
+        editor.insert("data")
+        tapAlpha(editor, cycler, "abc", abc, nowMs = 0L) // pending 'a' appended
+        assertEquals("dataa", editor.toString())
+        backspaceAlpha(editor, cycler) // deletes the pending 'a'
+        assertEquals("data", editor.toString())
+        // Without the reset on the delete route, this tap would return the
+        // 'b' replace index, the guard would pass against the older 'a',
+        // and the text would become "datb" — an old character eaten and a
+        // wrong letter inserted. With the fix the tap starts fresh.
+        tapAlpha(editor, cycler, "abc", abc, nowMs = 100L)
+        assertEquals("dataa", editor.toString())
+    }
+
     // ── ゛゜小 transform seals the pending toggle ────────────────────
     //
     // The bug: a ゛゜小 transform rewrote the last composing character but
@@ -262,6 +296,19 @@ class FlickParityTest {
             val replaced = FlickEngine.cycleKanaForm(composing.last()) ?: return
             composing = composing.dropLast(1) + replaced
             toggle.disarm()
+        }
+
+        /** Mirrors processFlickKana's non-tap path: append, toggle disarmed. */
+        fun flick(key: FlickEngine.FlickKey) {
+            composing += key.tap
+            toggle.disarm()
+        }
+
+        /** Mirrors processFlickBackspace AFTER the fix: disarm, then shrink. */
+        fun backspace() {
+            if (composing.isEmpty()) return
+            toggle.disarm()
+            composing = composing.dropLast(1)
         }
     }
 
@@ -380,6 +427,52 @@ class FlickParityTest {
                 true, firstBracket > lastKana,
             )
         }
+    }
+
+    // ── Backspace settles the pending toggle ──────────────────────
+    //
+    // The bug: processFlickBackspace shrank the composing string but left
+    // the multi-tap toggle armed (only the shrink-to-empty path disarmed,
+    // as a side effect of clearCandidates()). The toggle's invariant —
+    // "the last composing character is the pending one, produced by the
+    // armed key" — is destroyed by the delete: the character now last was
+    // produced by a DIFFERENT key, is not in the armed key's cycle, the
+    // cycle lookup misses (index -1), and the next same-row tap REPLACED
+    // that character with the cycle's first entry. か + toggle-い, BS,
+    // re-tap ate the か. The fix disarms the toggle on flick backspace.
+
+    @Test
+    fun `backspace disarms toggle so re-tap appends instead of eating the previous character`() {
+        val pad = FakeKanaPad()
+        val ka = key("か"); val a = key("あ")
+        pad.flick(ka) // か by flick — no toggle involved
+        assertEquals("か", pad.composing)
+        pad.tap(a, 0L) // あ appended, toggle arms for the あ row
+        pad.tap(a, 100L) // toggle: あ → い (the pending character)
+        assertEquals("かい", pad.composing)
+        pad.backspace() // deletes い — the pending character itself
+        assertEquals("か", pad.composing)
+        // Still inside the 800ms window from the last toggle tap: without
+        // the disarm, this tap would "continue" the あ-row cycle against
+        // か (not in the cycle → index -1 → cycle[0]) and replace it,
+        // leaving just あ. With the fix it appends a fresh あ.
+        pad.tap(a, 200L)
+        assertEquals("かあ", pad.composing)
+    }
+
+    @Test
+    fun `backspace to empty then re-tap starts a fresh character`() {
+        val pad = FakeKanaPad()
+        val a = key("あ")
+        pad.tap(a, 0L)
+        assertEquals("あ", pad.composing)
+        pad.backspace()
+        assertEquals("", pad.composing)
+        pad.tap(a, 100L)
+        assertEquals("あ", pad.composing)
+        // And the fresh character toggles normally from there.
+        pad.tap(a, 200L)
+        assertEquals("い", pad.composing)
     }
 
     @Test

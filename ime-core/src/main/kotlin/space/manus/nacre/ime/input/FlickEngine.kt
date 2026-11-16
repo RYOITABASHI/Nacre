@@ -241,7 +241,10 @@ enum class DakutenType { Dakuten, Handakuten, Small }
  * the pending character with the next cycle entry instead of appending.
  *
  * Anything that settles the pending character must [disarm]: the ▶ key, a
- * direct-commit input — and the ゛゜小 key. A ゛゜小 transform is an explicit
+ * direct-commit input, the ゛゜小 key — and backspace, which settles the
+ * pending character by deleting it (if it stayed armed, the next same-row
+ * tap would continue the cycle against the character BEFORE the deleted
+ * one and replace it). A ゛゜小 transform is an explicit
  * decision about the character's final form, so the transformed character
  * (small kana, dakuten, handakuten alike) leaves the pending state;
  * otherwise the next same-row tap would silently replace it (っ→た,
