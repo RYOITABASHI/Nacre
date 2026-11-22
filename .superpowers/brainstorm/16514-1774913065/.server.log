@@ -1,7 +1,0 @@
-{"type":"server-started","port":59974,"host":"127.0.0.1","url_host":"localhost","url":"http://localhost:59974","screen_dir":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065"}
-{"type":"screen-added","file":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065/flick-height-fix.html"}
-{"type":"screen-added","file":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065/flick-no-tabs.html"}
-{"type":"screen-added","file":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065/flick-bottom-aligned.html"}
-{"type":"screen-added","file":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065/flick-bottom-final.html"}
-{"type":"screen-added","file":"/data/data/com.termux/files/home/Nacre/.superpowers/brainstorm/16514-1774913065/waiting.html"}
-{"type":"server-stopped","reason":"idle timeout"}

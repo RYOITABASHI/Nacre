@@ -21,7 +21,7 @@ debug files, then writes a short summary.
 Connect wireless debugging first, then run:
 
 ```bash
-export ADB_SERIAL=192.168.3.5:34051
+export ADB_SERIAL=192.168.x.x:xxxxx
 tools/nacre_voice_test_env.sh start voice-001
 ```
 
@@ -39,7 +39,7 @@ Speak each utterance as a separate Nacre voice-input session.
 After the utterances:
 
 ```bash
-export ADB_SERIAL=192.168.3.5:34051
+export ADB_SERIAL=192.168.x.x:xxxxx
 tools/nacre_voice_test_env.sh collect voice-001
 ```
 
@@ -55,7 +55,7 @@ Output files:
 ## Live Monitor
 
 ```bash
-export ADB_SERIAL=192.168.3.5:34051
+export ADB_SERIAL=192.168.x.x:xxxxx
 tools/nacre_voice_test_env.sh tail
 ```
 
