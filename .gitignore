@@ -38,3 +38,9 @@ META-INF/
 
 # Local git worktrees (Claude Code isolated workspaces)
 .worktrees/
+
+# Repo hygiene (local/generated files)
+.kotlin/
+.superpowers/
+*.log
+google-services.json

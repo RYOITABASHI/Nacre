@@ -21,7 +21,7 @@ Usage:
   tools/nacre_voice_test_env.sh status
 
 Environment:
-  ADB_SERIAL             adb serial, e.g. 192.168.3.5:34051
+  ADB_SERIAL             adb serial, e.g. 192.168.x.x:xxxxx
   NACRE_VOICE_OUT_DIR    output directory, default ./voice-test-runs
   NACRE_PACKAGE          package name, default space.manus.nacre
 
