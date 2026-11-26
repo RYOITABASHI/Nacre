@@ -169,9 +169,14 @@ class NacreInputMethodService :
         // Load dictionary in background at low priority, publish on Main
         serviceScope.launch(Dispatchers.IO) {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
-            val dict = NacreDictionary(this@NacreInputMethodService)
-            try {
-                dict.load()
+            // One dictionary per PROCESS, not per service instance: the system
+            // destroys and recreates the IME service inside the same process
+            // (seen on device: onDestroy → onCreate within 20 ms), and the old
+            // instance stays reachable for a while, so a per-instance load put
+            // two ~250 MB dictionaries in the 512 MB heap → OutOfMemoryError
+            // crash loop (build-482). See SharedDictionary.
+            val dict = try {
+                SharedDictionary.obtain(applicationContext)
             } catch (e: Exception) {
                 android.util.Log.e("NacreIME", "Dictionary load FAILED", e)
                 withContext(Dispatchers.Main) {
@@ -190,6 +195,9 @@ class NacreInputMethodService :
             // 560MB 5-gram into the IME process would just sit there wasting RAM.
             if (mozcEnabled) {
                 android.util.Log.i("NacreIME", "Mozc native active — skipping KenLM load (saves ~560MB)")
+            } else if (dict.kenLmScorer != null) {
+                // Shared dictionary already scored by a previous service instance.
+                android.util.Log.i("NacreIME", "KenLM already loaded in this process")
             } else try {
                 val modelsDir = java.io.File(filesDir, "models")
                 modelsDir.mkdirs()
@@ -473,5 +481,31 @@ class NacreInputMethodService :
         inputViewContainer = null
         serviceScope.cancel()
         super.onDestroy()
+    }
+}
+
+/**
+ * The process-wide dictionary. The IME service can be destroyed and
+ * recreated inside one process (the old instance lingers until the system
+ * drops its binder references), so loading per instance doubled the
+ * ~250 MB dictionary in the heap and crashed with OutOfMemoryError. The
+ * first caller loads it; later callers — including one that arrives while
+ * the load is still running — get the same instance. Built on the
+ * application context so it never pins a destroyed service. A failed load
+ * leaves nothing cached, and the next caller retries.
+ */
+internal object SharedDictionary {
+    @Volatile private var instance: NacreDictionary? = null
+    private val lock = Any()
+
+    fun obtain(appContext: android.content.Context): NacreDictionary {
+        instance?.let { return it }
+        synchronized(lock) {
+            instance?.let { return it }
+            val dict = NacreDictionary(appContext)
+            dict.load()
+            instance = dict
+            return dict
+        }
     }
 }
