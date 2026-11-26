@@ -126,7 +126,7 @@ class EnglishSupportTest {
             sakura.none { s -> s.all { it.code < 128 } })
         // あい is ambiguous with アイ, but its top ranks stay Japanese.
         val ai = dict.predict("あい", "").take(3).map { it.surface }
-        assertEquals(listOf("あい", "合い", "相"), ai)
+        assertTrue("あい top 3 must stay Japanese: $ai", ai.none { s -> s.all { it.code < 128 } })
     }
 
     @Test

@@ -2735,6 +2735,12 @@ data class ConversionCandidate(
     val reading: String,
     val cost: Int = 0,
     val segments: List<String> = emptyList(),
+    /**
+     * Mozc right POS id of the candidate's last word when the conversion
+     * lattice produced it (-1 otherwise). Becomes the left context of the
+     * next conversion once the candidate is committed.
+     */
+    val rightId: Int = -1,
 )
 
 interface DictionaryProvider {

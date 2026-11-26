@@ -224,11 +224,10 @@ class LoanwordReadingNormalizationTest {
             ookii.take(5).none { it.surface == "オーキー" },
         )
         assertEquals("大きい", dict.predict("おおきい", "").first().surface)
-        // こおり: same guard for convert(). For predict(), the
-        // baseline (pre-fix) top-1 is the as-is kana こおり itself —
-        // verified against the unmodified engine — so the guard pins
-        // predict() as UNCHANGED: same top-1, 氷 still in the top 3,
-        // and the normalized spelling's コーリ nowhere near the top.
+        // こおり: same guard for convert() and predict(). (predict()
+        // used to put the as-is kana こおり first; since the lattice
+        // engine both lists agree on 氷.) The normalized spelling's
+        // コーリ must stay nowhere near the top.
         val koori = dict.convert("こおり")
         assertEquals("氷", koori.first().surface)
         assertTrue(
@@ -236,7 +235,7 @@ class LoanwordReadingNormalizationTest {
             koori.take(5).none { it.surface == "コーリ" },
         )
         val kooriPred = dict.predict("こおり", "")
-        assertEquals("こおり", kooriPred.first().surface)
+        assertEquals("氷", kooriPred.first().surface)
         assertTrue(
             "氷 must stay in predict(こおり) top3: ${kooriPred.take(3).map { it.surface }}",
             kooriPred.take(3).any { it.surface == "氷" },

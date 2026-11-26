@@ -13,6 +13,9 @@
 | GL は右端寄り | Space 隣だと誤タップで IME 切替が頻発 | 全レイアウト Row 4 |
 | キー高さ 56dp | 52dp では touch target が小さすぎ（Material 最小 48dp） | KeyboardScreen.kt, VSplitLayout.kt |
 | CI で sed で aapt2 行削除 | gradle.properties の Termux パスが CI で存在しない | .github/workflows/build-android.yml |
+| 変換は Mozc モデル準拠の格子（単語コスト＋接続コストそのまま、前向き Viterbi＋後ろ向き A* の N-best） | 旧ビームサーチは接続コスト /2・長さボーナス・ひらがな補正などの独自補正で Mozc のコストを崩していた（210文ベンチ top-1 21.4%→70.0%） | NacreDictionary.kt (latticeConvert / rankedConversions) |
+| mozc_dict.bin は同じ表記の品詞違い（DictEntry.variants）を保持 | 旧変換が（読み, 表記）で重複除去し、接続助詞の「て」などが消えて接続コストが破綻していた。Mozc b17e284（接続行列と同じ版）から復元 | tools/dict/restore_mozc_pos_variants.py, NacreDictionary.kt |
+| 人名コスト −1500 補正は廃止 | id 1921..1923 だけに効き 齋藤>斎藤 のように Mozc のコストを歪めていた | NacreDictionary.kt |
 
 ## Module Structure
 
@@ -59,8 +62,9 @@ ime-ai/       — AI アドオン (whisper.cpp JNI, llama.cpp JNI, AIDL)
 - **静的バイグラム**: `dict/bigrams.tsv` — 頻出日本語コロケーション100+
 - **かな読み替え**: `を→うぉ/お`, `ぢ↔じ`, `づ↔ず` のバリアント自動生成
 - **辞書拡充**: `dict/slang_words.tsv` — テック用語、固有名詞、現代スラング
-- **Viterbiビーム幅**: K=20(短)/18(中)/15(長)
-- **完全一致ボーナス**: 8+文字→-7000, 7+→-6000, 5+→-5000
+- **変換格子**: 読みごとに最大40語（＋その品詞違い）、未知1文字ノード cost 12000、接頭詞で終わる経路 +3000
+- **予測**: 変換 N-best（上位12）＋補完（読みを延長する語、1語経路コスト −500 ＋余り1かなごと +200）＋履歴を同一コスト尺度で並べる
+- **ベンチ**: `tools/benchmark/sentences.tsv`（210文）と `tools/benchmark/completions.tsv`（補完30件）
 
 ## Known Constraints
 - AIDL Java stubs are hand-written (aidl compiler is x86-64 only)
