@@ -54,7 +54,10 @@ class NacreDictionary internal constructor(
     )
 
     // reading → list of entries with POS info (initial capacity smaller to avoid OOM on allocation)
-    private val dict = HashMap<String, MutableList<DictEntry>>(400000)
+    // var: a snapshot restore swaps in the freshly read map instead of
+    // copying ~0.8M readings into this one (the copy was the allocation
+    // that hit the heap limit in the build-482 OOM crashes).
+    private var dict = HashMap<String, MutableList<DictEntry>>(400000)
 
 
     // Sorted readings for prefix search
@@ -388,8 +391,7 @@ class NacreDictionary internal constructor(
                 numIds = ids
                 connectionCostFlat = flat
                 entryCount = entries
-                dict.clear()
-                dict.putAll(newDict)
+                dict = newDict
                 sortedReadings = newSorted
                 englishDict.clear()
                 englishDict.putAll(newEnglish)
@@ -1080,6 +1082,20 @@ class NacreDictionary internal constructor(
                 bumpPredictStateVersion()
             }
         }
+    }
+
+    /**
+     * Forget the typing-session context (the words just committed, their
+     * POS, the last English commit). Called when a new IME service instance
+     * takes over the process-wide dictionary, so it starts with a fresh
+     * context exactly as a newly loaded dictionary did. Learned and
+     * persisted data are untouched.
+     */
+    fun resetSessionContext() {
+        committedContext.clear()
+        lastRightGroup = 0
+        lastCommittedEnglish = ""
+        bumpPredictStateVersion()
     }
 
     fun updateContext(surface: String) {
