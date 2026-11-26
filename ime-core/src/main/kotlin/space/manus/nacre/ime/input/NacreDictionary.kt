@@ -902,9 +902,23 @@ class NacreDictionary internal constructor(
             .toSet()
         if (surfaces.isEmpty()) return
         val idx = sorted.indexOfFirst { it.surface in surfaces }
-        if (idx > LOANWORD_PROMOTE_INDEX) {
+        // When the top candidate is itself a katakana word, the reading is
+        // a loanword and the English spelling is its closest alternative:
+        // slot it right after the katakana (rank 2). The long tail of
+        // emoji that loanword readings attract (⌨️ 💻 💽 … for
+        // こんぴゅーたー) used to sit in front of it, and at rank 5 the
+        // English candidate was past the visible width of the candidate
+        // bar — on device it simply looked absent (build-480, A-2).
+        // Otherwise (a native word that happens to have a loanword entry)
+        // keep the conservative slot so Japanese candidates stay first.
+        val target = if (sorted.firstOrNull()?.surface?.let(::isKatakanaWord) == true) {
+            LOANWORD_PROMOTE_INDEX_KATAKANA_TOP
+        } else {
+            LOANWORD_PROMOTE_INDEX
+        }
+        if (idx > target) {
             val c = sorted.removeAt(idx)
-            sorted.add(LOANWORD_PROMOTE_INDEX, c)
+            sorted.add(target, c)
         }
     }
 
@@ -2744,6 +2758,16 @@ class NacreDictionary internal constructor(
 
         /** 0-based slot the best exact-match loanword candidate is promoted to. */
         private const val LOANWORD_PROMOTE_INDEX = 4
+
+        /**
+         * Slot used instead of [LOANWORD_PROMOTE_INDEX] when the top
+         * candidate is a katakana word (see [promoteLoanwordCandidate]).
+         */
+        private const val LOANWORD_PROMOTE_INDEX_KATAKANA_TOP = 1
+
+        /** Katakana word: katakana letters plus ー/・, at least 2 chars. */
+        private fun isKatakanaWord(s: String): Boolean =
+            s.length >= 2 && s.all { it in 'ァ'..'ヺ' || it == 'ー' || it == '・' }
 
         /**
          * Cost penalty for main-dictionary candidates merged via the
