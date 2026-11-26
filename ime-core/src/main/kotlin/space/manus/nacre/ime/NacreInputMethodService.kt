@@ -176,7 +176,7 @@ class NacreInputMethodService :
             // two ~250 MB dictionaries in the 512 MB heap → OutOfMemoryError
             // crash loop (build-482). See SharedDictionary.
             val dict = try {
-                SharedDictionary.obtain(applicationContext)
+                SharedDictionary.obtain(applicationContext).also { it.resetSessionContext() }
             } catch (e: Exception) {
                 android.util.Log.e("NacreIME", "Dictionary load FAILED", e)
                 withContext(Dispatchers.Main) {
@@ -195,10 +195,12 @@ class NacreInputMethodService :
             // 560MB 5-gram into the IME process would just sit there wasting RAM.
             if (mozcEnabled) {
                 android.util.Log.i("NacreIME", "Mozc native active — skipping KenLM load (saves ~560MB)")
-            } else if (dict.kenLmScorer != null) {
-                // Shared dictionary already scored by a previous service instance.
+            } else synchronized(SharedDictionary.kenLmLock) {
+              // Single flight: two service instances must never both load
+              // KenLM into the shared dictionary (Codex gate).
+              if (dict.kenLmScorer != null) {
                 android.util.Log.i("NacreIME", "KenLM already loaded in this process")
-            } else try {
+              } else try {
                 val modelsDir = java.io.File(filesDir, "models")
                 modelsDir.mkdirs()
                 val fullModel = java.io.File(modelsDir, "japanese-5gram.klm")
@@ -246,6 +248,7 @@ class NacreInputMethodService :
                 }
             } catch (e: Exception) {
                 android.util.Log.w("NacreIME", "KenLM load failed", e)
+            }
             }
         }
     }
@@ -497,6 +500,9 @@ class NacreInputMethodService :
 internal object SharedDictionary {
     @Volatile private var instance: NacreDictionary? = null
     private val lock = Any()
+
+    /** Guards the one-time KenLM load into the shared dictionary. */
+    val kenLmLock = Any()
 
     fun obtain(appContext: android.content.Context): NacreDictionary {
         instance?.let { return it }

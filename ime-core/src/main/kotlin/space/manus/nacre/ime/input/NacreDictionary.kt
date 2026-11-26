@@ -1084,6 +1084,20 @@ class NacreDictionary internal constructor(
         }
     }
 
+    /**
+     * Forget the typing-session context (the words just committed, their
+     * POS, the last English commit). Called when a new IME service instance
+     * takes over the process-wide dictionary, so it starts with a fresh
+     * context exactly as a newly loaded dictionary did. Learned and
+     * persisted data are untouched.
+     */
+    fun resetSessionContext() {
+        committedContext.clear()
+        lastRightGroup = 0
+        lastCommittedEnglish = ""
+        bumpPredictStateVersion()
+    }
+
     fun updateContext(surface: String) {
         committedContext.addFirst(surface)
         while (committedContext.size > 4) committedContext.removeLast()
