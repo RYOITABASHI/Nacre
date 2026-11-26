@@ -916,6 +916,9 @@ private fun VoiceInputSection() {
                 onCheckedChange = {
                     enabled = it
                     space.manus.nacre.ai.VoiceInputSettings.setEnabled(context, it)
+                    // Back ON: provision the voice models now (no-op for
+                    // models already present), not on the next app start.
+                    if (it) space.manus.nacre.ai.ModelDownloader(context).ensureDefaultModelsDownloaded()
                 },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = NacreAccent,

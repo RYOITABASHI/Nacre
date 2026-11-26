@@ -493,27 +493,33 @@ class ModelDownloader(private val context: Context) {
         downloadLlm: Boolean = true,
         downloadZenz: Boolean = true,
     ) {
-        synchronized(ModelDownloader::class.java) {
-            if (autoProvisionStarted) return
-            autoProvisionStarted = true
-        }
-
         // Voice input switched off (issue #24): no speech-recognition, VAD or
         // refinement-LLM downloads — those are voice-only, and the switch
-        // exists for devices without room for them.
+        // exists for devices without room for them. The voice set has its
+        // own once-per-process flag, so switching voice back ON and calling
+        // this again (the settings switch does) still provisions it.
         val voiceEnabled = VoiceInputSettings.isEnabled(context)
+        val runBase: Boolean
+        val runVoice: Boolean
+        synchronized(ModelDownloader::class.java) {
+            runBase = !autoProvisionStarted
+            autoProvisionStarted = true
+            runVoice = voiceEnabled && !voiceProvisionStarted
+            if (runVoice) voiceProvisionStarted = true
+        }
+        if (!runBase && !runVoice) return
 
         scope.launch {
-            deleteObsoleteLlmModels()
-            if (voiceEnabled) provisionVoiceModels()
-            if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
+            if (runBase) deleteObsoleteLlmModels()
+            if (runVoice) provisionVoiceModels()
+            if (runBase && downloadCompactKenLm && getCompactKenLmModelPath() == null) {
                 downloadModelInternal(
                     url = COMPACT_KENLM_URL,
                     modelName = "KenLM 日本語3-gram (compact)",
                     fileName = COMPACT_KENLM_FILENAME,
                 )
             }
-            if (voiceEnabled && downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
+            if (runVoice && downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
                 downloadModelInternal(
                     url = QWEN_LLM_URL,
                     modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
@@ -523,7 +529,7 @@ class ModelDownloader(private val context: Context) {
             // zenz neural conversion (~74MB) — small next to the models above,
             // and it is the primary conversion-quality lever, so provision it
             // with the default set.
-            if (downloadZenz && findModelFile(ZENZ_FILENAME) == null) {
+            if (runBase && downloadZenz && findModelFile(ZENZ_FILENAME) == null) {
                 downloadModelInternal(
                     url = ZENZ_URL,
                     modelName = "zenz-v3.2-small (Q5_K_M)",
@@ -904,5 +910,6 @@ class ModelDownloader(private val context: Context) {
         const val ZENZ_FILENAME = "zenz-v3.2-small-q5_k_m.gguf"
         const val ZENZ_URL = "https://huggingface.co/Miwa-Keita/zenz-v3.2-small-gguf/resolve/main/ggml-model-Q5_K_M.gguf"
         @Volatile private var autoProvisionStarted = false
+        @Volatile private var voiceProvisionStarted = false
     }
 }
