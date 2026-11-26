@@ -498,38 +498,14 @@ class ModelDownloader(private val context: Context) {
             autoProvisionStarted = true
         }
 
+        // Voice input switched off (issue #24): no speech-recognition, VAD or
+        // refinement-LLM downloads — those are voice-only, and the switch
+        // exists for devices without room for them.
+        val voiceEnabled = VoiceInputSettings.isEnabled(context)
+
         scope.launch {
             deleteObsoleteLlmModels()
-            // Provision the Silero VAD into INTERNAL storage so ASR no longer
-            // depends on /sdcard + MANAGE_EXTERNAL_STORAGE (which is lost on
-            // reinstall — without the VAD, loadModel is skipped and ASR silently
-            // falls back to the system SpeechRecognizer).
-            // Target is the v6 model. If its download fails, fall back to the
-            // legacy file so a fresh install is never left without a VAD;
-            // devices that already hold the legacy file keep using it (via
-            // getVadModelPath) until the v6 download lands.
-            if (findVadV6Path() == null) {
-                // Drop a wrong-size leftover at the download target first:
-                // downloadModelInternal treats any existing non-empty target
-                // as complete, so without this a truncated v6 file would
-                // block its own repair forever.
-                val stale = File(getModelsDir(), VAD_V6_FILENAME)
-                if (stale.exists() && stale.length() != VAD_V6_BYTES) {
-                    Log.w(TAG, "Removing wrong-size VAD v6 leftover (${stale.length()} bytes)")
-                    stale.delete()
-                }
-                downloadModelInternal(url = VAD_V6_URL, modelName = "Silero VAD v6", fileName = VAD_V6_FILENAME)
-                // Decide by the validated lookup, not the download result:
-                // downloadModelInternal can report success for a truncated
-                // body (it never checks the received length), so re-check
-                // whether any usable VAD exists before giving up.
-                if (getVadModelPath() == null) {
-                    downloadModelInternal(url = VAD_URL, modelName = "Silero VAD", fileName = VAD_FILENAME)
-                }
-            }
-            // ASR is the highest-leverage model — provision the ja-specialized
-            // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
-            downloadReazonSpeechIfMissing()
+            if (voiceEnabled) provisionVoiceModels()
             if (downloadCompactKenLm && getCompactKenLmModelPath() == null) {
                 downloadModelInternal(
                     url = COMPACT_KENLM_URL,
@@ -537,7 +513,7 @@ class ModelDownloader(private val context: Context) {
                     fileName = COMPACT_KENLM_FILENAME,
                 )
             }
-            if (downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
+            if (voiceEnabled && downloadLlm && findModelFile(QWEN_LLM_FILENAME) == null) {
                 downloadModelInternal(
                     url = QWEN_LLM_URL,
                     modelName = "Qwen 2.5 1.5B Instruct (Q4_K_M)",
@@ -555,6 +531,40 @@ class ModelDownloader(private val context: Context) {
                 )
             }
         }
+    }
+
+    /** Speech-recognition side of the default set: the VAD and the ASR model. */
+    private suspend fun provisionVoiceModels() {
+        // Provision the Silero VAD into INTERNAL storage so ASR no longer
+        // depends on /sdcard + MANAGE_EXTERNAL_STORAGE (which is lost on
+        // reinstall — without the VAD, loadModel is skipped and ASR silently
+        // falls back to the system SpeechRecognizer).
+        // Target is the v6 model. If its download fails, fall back to the
+        // legacy file so a fresh install is never left without a VAD;
+        // devices that already hold the legacy file keep using it (via
+        // getVadModelPath) until the v6 download lands.
+        if (findVadV6Path() == null) {
+            // Drop a wrong-size leftover at the download target first:
+            // downloadModelInternal treats any existing non-empty target
+            // as complete, so without this a truncated v6 file would
+            // block its own repair forever.
+            val stale = File(getModelsDir(), VAD_V6_FILENAME)
+            if (stale.exists() && stale.length() != VAD_V6_BYTES) {
+                Log.w(TAG, "Removing wrong-size VAD v6 leftover (${stale.length()} bytes)")
+                stale.delete()
+            }
+            downloadModelInternal(url = VAD_V6_URL, modelName = "Silero VAD v6", fileName = VAD_V6_FILENAME)
+            // Decide by the validated lookup, not the download result:
+            // downloadModelInternal can report success for a truncated
+            // body (it never checks the received length), so re-check
+            // whether any usable VAD exists before giving up.
+            if (getVadModelPath() == null) {
+                downloadModelInternal(url = VAD_URL, modelName = "Silero VAD", fileName = VAD_FILENAME)
+            }
+        }
+        // ASR is the highest-leverage model — provision the ja-specialized
+        // ReazonSpeech transducer first (replaces SenseVoice for Japanese).
+        downloadReazonSpeechIfMissing()
     }
 
     /**
