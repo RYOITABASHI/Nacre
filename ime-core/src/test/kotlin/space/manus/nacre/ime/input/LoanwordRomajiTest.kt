@@ -109,6 +109,31 @@ class LoanwordRomajiTest {
         }
     }
 
+    /**
+     * build-480 on-device report (A-2): "konpyuutaa" showed コンピューター but
+     * no "computer". The English candidate WAS in the list, but at rank 5
+     * behind the emoji tail (⌨️ 💻 💽), i.e. past the visible width of the
+     * candidate bar. When the top candidate is the katakana loanword, the
+     * English spelling must sit directly after it (rank 2), in both the
+     * live prediction list and the explicit conversion list, while the
+     * katakana word keeps rank 1.
+     */
+    @Test
+    fun romajiLoanwordEnglishSitsRightAfterKatakana() {
+        for ((romaji, english) in romajiLoanwords) {
+            val kana = engine.romajiToHiragana(romaji, finalize = true)
+            for ((label, list) in listOf(
+                "predict" to dict.predict(kana, romaji).map { it.surface },
+                "convert" to dict.convert(kana).map { it.surface },
+            )) {
+                assertTrue("$label($kana) rank 1 must stay Japanese: ${list.take(5)}",
+                    list.isNotEmpty() && list[0].any { it.code >= 128 })
+                assertTrue("$label($kana) rank 2 must be $english: ${list.take(5)}",
+                    list.size > 1 && list[1] in english)
+            }
+        }
+    }
+
     @Test
     fun doubledVowelJapaneseWordGainsNoEnglishCandidate() {
         // おおきい is ordinary Japanese with a doubled vowel; the

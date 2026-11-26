@@ -242,6 +242,12 @@ fun NacreSettingsScreen() {
 
         Spacer(modifier = Modifier.height(24.dp))
 
+        // --- Voice input on/off (issue #24) ---
+        SectionHeader("音声入力")
+        VoiceInputSection()
+
+        Spacer(modifier = Modifier.height(24.dp))
+
         // --- AI Models ---
         SectionHeader("AI Models")
         StoragePermissionCard()
@@ -869,6 +875,50 @@ private fun MozcNativeSection() {
                 onCheckedChange = {
                     enabled = it
                     prefs.edit().putBoolean("enabled", it).apply()
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = NacreAccent,
+                    checkedTrackColor = NacreAccent.copy(alpha = 0.3f),
+                ),
+            )
+        }
+    }
+}
+
+@Composable
+private fun VoiceInputSection() {
+    val context = LocalContext.current
+    var enabled by remember {
+        mutableStateOf(space.manus.nacre.ai.VoiceInputSettings.isEnabled(context))
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = NacreSurface),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("音声入力を使う", color = NacreText, fontSize = 14.sp)
+                Text(
+                    "OFFにするとマイクボタンを隠し、音声用モデル（音声認識・整文LLM）を自動ダウンロードしません。" +
+                        "変換用のモデルはそのままです。ダウンロード済みのモデルは消えません",
+                    color = NacreTextDim,
+                    fontSize = 12.sp,
+                )
+            }
+            Switch(
+                checked = enabled,
+                onCheckedChange = {
+                    enabled = it
+                    space.manus.nacre.ai.VoiceInputSettings.setEnabled(context, it)
+                    // Back ON: provision the voice models now (no-op for
+                    // models already present), not on the next app start.
+                    if (it) space.manus.nacre.ai.ModelDownloader(context).ensureDefaultModelsDownloaded()
                 },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = NacreAccent,

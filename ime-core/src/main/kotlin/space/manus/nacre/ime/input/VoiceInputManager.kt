@@ -832,8 +832,25 @@ class VoiceInputManager(private val service: NacreInputMethodService) {
     /**
      * Start continuous voice input. Keeps listening until explicitly stopped.
      */
+    /**
+     * Mirror of the "音声入力を使う" setting (issue #24) for the UI; refreshed
+     * each time the keyboard is shown, see [refreshVoiceEnabled].
+     */
+    var voiceEnabled by mutableStateOf(true)
+        private set
+
+    fun refreshVoiceEnabled() {
+        voiceEnabled = space.manus.nacre.ai.VoiceInputSettings.isEnabled(service)
+    }
+
     fun startListening(language: String = "ja-JP") {
         if (isListening) return
+        // Every entry point (mic, voice key, palette, trackball) lands here.
+        if (!space.manus.nacre.ai.VoiceInputSettings.isEnabled(service)) {
+            voiceEnabled = false
+            lastError = "音声入力はオフです（設定で変更できます）"
+            return
+        }
         if (service.inputEngine.isPasswordField) {
             Log.w(TAG, "Voice input disabled in password field")
             return

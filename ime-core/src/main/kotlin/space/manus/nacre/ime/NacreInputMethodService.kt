@@ -338,6 +338,7 @@ class NacreInputMethodService :
         if (voiceInputManager.isListening && !restarting) {
             voiceInputManager.cancel()
         }
+        voiceInputManager.refreshVoiceEnabled()
         // Reload theme & config each time keyboard appears (picks up settings changes)
         currentTheme = space.manus.nacre.config.ThemeProvider.loadSelectedTheme(this)
         // The input view is cached, so force KeyboardScreen to re-pick its layout — this

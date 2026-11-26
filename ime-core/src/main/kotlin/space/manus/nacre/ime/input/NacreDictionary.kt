@@ -56,6 +56,7 @@ class NacreDictionary internal constructor(
     // reading → list of entries with POS info (initial capacity smaller to avoid OOM on allocation)
     private val dict = HashMap<String, MutableList<DictEntry>>(400000)
 
+
     // Sorted readings for prefix search
     private var sortedReadings: Array<String> = emptyArray()
 
@@ -193,6 +194,17 @@ class NacreDictionary internal constructor(
         val cost: Int,
         val leftGroup: Int = 1,   // POS group for left context (default: noun)
         val rightGroup: Int = 1,  // POS group for right context
+        /**
+         * Other part-of-speech readings of the same (reading, surface) —
+         * e.g. て as 接続助詞 besides 助動詞 — each with its own Mozc ids
+         * and cost. Only the conversion lattice reads them (its connection
+         * costs are meaningless without the right POS for each context);
+         * every other consumer keeps seeing one entry per surface. Held on
+         * the entry itself rather than in a side map: the ~0.94M variants
+         * then cost no extra keys or lists (the reference fits in the
+         * object's alignment padding).
+         */
+        val variants: Array<DictEntry>? = null,
     )
 
     data class UserDictEntry(
@@ -251,21 +263,9 @@ class NacreDictionary internal constructor(
         loadSupplementaryDict("dict/symbols.tsv", "symbols")
         loadSupplementaryDict("dict/mobile_tech.tsv", "mobile tech")
 
-        // Boost person name entries: Mozc defaults are too high (median ~6500)
-        // Reduce by 1500 to make names more competitive with common nouns
-        var namesBoosted = 0
-        for (entries in dict.values) {
-            for (i in entries.indices) {
-                val e = entries[i]
-                if (e.leftGroup in 1921..1923 && e.cost > 3500) {
-                    entries[i] = e.copy(cost = e.cost - 1500)
-                    namesBoosted++
-                }
-            }
-        }
-        if (namesBoosted > 0) {
-            Log.i("NacreDictionary", "Boosted $namesBoosted person name entries (cost -1500)")
-        }
+        // (No person-name cost boost: the old -1500 on POS ids 1921..1923
+        // predates the lattice engine and skewed Mozc's own name costs —
+        // 齋藤 above 斎藤. Benchmark: names top-1 72.7% → 77.3% without it.)
 
         // Sort all entries and build index ONCE after all dicts loaded (avoids OOM from repeated sorts)
         for (entries in dict.values) {
@@ -338,7 +338,7 @@ class NacreDictionary internal constructor(
                     out.writeInt(v)
                 }
                 // Trailer: total dict entry count, validated on restore.
-                out.writeInt(dict.values.sumOf { it.size })
+                out.writeInt(dict.values.sumOf { l -> l.sumOf { 1 + (it.variants?.size ?: 0) } })
             }
             val target = File(dir, SNAPSHOT_FILE_NAME)
             if (!tmp.renameTo(target)) {
@@ -382,7 +382,7 @@ class NacreDictionary internal constructor(
                 if (bigramCount < 0 || bigramCount > 1_000_000) return false
                 val newBigrams = HashMap<String, Int>(2000)
                 repeat(bigramCount) { newBigrams[readSnapshotString(inp)] = inp.readInt() }
-                if (inp.readInt() != newDict.values.sumOf { it.size }) return false
+                if (inp.readInt() != newDict.values.sumOf { l -> l.sumOf { 1 + (it.variants?.size ?: 0) } }) return false
 
                 // All validation passed — publish into the live fields.
                 numIds = ids
@@ -422,6 +422,13 @@ class NacreDictionary internal constructor(
                 out.writeInt(e.cost)
                 out.writeInt(e.leftGroup)
                 out.writeInt(e.rightGroup)
+                val variants = e.variants
+                out.writeInt(variants?.size ?: 0)
+                if (variants != null) for (v in variants) {
+                    out.writeInt(v.cost)
+                    out.writeInt(v.leftGroup)
+                    out.writeInt(v.rightGroup)
+                }
             }
         }
     }
@@ -436,14 +443,16 @@ class NacreDictionary internal constructor(
             if (n < 0 || n > 100_000) throw IOException("bad entry count $n")
             val list = ArrayList<DictEntry>(n)
             repeat(n) {
-                list.add(
-                    DictEntry(
-                        readSnapshotString(inp),
-                        inp.readInt(),
-                        inp.readInt(),
-                        inp.readInt(),
-                    ),
-                )
+                val surface = readSnapshotString(inp)
+                val cost = inp.readInt()
+                val left = inp.readInt()
+                val right = inp.readInt()
+                val vn = inp.readInt()
+                if (vn < 0 || vn > 10_000) throw IOException("bad variant count $vn")
+                val variants = if (vn == 0) null else Array(vn) {
+                    DictEntry(surface, inp.readInt(), inp.readInt(), inp.readInt())
+                }
+                list.add(DictEntry(surface, cost, left, right, variants))
             }
             map[reading] = list
         }
@@ -549,8 +558,23 @@ class NacreDictionary internal constructor(
                             val leftGroup = parts[2].toIntOrNull() ?: 1
                             val rightGroup = parts[3].toIntOrNull() ?: 1
                             val cost = parts[4].toIntOrNull() ?: 10000
-                            dict.getOrPut(reading) { mutableListOf() }
-                                .add(DictEntry(surface, cost, leftGroup, rightGroup))
+                            val entries = dict.getOrPut(reading) { mutableListOf() }
+                            val same = entries.firstOrNull { it.surface == surface }
+                            if (same == null) {
+                                entries.add(DictEntry(surface, cost, leftGroup, rightGroup))
+                            } else {
+                                // POS variant of a surface already listed (see
+                                // DictEntry.variants). The cheapest reading stays the
+                                // primary entry — what per-surface consumers always saw.
+                                // The surface string instance is shared (heap).
+                                val variant = DictEntry(same.surface, cost, leftGroup, rightGroup)
+                                val others = same.variants ?: emptyArray()
+                                entries[entries.indexOf(same)] = if (cost < same.cost) {
+                                    variant.copy(variants = others + same.copy(variants = null))
+                                } else {
+                                    same.copy(variants = others + variant)
+                                }
+                            }
                             count++
                         } else if (parts.size >= 3) {
                             val reading = parts[0]
@@ -676,209 +700,134 @@ class NacreDictionary internal constructor(
         // (explicit 変換), and Mozc's per-char JNI batch would risk an ANR. Mozc drives the
         // live candidate bar via predict() (background thread) instead. (Agent review B1.)
 
-        val results = mutableListOf<ConversionCandidate>()
-        val seen = mutableSetOf<String>()
+        val sorted = rankedConversions(kana).toMutableList()
+        val seen = sorted.mapTo(HashSet()) { it.surface }
+        fun append(c: ConversionCandidate) { if (seen.add(c.surface)) sorted.add(c) }
 
-        fun addUnique(candidates: List<ConversionCandidate>) {
-            for (c in candidates) {
-                if (seen.add(c.surface)) results.add(c)
-            }
-        }
-
-        // 1. Exact match FIRST (single-word candidates — these should rank highest)
-        val typedExact = exactMatch(kana)
-        addUnique(typedExact)
-
-        // 2. Viterbi multi-word conversion (best segmentation)
-        addUnique(viterbiConvert(kana))
-
-        // 2.5 Kana variant conversion (を→お/うぉ, ぢ→じ, づ→ず etc.)
-        // Google日本語入力方式: ローマ字テーブルは標準のまま、変換段階で読み替え候補を生成
-        val kanaVariants = generateKanaVariants(kana)
-        for (variant in kanaVariants) {
-            val variantExact = exactMatch(variant)
-            for (c in variantExact) {
-                if (seen.add(c.surface)) results.add(c.copy(cost = c.cost + 300))
-            }
-            val variantViterbi = viterbiConvert(variant).take(5)
-            for (c in variantViterbi) {
-                if (seen.add(c.surface)) results.add(c.copy(cost = c.cost + 500))
-            }
-        }
-
-        // 2.6 Long-vowel normalized lookup: for a romaji-typed loanword
-        // (こんぴゅうたあ), merge the main-dictionary entries of the ー
-        // spelling (こんぴゅーたー → コンピューター), floored below the
-        // typed reading's own best exact candidate. See
-        // longVowelNormalizedMatch. The surfaces actually added are
-        // tracked so the final pass can re-enforce the floor on
-        // context-adjusted costs (see enforceNormalizedFloor).
-        val mergedSurfaces = HashSet<String>()
-        for (c in longVowelNormalizedMatch(kana, typedExact.minOfOrNull { it.cost })) {
-            if (seen.add(c.surface)) {
-                results.add(c)
-                mergedSurfaces.add(c.surface)
-            }
-        }
-
-        // 3. Partial segmentation for diversity (with POS connection cost)
-        if (results.size < 12 && kana.length >= 3) {
-            for (splitAt in (kana.length - 1) downTo 2) {
-                val head = kana.substring(0, splitAt)
-                val tail = kana.substring(splitAt)
-                val headEntries = dict[head]?.take(3) ?: continue
-                val tailEntries = dict[tail]?.take(3)
-                if (tailEntries != null) {
-                    for (h in headEntries) {
-                        for (t in tailEntries) {
-                            val combined = h.surface + t.surface
-                            if (seen.add(combined)) {
-                                results.add(ConversionCandidate(
-                                    surface = combined, reading = kana,
-                                    cost = h.cost + t.cost + getConnectionCost(h.rightGroup, t.leftGroup),
-                                ))
-                            }
-                        }
-                        // Hiragana tail
-                        if (tail.length <= 4 && h.surface != head) {
-                            val combo = h.surface + tail
-                            if (seen.add(combo)) {
-                                results.add(ConversionCandidate(surface = combo, reading = kana, cost = h.cost + 3500))
-                            }
-                        }
-                    }
-                }
-                if (results.size >= 15) break
-            }
-        }
-
-        // 4. 3-way segmentation for medium inputs — skip for long text (Viterbi handles it)
-        if (results.size < 15 && kana.length in 6..14) {
-            outer@ for (s1 in 2..(kana.length - 4)) {
-                val seg1 = kana.substring(0, s1)
-                val entries1 = dict[seg1]?.take(3) ?: continue
-                for (s2 in (s1 + 2)..(kana.length - 2)) {
-                    val seg2 = kana.substring(s1, s2)
-                    val seg3 = kana.substring(s2)
-                    val entries2 = dict[seg2]?.take(3) ?: continue
-                    val entries3 = dict[seg3]?.take(3) ?: continue
-                    for (e1 in entries1) {
-                        for (e2 in entries2) {
-                            for (e3 in entries3) {
-                                val combined = e1.surface + e2.surface + e3.surface
-                                if (seen.add(combined)) {
-                                    val cost = e1.cost + e2.cost + e3.cost +
-                                        getConnectionCost(e1.rightGroup, e2.leftGroup) +
-                                        getConnectionCost(e2.rightGroup, e3.leftGroup)
-                                    results.add(ConversionCandidate(surface = combined, reading = kana, cost = cost))
-                                }
-                                if (results.size >= 25) break@outer
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 4.5 English loanword candidates (exact reading match, e.g.
-        // こんぴゅーたー → "computer"). Mirrors predict() step 6 so the
-        // explicit conversion list offers the English spelling too.
-        addUnique(englishMatch(kana, limit = 5))
-
-        // 5. Katakana / Hiragana / Half-width katakana as-is
+        // Exact single-word entries the N-best did not reach (rare readings).
+        for (c in exactMatch(kana)) append(c)
+        // English loanword candidates (こんぴゅーたー → "computer").
+        for (c in englishMatch(kana, limit = 5)) append(c)
+        // Katakana / half-width katakana / hiragana as-is.
         val katakana = hiraganaToKatakana(kana)
-        if (katakana != kana && seen.add(katakana)) {
-            val katakanaCost = estimateKatakanaCost(kana, results)
-            results.add(ConversionCandidate(surface = katakana, reading = kana, cost = katakanaCost))
-        }
-        // Half-width katakana (e.g. for older systems, game text, stylistic use)
+        if (katakana != kana) append(ConversionCandidate(surface = katakana, reading = kana))
         if (kana.length >= 2) {
-            val halfKatakana = toHalfWidthKatakana(kana)
-            if (halfKatakana != kana && halfKatakana != katakana && seen.add(halfKatakana)) {
-                val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-                results.add(ConversionCandidate(surface = halfKatakana, reading = kana, cost = maxCost + 800))
-            }
+            val half = toHalfWidthKatakana(kana)
+            if (half != kana && half != katakana) append(ConversionCandidate(surface = half, reading = kana))
         }
-        if (seen.add(kana)) {
-            val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-            results.add(ConversionCandidate(surface = kana, reading = kana, cost = maxCost + 200))
-        }
+        append(ConversionCandidate(surface = kana, reading = kana))
 
-        // Sort: apply user boost + POS context + KenLM rescoring.
-        // When the normalized merge added candidates, context-only
-        // costs (POS adjustment, no learning boost) are tracked by
-        // surface so the merge floor can be re-enforced after the
-        // pass-through penalty below — see enforceNormalizedFloor.
-        val typedBestSurface = typedExact.minByOrNull { it.cost }?.surface
-        val trackFloor = mergedSurfaces.isNotEmpty() && typedBestSurface != null
-        val floorContext = HashMap<String, Int>()
-        val boosted = results.map { c ->
-            if (trackFloor) {
-                // Deterministic cost of this candidate: applyBoost()'s
-                // minimum-cost clamp (maxOf(100, ...)) applied to the
-                // stage cost, plus the purely additive POS delta.
-                // applyBoost()'s boosts (selection learning, static
-                // bigrams, recency, ...) are all excluded here — each
-                // candidate's own boost delta is preserved because any
-                // floor raise is added to its final cost (see
-                // enforceNormalizedFloor).
-                val contextOnly = posContextCost(c.reading, c.surface, c.cost)
-                floorContext[c.surface] = maxOf(100, c.cost) + (contextOnly - c.cost)
-            }
-            var cost = applyBoost(c.reading, c.surface, c.cost)
-            cost = posContextCost(c.reading, c.surface, cost)
-            c.copy(cost = cost)
-        }.toMutableList()
-
-        kenLmRescore(boosted)
-
-        // Post-rescore filter: remove candidates with catastrophically bad LM scores
-        if (kenLmScorer?.isReady() == true && boosted.size > 3) {
-            val bestCost = boosted.minOf { it.cost }
-            boosted.removeAll { it.cost > bestCost + 10000 && it.cost > bestCost * 3 }
-        }
-
-        // Pass-through penalty: demote the unconverted hiragana form and its
-        // katakana transliteration when a genuinely converted candidate exists.
-        // They stay in the list (sometimes kana IS the intent), just not on top
-        // by default. Applies to every source merged above — exactMatch ties at
-        // the boost floor and all-kana Viterbi paths both produced these at
-        // rank 1 in the baseline benchmark.
-        // Snapshot for the floor re-enforcement after the penalty.
-        val prePassThroughCosts: Map<String, Int> =
-            if (trackFloor) boosted.associate { it.surface to it.cost } else emptyMap()
-
-        val katakanaForm = hiraganaToKatakana(kana)
-        if (boosted.any { it.surface != kana && it.surface != katakanaForm }) {
-            for (i in boosted.indices) {
-                val c = boosted[i]
-                if (c.surface == kana || c.surface == katakanaForm) {
-                    boosted[i] = c.copy(cost = c.cost + PASS_THROUGH_PENALTY)
-                }
-            }
-        }
-
-        // Re-enforce the normalized-merge floor now that every
-        // deterministic adjustment has landed: the pass-through
-        // penalty above can raise the typed reading's own best
-        // candidate （ああ → +1500) while a merged candidate （あー)
-        // escapes it, which would otherwise leave the merged
-        // candidate ranked above it.
-        if (trackFloor) {
-            val passThroughDeltas = HashMap<String, Int>()
-            for (c in boosted) {
-                val before = prePassThroughCosts[c.surface] ?: continue
-                if (c.cost != before) passThroughDeltas[c.surface] = c.cost - before
-            }
-            enforceNormalizedFloor(
-                boosted, floorContext, passThroughDeltas,
-                mergedSurfaces, typedBestSurface,
-            )
-        }
-
-        val sorted = boosted.sortedBy { it.cost }.toMutableList()
+        rankLearnedFirst(sorted, kana)
         promoteLoanwordCandidate(sorted, kana)
         return sorted.take(if (kana.length <= 3) 40 else 30)
+    }
+
+    /**
+     * Completion candidates for [kana]: dictionary words whose reading
+     * extends it, priced as one-word lattice paths plus a per-extra-kana
+     * penalty, so they compete with the conversions of the typed reading
+     * on the same scale (ありが → ありがとう above 有賀). The scan is bounded
+     * for one- and two-kana prefixes, whose reading ranges are huge.
+     */
+    private fun completions(kana: String): List<ConversionCandidate> {
+        if (kana.length < COMPLETION_MIN_KANA) return emptyList()
+        var idx = sortedReadings.binarySearch(kana).let { if (it >= 0) it + 1 else -(it + 1) }
+        val best = java.util.PriorityQueue<ConversionCandidate>(compareByDescending { it.cost })
+        var scanned = 0
+        while (idx < sortedReadings.size && scanned < COMPLETION_MAX_READINGS) {
+            val reading = sortedReadings[idx++]
+            if (!reading.startsWith(kana)) break
+            scanned++
+            val extra = reading.length - kana.length
+            if (extra > COMPLETION_MAX_EXTRA_KANA) continue
+            val entries = dict[reading] ?: continue
+            for (e in entries.take(2)) {
+                if (isLatticeSymbolSurface(e.surface)) continue
+                val path = rawConnectionCost(lastRightGroup, e.leftGroup) + e.cost + rawConnectionCost(e.rightGroup, 0) + eosPenalty(e.rightGroup)
+                val cost = applyBoost(reading, e.surface, path) + COMPLETION_BASE_PENALTY + extra * COMPLETION_PER_KANA_PENALTY
+                best.add(ConversionCandidate(surface = e.surface, reading = reading, cost = cost))
+                if (best.size > COMPLETION_LIMIT) best.poll()
+            }
+        }
+        return best.sortedBy { it.cost }
+    }
+
+    /**
+     * Selection learning as a stable re-rank (the same rule the Mozc-native
+     * path uses): surfaces the user picked for this reading move up by their
+     * learning boost, most-boosted first; everything unlearned keeps its
+     * order. The cost pool already carries the boost, but the candidates
+     * appended after it (English, katakana, the reading as-is) do not, and
+     * a learned pick must win there too.
+     */
+    private fun rankLearnedFirst(list: MutableList<ConversionCandidate>, kana: String) {
+        if (list.size < 2) return
+        val boosts = list.map { learningBoostFor(kana, it.surface) }
+        if (boosts.all { it == 0 }) return
+        val order = list.indices.sortedByDescending { boosts[it] }
+        val reordered = order.map { list[it] }
+        list.clear(); list.addAll(reordered)
+    }
+
+    /**
+     * The conversion ranking shared by [convert] and [predict]: N-best
+     * lattice paths for the reading (Mozc word + connection costs), the
+     * same for the long-vowel-normalized reading (romaji-typed loanwords,
+     * こんぴゅうたあ → コンピューター) and for kana variants (を→お …),
+     * each re-scored with the whole-reading learning boost and KenLM, in
+     * ascending cost order. Candidates keep the TYPED reading so learning
+     * and history stay keyed by what the user entered.
+     */
+    private fun rankedConversions(kana: String): List<ConversionCandidate> {
+        val pool = LinkedHashMap<String, ConversionCandidate>()
+        fun offer(c: ConversionCandidate) {
+            val prev = pool[c.surface]
+            if (prev == null || c.cost < prev.cost) pool[c.surface] = c
+        }
+        for (c in latticeConvert(kana)) offer(c)
+        // Every whole-reading dictionary word, also those the N-best did
+        // not reach, priced as a one-word path so it is comparable (and
+        // learnable) on the same scale.
+        var typedWordBest = Int.MAX_VALUE
+        dict[kana].orEmpty().flatMap { listOf(it) + it.variants.orEmpty() }.forEach { e ->
+            val cost = rawConnectionCost(lastRightGroup, e.leftGroup) + e.cost + rawConnectionCost(e.rightGroup, 0) + eosPenalty(e.rightGroup)
+            if (cost < typedWordBest) typedWordBest = cost
+            offer(ConversionCandidate(surface = e.surface, reading = kana, cost = cost, segments = listOf(e.surface), rightId = e.rightGroup))
+        }
+        // Readings derived from the typed one (long-vowel ー spelling, kana
+        // variants) never outrank the typed reading's own best dictionary
+        // word: くせい stays 区政 although くせー is cheaper. When the typed
+        // reading has no word of its own (こんぴゅうたあ) there is no floor.
+        fun derived(c: ConversionCandidate, penalty: Int): ConversionCandidate {
+            var cost = c.cost + penalty
+            if (typedWordBest != Int.MAX_VALUE && cost <= typedWordBest) cost = typedWordBest + 1
+            return c.copy(reading = kana, cost = cost)
+        }
+        val normalized = normalizeLongVowelReading(kana)
+        if (normalized != kana) {
+            for (c in latticeConvert(normalized).take(LATTICE_VARIANT_TAKE)) {
+                offer(derived(c, LONG_VOWEL_NORMALIZED_PENALTY))
+            }
+        }
+        if (kana.any { it == 'を' || it == 'ぢ' || it == 'づ' || it == 'ヂ' || it == 'ヅ' || it == 'ヲ' }) {
+            for (variant in generateKanaVariants(kana)) {
+                for (c in latticeConvert(variant).take(LATTICE_VARIANT_TAKE)) {
+                    offer(derived(c, KANA_VARIANT_PENALTY))
+                }
+            }
+        }
+        // Surfaces the user committed for exactly this reading stay
+        // candidates even when the lattice no longer reaches them (a
+        // multi-word pick, or a new left context after the commit); the
+        // learning re-rank then decides where they go.
+        val floor = pool.values.minOfOrNull { it.cost } ?: 0
+        for (h in recentHistory) {
+            if (h.reading == kana && h.surface !in pool) offer(h.copy(cost = floor))
+        }
+        val boosted = pool.values.map { c -> c.copy(cost = applyBoost(kana, c.surface, c.cost)) }
+            .sortedBy { it.cost }.toMutableList()
+        kenLmRescore(boosted)
+        return boosted.sortedBy { it.cost }
     }
 
     /**
@@ -902,9 +851,23 @@ class NacreDictionary internal constructor(
             .toSet()
         if (surfaces.isEmpty()) return
         val idx = sorted.indexOfFirst { it.surface in surfaces }
-        if (idx > LOANWORD_PROMOTE_INDEX) {
+        // When the top candidate is itself a katakana word, the reading is
+        // a loanword and the English spelling is its closest alternative:
+        // slot it right after the katakana (rank 2). The long tail of
+        // emoji that loanword readings attract (⌨️ 💻 💽 … for
+        // こんぴゅーたー) used to sit in front of it, and at rank 5 the
+        // English candidate was past the visible width of the candidate
+        // bar — on device it simply looked absent (build-480, A-2).
+        // Otherwise (a native word that happens to have a loanword entry)
+        // keep the conservative slot so Japanese candidates stay first.
+        val target = if (sorted.firstOrNull()?.surface?.let(::isKatakanaWord) == true) {
+            LOANWORD_PROMOTE_INDEX_KATAKANA_TOP
+        } else {
+            LOANWORD_PROMOTE_INDEX
+        }
+        if (idx > target) {
             val c = sorted.removeAt(idx)
-            sorted.add(LOANWORD_PROMOTE_INDEX, c)
+            sorted.add(target, c)
         }
     }
 
@@ -1008,172 +971,34 @@ class NacreDictionary internal constructor(
             }
         }
 
-        val results = mutableListOf<ConversionCandidate>()
-        val seen = mutableSetOf<String>()
-
-        fun addUnique(candidates: List<ConversionCandidate>) {
-            for (c in candidates) {
-                if (seen.add(c.surface)) results.add(c)
-            }
+        // One cost scale for everything below: lattice path costs (Mozc
+        // word + connection costs) with the learning boost applied.
+        val pool = LinkedHashMap<String, ConversionCandidate>()
+        fun offer(c: ConversionCandidate) {
+            val prev = pool[c.surface]
+            if (prev == null || c.cost < prev.cost) pool[c.surface] = c
         }
+        // Conversions of what was typed.
+        for (c in rankedConversions(kana).take(PREDICT_CONVERSIONS)) offer(c)
+        // Completions: words whose reading extends what was typed.
+        for (c in completions(kana)) offer(c)
+        // Recent history (exact or prefix): what the user committed lately.
+        for (h in historyMatchesFor(kana)) offer(h)
 
-        // 0. Recent history matches (with prefix-length penalty)
-        addUnique(historyMatchesFor(kana))
-
-        // 1. Exact match FIRST (single-word candidates rank highest)
-        val typedExact = exactMatch(kana)
-        addUnique(typedExact)
-
-        // 2. Viterbi multi-word conversion
-        addUnique(viterbiConvert(kana).take(8))
-
-        // 2.5 Kana variant conversion (を→お/うぉ, ぢ→じ etc.)
-        // Only trigger if the input actually contains a variant source char —
-        // otherwise we waste work and risk surfacing unrelated variant hits.
-        if (kana.any { it == 'を' || it == 'ぢ' || it == 'づ' || it == 'ヂ' || it == 'ヅ' || it == 'ヲ' }) {
-            val kanaVariants = generateKanaVariants(kana)
-            for (variant in kanaVariants) {
-                val variantResults = exactMatch(variant) + viterbiConvert(variant).take(3)
-                for (c in variantResults) {
-                    if (seen.add(c.surface)) results.add(c.copy(cost = c.cost + 500))
-                }
-            }
-        }
-
-        // 2.6 Long-vowel normalized lookup — same merge as convert()
-        // step 2.6, unconditional (the kana-variant step above is
-        // char-gated; this one is a no-op unless the reading actually
-        // contains a romaji-style doubled vowel). Added surfaces are
-        // tracked for the final-pass floor enforcement.
-        val mergedSurfaces = HashSet<String>()
-        for (c in longVowelNormalizedMatch(kana, typedExact.minOfOrNull { it.cost })) {
-            if (seen.add(c.surface)) {
-                results.add(c)
-                mergedSurfaces.add(c.surface)
-            }
-        }
-
-        // 3. Prefix match
-        if (results.size < 15) {
-            addUnique(prefixMatch(kana, limit = 15 - results.size))
-        }
-
-        // 4. Phrase-memory completions for user-specific long phrases
-        if (results.size < 15) {
-            addUnique(findPhraseCompletions(kana, limit = minOf(5, 15 - results.size)))
-        }
-
-        // 5. Partial segmentation with hiragana tail preference
-        if (results.size < 10 && kana.length >= 3) {
-            for (splitAt in 2 until kana.length) {
-                val head = kana.substring(0, splitAt)
-                val tail = kana.substring(splitAt)
-                val headEntries = dict[head]?.take(3) ?: continue
-                val tailEntries = dict[tail]?.take(3)
-                if (tailEntries != null) {
-                    for (h in headEntries) {
-                        for (t in tailEntries) {
-                            val combined = h.surface + t.surface
-                            if (seen.add(combined)) {
-                                results.add(ConversionCandidate(
-                                    surface = combined,
-                                    reading = kana,
-                                    cost = h.cost + t.cost + getConnectionCost(h.rightGroup, t.leftGroup),
-                                ))
-                            }
-                            if (results.size >= 25) break
-                        }
-                        // Also add hiragana-tail variant: e.g. "スクショ" + "した"
-                        // High penalty — this is a fallback when the tail has no good
-                        // conversion, not a primary candidate.
-                        if (tail.length <= 3 && h.surface != head) {
-                            val hiraganaCombo = h.surface + tail
-                            if (seen.add(hiraganaCombo)) {
-                                results.add(ConversionCandidate(
-                                    surface = hiraganaCombo,
-                                    reading = kana,
-                                    cost = h.cost + 7000,
-                                ))
-                            }
-                        }
-                        if (results.size >= 25) break
-                    }
-                }
-                if (results.size >= 25) break
-            }
-        }
-
-        // 6. English word candidates (hiragana reading match)
-        if (results.size < 20) {
-            addUnique(englishMatch(kana, limit = 5))
-        }
-
-        // 7. Romaji-based English candidates (e.g. "goo" → "Google")
-        if (romaji.isNotEmpty() && romaji.length >= 2) {
-            addUnique(romajiEnglishMatch(romaji, limit = 5))
-        }
-
-        // 8. Typo correction: swap adjacent kana, common misreadings
-        //
-        // Only runs as a last resort — if Viterbi + exact match + prefix match
-        // together yielded almost nothing, the user likely DID mistype, so
-        // offering adjacent-swap candidates helps. Otherwise the transposition
-        // variants (e.g. "こんにはち" for input "こんにちは") surface as
-        // confusing "last-2-chars-swapped" candidates and degrade trust.
-        if (results.size < 4 && kana.length >= 3) {
-            addUnique(typoCorrection(kana, limit = 3))
-        }
-
-        // 9. Always ensure katakana, half-width katakana, and hiragana as-is candidates exist
+        val sorted = pool.values.sortedBy { it.cost }.toMutableList()
+        val seen = sorted.mapTo(HashSet()) { it.surface }
+        fun append(c: ConversionCandidate) { if (seen.add(c.surface)) sorted.add(c) }
+        for (c in englishMatch(kana, limit = 5)) append(c)
+        if (romaji.length >= 2) for (c in romajiEnglishMatch(romaji, limit = 5)) append(c)
+        if (sorted.size < 4 && kana.length >= 3) for (c in typoCorrection(kana, limit = 3)) append(c)
         if (kana.length >= 2) {
             val katakana = hiraganaToKatakana(kana)
-            if (katakana != kana && seen.add(katakana)) {
-                val katakanaCost = estimateKatakanaCost(kana, results)
-                results.add(ConversionCandidate(surface = katakana, reading = kana, cost = katakanaCost))
-            }
-            val halfKatakana = toHalfWidthKatakana(kana)
-            if (halfKatakana != kana && halfKatakana != katakana && seen.add(halfKatakana)) {
-                val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-                results.add(ConversionCandidate(surface = halfKatakana, reading = kana, cost = maxCost + 800))
-            }
-            if (seen.add(kana)) {
-                val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-                results.add(ConversionCandidate(surface = kana, reading = kana, cost = maxCost + 200))
-            }
+            if (katakana != kana) append(ConversionCandidate(surface = katakana, reading = kana))
+            val half = toHalfWidthKatakana(kana)
+            if (half != kana && half != katakana) append(ConversionCandidate(surface = half, reading = kana))
+            append(ConversionCandidate(surface = kana, reading = kana))
         }
-
-        // Final sort: apply user boost + POS context + KenLM to all
-        // candidates. Context-only costs are tracked by surface for
-        // the normalized-merge floor enforcement (see convert()).
-        val typedBestSurface = typedExact.minByOrNull { it.cost }?.surface
-        val trackFloor = mergedSurfaces.isNotEmpty() && typedBestSurface != null
-        val floorContext = HashMap<String, Int>()
-        val boosted = results.map { c ->
-            if (trackFloor) {
-                // Deterministic cost of this candidate: applyBoost()'s
-                // minimum-cost clamp (maxOf(100, ...)) applied to the
-                // stage cost, plus the purely additive POS delta.
-                // applyBoost()'s boosts (selection learning, static
-                // bigrams, recency, ...) are all excluded here — each
-                // candidate's own boost delta is preserved because any
-                // floor raise is added to its final cost (see
-                // enforceNormalizedFloor).
-                val contextOnly = posContextCost(c.reading, c.surface, c.cost)
-                floorContext[c.surface] = maxOf(100, c.cost) + (contextOnly - c.cost)
-            }
-            var cost = applyBoost(c.reading, c.surface, c.cost)
-            cost = posContextCost(c.reading, c.surface, cost)
-            c.copy(cost = cost)
-        }.toMutableList()
-        if (trackFloor) {
-            enforceNormalizedFloor(
-                boosted, floorContext, emptyMap(), mergedSurfaces, typedBestSurface,
-            )
-        }
-
-        kenLmRescore(boosted)
-
-        val sorted = boosted.sortedBy { it.cost }.toMutableList()
+        rankLearnedFirst(sorted, kana)
         promoteLoanwordCandidate(sorted, kana)
         return sorted.take(if (kana.length <= 3) 40 else 25)
     }
@@ -1205,9 +1030,12 @@ class NacreDictionary internal constructor(
         while (committedContext.size > 4) committedContext.removeLast()
 
         // Update POS context from the selected candidate's dictionary entry
-        val entries = dict[candidate.reading]
-        val matchEntry = entries?.firstOrNull { it.surface == candidate.surface }
-        lastRightGroup = matchEntry?.rightGroup ?: 1
+        lastRightGroup = if (candidate.rightId >= 0) {
+            candidate.rightId
+        } else {
+            val entries = dict[candidate.reading]
+            entries?.firstOrNull { it.surface == candidate.surface }?.rightGroup ?: 1
+        }
 
         // Recent history
         recentHistory.removeAll { it.surface == candidate.surface && it.reading == candidate.reading }
@@ -1804,151 +1632,6 @@ class NacreDictionary internal constructor(
             }
             .sortedBy { it.cost }
             .take(if (lookupKey.length <= 3) 40 else 20)  // Short readings: show all kanji candidates
-    }
-
-    /**
-     * Main-dictionary candidates for a romaji-typed loanword reading,
-     * looked up under its long-vowel (ー) spelling: "konpyuutaa"
-     * composes to こんぴゅうたあ, but the dictionary entry コンピューター
-     * lives under こんぴゅーたー, so the typed reading's own lookups
-     * return only Viterbi mis-conversions (the English candidate was
-     * rescued the same way in [englishMatch]; the Japanese surface was
-     * not). The merged candidates keep the TYPED reading — selection
-     * learning and history stay keyed by what the user actually
-     * entered, exactly as in [englishMatch].
-     *
-     * Two guards keep the merge from polluting native readings, whose
-     * doubled vowels are genuine （おおきい, こおり, くせい):
-     * [LONG_VOWEL_NORMALIZED_PENALTY], plus a floor — no merged
-     * candidate may outrank the typed reading's own best exact
-     * candidate ([typedBestExactCost], null when the typed reading has
-     * no exact entries, which is the loanword case). The penalty alone
-     * cannot guarantee this: the ー spelling can hold very cheap
-     * unrelated entries (くせー "smelly" at raw cost 293, vs くせい→区政
-     * at 6467), which would otherwise take rank 1. The floor applied
-     * here compares exactMatch-stage costs; because the final pass's
-     * POS adjustment can move the typed candidate afterwards, the
-     * callers re-enforce the same floor on context-adjusted costs —
-     * see [enforceNormalizedFloor].
-     */
-    private fun longVowelNormalizedMatch(
-        kana: String,
-        typedBestExactCost: Int?,
-    ): List<ConversionCandidate> {
-        val normalized = normalizeLongVowelReading(kana)
-        if (normalized == kana) return emptyList()
-        val merged = exactMatch(
-            normalized,
-            candidateReading = kana,
-            extraCost = LONG_VOWEL_NORMALIZED_PENALTY,
-        )
-        if (typedBestExactCost == null) return merged
-        return merged.map { c ->
-            if (c.cost <= typedBestExactCost) c.copy(cost = typedBestExactCost + 1) else c
-        }
-    }
-
-    /**
-     * Re-enforce the [longVowelNormalizedMatch] floor after the
-     * callers' deterministic cost adjustments. The exactMatch-stage
-     * floor alone does not survive them: posContextCost() adjusts a
-     * candidate only when its surface is found in dict[reading], and
-     * merged candidates — stamped with the typed reading but absent
-     * from its entry list — escape the adjustment, so a POS penalty
-     * on the typed reading's own best candidate （区政 after
-     * committing の) would silently lift a merged candidate
-     * （くせー) above it; convert()'s pass-through penalty has the
-     * same shape （ああ is demoted +1500 while merged あー is not).
-     *
-     * The comparison space is each candidate's deterministic cost:
-     * [floorContext] (stage cost run through applyBoost()'s
-     * minimum-cost clamp of 100 — cheap entries can have negative
-     * stage costs after the length bonus — with the POS adjustment
-     * applied and applyBoost()'s boosts NOT applied) plus
-     * its pass-through delta in convert().
-     * Any raise is added to the candidate's current cost, so every
-     * candidate keeps its own learning (and KenLM) delta — a merged
-     * candidate the user has actually learned can still climb past
-     * the floor, exactly as selection learning intends. Costs are
-     * keyed by surface (unique within a result list) so convert()'s
-     * KenLM candidate filter, which removes entries between the
-     * passes, cannot misalign them.
-     */
-    private fun enforceNormalizedFloor(
-        boosted: MutableList<ConversionCandidate>,
-        floorContext: Map<String, Int>,
-        passThroughDeltas: Map<String, Int>,
-        mergedSurfaces: Set<String>,
-        typedBestSurface: String?,
-    ) {
-        if (mergedSurfaces.isEmpty() || typedBestSurface == null) return
-        if (boosted.none { it.surface == typedBestSurface }) return
-        val typedContext = floorContext[typedBestSurface] ?: return
-        val floor = typedContext + (passThroughDeltas[typedBestSurface] ?: 0)
-        for (i in boosted.indices) {
-            val c = boosted[i]
-            if (c.surface !in mergedSurfaces) continue
-            val context = floorContext[c.surface] ?: continue
-            val base = context + (passThroughDeltas[c.surface] ?: 0)
-            if (base <= floor) {
-                boosted[i] = c.copy(cost = c.cost + (floor + 1 - base))
-            }
-        }
-    }
-
-    private fun prefixMatch(kana: String, limit: Int): List<ConversionCandidate> {
-        if (limit <= 0) return emptyList()
-
-        val results = mutableListOf<ConversionCandidate>()
-
-        var idx = sortedReadings.binarySearch(kana).let {
-            if (it >= 0) it else -(it + 1)
-        }
-
-        // For short inputs, show more candidates per reading to increase diversity
-        val takePerReading = when {
-            kana.length <= 1 -> 5
-            kana.length <= 2 -> 4
-            else -> 3
-        }
-        // Prefer readings that are close in length to input (more likely what user wants)
-        val maxExtraChars = if (kana.length <= 2) 6 else 8
-
-        while (idx < sortedReadings.size && sortedReadings[idx].startsWith(kana)) {
-            val reading = sortedReadings[idx]
-            val extraChars = reading.length - kana.length
-            if (reading != kana && extraChars <= maxExtraChars) {
-                val entries = dict[reading]
-                if (entries == null) { idx++; continue }
-                for (entry in entries.take(takePerReading)) {
-                    var cost = applyBoost(reading, entry.surface, entry.cost)
-                    cost = posContextCost(reading, entry.surface, cost)
-                    // Graduated penalty: first few extra chars are cheap, gets expensive
-                    cost += when (extraChars) {
-                        1 -> 150
-                        2 -> 350
-                        3 -> 600
-                        4 -> 1000
-                        else -> extraChars * 300
-                    }
-                    // Bonus for content words (users usually want kanji, not particles)
-                    if (isContentWord(entry.leftGroup) && kana.length >= 2) cost -= 400
-                    results.add(
-                        ConversionCandidate(
-                            surface = entry.surface,
-                            reading = reading,
-                            cost = cost,
-                        ),
-                    )
-                    if (results.size >= limit) {
-                        return results.sortedBy { it.cost }
-                    }
-                }
-            }
-            idx++
-        }
-
-        return results.sortedBy { it.cost }
     }
 
     // --- English word matching ---
@@ -2572,7 +2255,7 @@ class NacreDictionary internal constructor(
                     }
                 }
                 // Also try Viterbi on the swapped reading
-                val viterbi = viterbiConvert(swapped)
+                val viterbi = latticeConvert(swapped)
                 for (v in viterbi.take(1)) {
                     if (seen.add(v.surface)) {
                         results.add(v.copy(cost = v.cost + 6000))
@@ -2701,7 +2384,7 @@ class NacreDictionary internal constructor(
                     }
                 }
             }
-            val viterbi = viterbiConvert(corrected)
+            val viterbi = latticeConvert(corrected)
             for (v in viterbi.take(2)) {
                 if (seen.add(v.surface)) {
                     results.add(v.copy(cost = v.cost + 500))
@@ -2736,14 +2419,50 @@ class NacreDictionary internal constructor(
 
     companion object {
         private const val DEFAULT_CONNECTION_COST = 2000
-        // Penalty for unconverted pass-through candidates (the reading itself in
-        // hiragana, or its katakana transliteration) in convert(): they are not
-        // conversions, so when a real conversion exists they must not take the
-        // top by default. Benchmark-tuned (E3): 1500.
-        private const val PASS_THROUGH_PENALTY = 1500
 
         /** 0-based slot the best exact-match loanword candidate is promoted to. */
         private const val LOANWORD_PROMOTE_INDEX = 4
+
+        /** Lattice: POS id used for unknown single-kana nodes (名詞,一般). */
+        private const val LATTICE_UNKNOWN_POS_ID = 1852
+        /** Lattice: cost of an unknown single-kana node. */
+        private const val LATTICE_UNKNOWN_COST = 12000
+        /** Lattice: per-reading cap on dictionary entries entering the lattice. */
+        private const val LATTICE_MAX_ENTRIES_PER_READING = 40
+        /** Mozc id.def range of 接頭詞 (prefix) POS ids. */
+        private val PREFIX_POS_IDS = 2594..2640
+        /** Cost added to a lattice path that ends on a prefix (see eosPenalty). */
+        private const val LATTICE_PREFIX_END_PENALTY = 3000
+        /** Lattice paths taken from each normalized / variant reading. */
+        private const val LATTICE_VARIANT_TAKE = 5
+        /** Cost added to paths of a kana-variant reading (を→お …). */
+        private const val KANA_VARIANT_PENALTY = 500
+        /** predict(): conversions of the typed reading taken into the pool. */
+        private const val PREDICT_CONVERSIONS = 12
+        /** Completions: minimum typed kana before completions are offered. */
+        private const val COMPLETION_MIN_KANA = 2
+        private const val COMPLETION_MAX_READINGS = 20000
+        private const val COMPLETION_MAX_EXTRA_KANA = 8
+        private const val COMPLETION_LIMIT = 10
+        /**
+         * Completion pricing on top of the one-word path cost (tuned on
+         * tools/benchmark/completions.tsv; the sentence benchmark is
+         * unaffected): a small bonus, because a whole word beats the
+         * fragmentary conversions of a half-typed reading (ありが → 有賀),
+         * minus a per-extra-kana penalty.
+         */
+        private const val COMPLETION_BASE_PENALTY = -500
+        private const val COMPLETION_PER_KANA_PENALTY = 200
+
+        /**
+         * Slot used instead of [LOANWORD_PROMOTE_INDEX] when the top
+         * candidate is a katakana word (see [promoteLoanwordCandidate]).
+         */
+        private const val LOANWORD_PROMOTE_INDEX_KATAKANA_TOP = 1
+
+        /** Katakana word: katakana letters plus ー/・, at least 2 chars. */
+        private fun isKatakanaWord(s: String): Boolean =
+            s.length >= 2 && s.all { it in 'ァ'..'ヺ' || it == 'ー' || it == '・' }
 
         /**
          * Cost penalty for main-dictionary candidates merged via the
@@ -2795,7 +2514,7 @@ class NacreDictionary internal constructor(
         // Dictionary snapshot (fast restart): magic "NCSP", on-disk layout
         // version — bump when the serialized layout or DictEntry changes.
         private const val SNAPSHOT_MAGIC = 0x4E435350
-        private const val SNAPSHOT_FORMAT_VERSION = 1
+        private const val SNAPSHOT_FORMAT_VERSION = 2
         private const val SNAPSHOT_FILE_NAME = "dict_snapshot.bin"
         private const val MAX_SNAPSHOT_STRING_BYTES = 1 shl 20
 
@@ -2803,8 +2522,6 @@ class NacreDictionary internal constructor(
         private const val PREDICT_CACHE_MAX_ENTRIES = 64
         // KenLM weight for post-hoc rescoring (high: LM should strongly influence final ranking)
         private const val KENLM_WEIGHT = 5000f
-        // KenLM weight inside Viterbi (moderate: guide segmentation without over-pruning beam)
-        private const val VITERBI_LM_WEIGHT = 3000f
 
         // Shelly Bridge term cost: base cost lands it in the same range as an ordinary
         // dictionary/spell-correction hit (see spellCorrect()'s +3000/+2500 penalties above) —
@@ -2848,259 +2565,121 @@ class NacreDictionary internal constructor(
         )
     }
 
-    private fun lengthBonus(segLen: Int): Int {
-        // Strongly prefer longer segments — key for matching Google IME quality.
-        // Longer segments = fewer word boundaries = less ambiguity.
-        // (Kept at full strength: benchmark E2 showed halving/removing it
-        // regresses top-1/top-3 even with the connection-cost divisor at 2.)
-        return when {
-            segLen >= 10 -> -4000
-            segLen >= 8 -> -3200
-            segLen >= 7 -> -2600
-            segLen >= 6 -> -2000
-            segLen >= 5 -> -1500
-            segLen >= 4 -> -1000
-            segLen >= 3 -> -400
-            segLen == 2 -> 0
-            else -> 1200  // Single-char segments heavily penalized (particles handled by connection cost)
-        }
-    }
-
-    private fun viterbiConvert(kana: String): List<ConversionCandidate> {
-        val n = kana.length
-        if (n == 0) return emptyList()
-
-        // Check if KenLM incremental scoring is available
-        val scorer = kenLmScorer
-        val lmAvailable = scorer != null && scorer.isReady() && scorer.getStateSize() > 0
-        val lmBosState = if (lmAvailable) scorer!!.getBeginState() else null
-        // Build preceding context state by feeding committed words through the LM
-        val lmInitState: ByteArray? = if (lmAvailable && lmBosState != null && committedContext.isNotEmpty()) {
-            var state: ByteArray = lmBosState
-            for (word in committedContext.reversed()) {
-                val result = scorer!!.scoreWordIncremental(state, word)
-                state = result?.second ?: state
-            }
-            state
-        } else {
-            lmBosState
-        }
-
-        data class Node(
-            val cost: Int,
-            val backPos: Int,
-            val surface: String,
-            val reading: String,
-            val segCount: Int,
-            val rightGroup: Int,
-            val prevNode: Node?,
-            val lmState: ByteArray?,   // KenLM state for incremental scoring
-            val lmScore: Float,        // Cumulative LM log10 prob
-        )
-
-        fun reconstructSegments(node: Node): List<String> {
-            val segments = mutableListOf<String>()
-            var cur: Node? = node
-            while (cur != null && cur.surface.isNotEmpty()) {
-                segments.add(cur.surface)
-                cur = cur.prevNode
-            }
-            segments.reverse()
-            return segments
-        }
-
-        // Beam width: wider when KenLM is available (LM scoring benefits from more paths)
-        val hasLm = kenLmScorer?.isReady() == true
-        val K = when {
-            n <= 6 -> if (hasLm) 40 else 25
-            n <= 10 -> if (hasLm) 35 else 22
-            else -> if (hasLm) 30 else 18
-        }
-        val dp = Array(n + 1) { mutableListOf<Node>() }
-        dp[0].add(Node(cost = 0, backPos = -1, surface = "", reading = "", segCount = 0,
-            rightGroup = lastRightGroup, prevNode = null, lmState = lmInitState, lmScore = 0f))
-
-        for (endPos in 1..n) {
-            val allCandidates = mutableListOf<Node>()
-            val maxSegLen = minOf(endPos, if (n <= 10) 12 else 10)
-
-            for (segLen in 1..maxSegLen) {
-                val startPos = endPos - segLen
-                val segment = kana.substring(startPos, endPos)
-
-                val entries = dict[segment]
-                if (entries != null && entries.isNotEmpty()) {
-                    for (prevNode in dp[startPos]) {
-                        val prevRG = prevNode.rightGroup
-                        val isAfterContentWord = isContentWord(prevRG)
-                        val isAfterFunctionWord = isFunctionWord(prevRG)
-
-                        // Limit candidates per segment: fewer for long inputs
-                        val takeN = if (n > 12) minOf(if (segLen >= 3) 12 else 8, entries.size)
-                                    else if (segLen >= 3) 16 else 10
-                        for (entry in entries.take(takeN)) {
-                            var cost = applyBoost(segment, entry.surface, entry.cost)
-                            val connCost = if (startPos == 0 && prevRG == 0) {
-                                getConnectionCost(0, entry.leftGroup)
-                            } else {
-                                getConnectionCost(prevRG, entry.leftGroup)
-                            }
-                            cost += connCost
-
-                            // Hiragana function word handling:
-                            // When the segment is hiragana input, strongly prefer function word
-                            // readings over kanji content-word readings.
-                            // e.g. になっ → になっ (function) over 担っ (content)
-                            val isHiraganaSegment = segment.all { it in '\u3040'..'\u309F' }
-                            if (isHiraganaSegment) {
-                                if (entry.surface == segment) {
-                                    // Hiragana-as-is: strong bonus for function words
-                                    if (isParticle(entry.leftGroup) && segLen <= 2 && isAfterContentWord) cost -= 2500
-                                    if (isAuxVerb(entry.leftGroup) && segLen <= 3 && isAfterContentWord) cost -= 2000
-                                    if (isFunctionWord(entry.leftGroup) && segLen <= 4) cost -= 1500
-                                    if (segLen <= 3 && isAfterContentWord && !isFunctionWord(entry.leftGroup)) cost -= 800
-                                    if (segLen <= 2 && isAfterFunctionWord && isFunctionWord(entry.leftGroup)) cost -= 800
-                                    if (segLen <= 2 && isAfterFunctionWord && !isFunctionWord(entry.leftGroup)) cost -= 300
-                                } else if (segLen <= 3 && !isContentWord(entry.leftGroup)) {
-                                    // Short hiragana → kanji non-content: mild bonus
-                                    cost -= 300
-                                } else if (segLen <= 3 && isContentWord(entry.leftGroup)) {
-                                    // Short hiragana → kanji content word: penalty
-                                    // Prevents になっ→担っ, にな→仁菜 etc.
-                                    cost += 2000
-                                }
-                            }
-
-                            val lBonus = lengthBonus(segLen)
-
-                            // KenLM incremental scoring within Viterbi
-                            var lmCost = 0
-                            var newLmState = prevNode.lmState
-                            var newLmScore = prevNode.lmScore
-                            if (lmAvailable && prevNode.lmState != null) {
-                                val lmResult = scorer!!.scoreWordIncremental(prevNode.lmState!!, entry.surface)
-                                if (lmResult != null) {
-                                    newLmScore = prevNode.lmScore + lmResult.first
-                                    newLmState = lmResult.second
-                                    // Convert LM score to cost: negative log prob * weight
-                                    // lmResult.first is log10(P(word|context)), typically -0.5 to -4.0
-                                    lmCost = (lmResult.first * -VITERBI_LM_WEIGHT).toInt()
-                                }
-                            }
-
-                            val totalCost = prevNode.cost + cost + lBonus + lmCost
-
-                            allCandidates.add(Node(
-                                cost = totalCost,
-                                backPos = startPos,
-                                surface = entry.surface,
-                                reading = segment,
-                                segCount = prevNode.segCount + 1,
-                                rightGroup = entry.rightGroup,
-                                prevNode = prevNode,
-                                lmState = newLmState,
-                                lmScore = newLmScore,
-                            ))
-                        }
-                    }
-                } else if (segLen == 1) {
-                    for (prevNode in dp[startPos]) {
-                        val connCost = if (startPos == 0) 0 else getConnectionCost(prevNode.rightGroup, 1)
-                        val totalCost = prevNode.cost + 15000 + connCost
-                        allCandidates.add(Node(
-                            cost = totalCost,
-                            backPos = startPos,
-                            surface = segment,
-                            reading = segment,
-                            segCount = prevNode.segCount + 1,
-                            rightGroup = 1,
-                            prevNode = prevNode,
-                            lmState = prevNode.lmState,
-                            lmScore = prevNode.lmScore,
-                        ))
-                    }
-                }
-            }
-
-            // Keep top-K with diversity — use partial sort for performance
-            allCandidates.sortBy { it.cost }
-            val kept = mutableListOf<Node>()
-            val seenHashes = mutableSetOf<Long>()
-            for (node in allCandidates) {
-                val pathHash = (System.identityHashCode(node.prevNode).toLong() shl 32) xor
-                    node.surface.hashCode().toLong()
-                if (seenHashes.add(pathHash)) {
-                    kept.add(node)
-                }
-                if (kept.size >= K * 3) break
-            }
-            dp[endPos] = kept
-        }
-
-        val results = mutableListOf<ConversionCandidate>()
-        val seen = mutableSetOf<String>()
-
-        for (node in dp[n]) {
-            val segments = reconstructSegments(node)
-            val combined = segments.joinToString("")
-            if (combined.isNotEmpty() && seen.add(combined)) {
-                val eosCost = getConnectionCost(node.rightGroup, 0)
-                val segPenalty = if (node.segCount >= 5) (node.segCount - 4) * 500 else 0
-                val finalCost = node.cost + eosCost / 2 + segPenalty
-                results.add(ConversionCandidate(surface = combined, reading = kana, cost = finalCost, segments = segments))
-            }
-            if (results.size >= 25) break
-        }
-
-        val exactMatches = exactMatch(kana)
-        if (results.isEmpty()) return exactMatches
-
-        for (em in exactMatches) {
-            if (seen.add(em.surface)) results.add(em)
-        }
-
-        val katakana = hiraganaToKatakana(kana)
-        if (katakana != kana && seen.add(katakana)) {
-            val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-            results.add(ConversionCandidate(surface = katakana, reading = kana, cost = maxCost + 500))
-        }
-        if (seen.add(kana)) {
-            val maxCost = results.maxOfOrNull { it.cost } ?: 5000
-            results.add(ConversionCandidate(surface = kana, reading = kana, cost = maxCost + 200))
-        }
-
-        return results.take(25)
+    /** Raw (unscaled) Mozc connection cost. */
+    private fun rawConnectionCost(prevRightId: Int, currLeftId: Int): Int {
+        if (connectionCostFlat.isEmpty() || numIds == 0) return DEFAULT_CONNECTION_COST
+        val r = prevRightId.coerceIn(0, numIds - 1)
+        val l = currLeftId.coerceIn(0, numIds - 1)
+        return connectionCostFlat[r * numIds + l].toInt()
     }
 
     /**
-     * Estimate appropriate cost for katakana conversion.
-     * If most dictionary entries for this reading have katakana surfaces (= loanword),
-     * rank katakana much higher.
+     * Mozc's matrix charges nothing for X→EOS, so a reading can end on a
+     * bare prefix (あい → 相, 接頭詞). Real Mozc keeps such candidates
+     * down with segment-level rules this engine does not have; a flat
+     * penalty on paths whose last word is a prefix does the same job.
      */
-    private fun estimateKatakanaCost(kana: String, existingResults: List<ConversionCandidate>): Int {
-        // 1. Dictionary-based: if 50%+ entries are katakana, it's a loanword
-        val entries = dict[kana]
-        if (entries != null && entries.size >= 2) {
-            val katakanaCount = entries.count { surface ->
-                surface.surface.all { it in '\u30A0'..'\u30FF' || it == 'ー' }
+    private fun eosPenalty(rid: Int): Int =
+        if (rid in PREFIX_POS_IDS) LATTICE_PREFIX_END_PENALTY else 0
+
+    private fun isLatticeSymbolSurface(surface: String): Boolean = surface.any { ch ->
+        val c = ch.code
+        // surrogates (emoji), dingbats/misc symbols, arrows, geometric shapes, enclosed alnum
+        ch.isSurrogate() || c in 0x2190..0x2BFF || c in 0x2460..0x24FF || c in 0x3200..0x33FF ||
+            c == 0xFE0F || c in 0x25A0..0x25FF
+    }
+
+    /**
+     * Mozc-model lattice conversion: word cost + full connection cost, exact
+     * forward Viterbi (best cost per lattice node) and exact N-best by backward
+     * A* (the forward costs are an admissible, exact heuristic). No ad-hoc
+     * length/hiragana bonuses — the Mozc costs already encode them.
+     */
+    private fun latticeConvert(kana: String): List<ConversionCandidate> {
+        val n = kana.length
+        if (n == 0) return emptyList()
+        val unknownId = LATTICE_UNKNOWN_POS_ID
+        class LNode(val start: Int, val end: Int, val surface: String, val lid: Int, val rid: Int, val wcost: Int) {
+            var best = Int.MAX_VALUE
+        }
+        val endAt = Array(n + 1) { ArrayList<LNode>() }
+        val startAt = Array(n + 1) { ArrayList<LNode>() }
+        val maxLen = minOf(n, 16)
+        for (st in 0 until n) {
+            for (len in 1..minOf(maxLen, n - st)) {
+                val seg = kana.substring(st, st + len)
+                val entries = dict[seg] ?: continue
+                var taken = 0
+                for (e in entries) {
+                    if (taken >= LATTICE_MAX_ENTRIES_PER_READING) break
+                    if (len < n && isLatticeSymbolSurface(e.surface)) continue
+                    // Whole-reading nodes get the learning boost once, on the
+                    // full surface, in rankedConversions — not here as well.
+                    val wcost = if (len == n) e.cost else applyBoost(seg, e.surface, e.cost)
+                    val node = LNode(st, st + len, e.surface, e.leftGroup, e.rightGroup, wcost)
+                    endAt[st + len].add(node); startAt[st].add(node); taken++
+                    // The same surface's other POS readings (see DictEntry.variants).
+                    e.variants?.forEach { v ->
+                        val vcost = if (len == n) v.cost else applyBoost(seg, v.surface, v.cost)
+                        val vn = LNode(st, st + len, v.surface, v.leftGroup, v.rightGroup, vcost)
+                        endAt[st + len].add(vn); startAt[st].add(vn)
+                    }
+                }
             }
-            val ratio = katakanaCount.toFloat() / entries.size
-            if (ratio >= 0.5f) {
-                val minCost = existingResults.minOfOrNull { it.cost } ?: 5000
-                return minCost + 200
+            // Unknown-word fallback so every position stays reachable.
+            val ch = kana.substring(st, st + 1)
+            val unk = LNode(st, st + 1, ch, unknownId, unknownId, LATTICE_UNKNOWN_COST)
+            endAt[st + 1].add(unk); startAt[st].add(unk)
+        }
+        // Forward: best[node] = min over prev ending at node.start.
+        for (pos in 0 until n) {
+            for (node in startAt[pos]) {
+                var b = Int.MAX_VALUE
+                if (pos == 0) {
+                    b = rawConnectionCost(lastRightGroup, node.lid)
+                } else {
+                    for (prev in endAt[pos]) {
+                        if (prev.best == Int.MAX_VALUE) continue
+                        val c = prev.best + rawConnectionCost(prev.rid, node.lid)
+                        if (c < b) b = c
+                    }
+                }
+                if (b != Int.MAX_VALUE) node.best = b + node.wcost
             }
         }
-
-        // 2. Pattern-based: detect loanword-like readings even without dict entries
-        // Loanword indicators: long vowel patterns, ティ/ディ/ファ/フィ etc., 4+ chars with no kanji match
-        if (isLikelyLoanword(kana)) {
-            val minCost = existingResults.minOfOrNull { it.cost } ?: 5000
-            return minCost + 500
+        // Backward A*: partial paths from EOS; priority = node.best + suffix cost.
+        class Partial(val node: LNode, val suffix: Int, val next: Partial?) {
+            val f: Int get() = node.best + suffix
         }
-
-        // Default: katakana at the bottom
-        val maxCost = existingResults.maxOfOrNull { it.cost } ?: 5000
-        return maxCost + 500
+        val pq = java.util.PriorityQueue<Partial>(compareBy { it.f })
+        for (node in endAt[n]) {
+            if (node.best == Int.MAX_VALUE) continue
+            pq.add(Partial(node, rawConnectionCost(node.rid, 0) + eosPenalty(node.rid), null))
+        }
+        val results = ArrayList<ConversionCandidate>()
+        val seen = HashSet<String>()
+        var pops = 0
+        while (pq.isNotEmpty() && results.size < 25 && pops < 20000) {
+            val p = pq.poll(); pops++
+            if (p.node.start == 0) {
+                val segs = ArrayList<String>()
+                var lastRid = p.node.rid
+                var cur: Partial? = p
+                while (cur != null) { segs.add(cur.node.surface); lastRid = cur.node.rid; cur = cur.next }
+                val surface = segs.joinToString("")
+                if (seen.add(surface)) {
+                    results.add(ConversionCandidate(surface = surface, reading = kana, cost = p.f, segments = segs, rightId = lastRid))
+                }
+                continue
+            }
+            val connBase = p.node.wcost + p.suffix
+            for (prev in endAt[p.node.start]) {
+                if (prev.best == Int.MAX_VALUE) continue
+                pq.add(Partial(prev, connBase + rawConnectionCost(prev.rid, p.node.lid), p))
+            }
+        }
+        if (results.isEmpty()) return exactMatch(kana)
+        return results
     }
 
     /**

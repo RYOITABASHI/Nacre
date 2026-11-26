@@ -1,0 +1,32 @@
+# Prediction (completion) benchmark: typed kana prefix <TAB> expected completed surface.
+# Measures whether predict() offers the word the user is in the middle of typing.
+ありが	ありがとう
+ありがとうご	ありがとうございます
+おはよ	おはよう
+おはようご	おはようございます
+こんに	こんにちは
+こんば	こんばんは
+よろし	よろしく
+よろしくおね	よろしくお願いします
+おつか	お疲れ様です
+すみま	すみません
+おねが	お願いします
+だいじょ	大丈夫
+ほんと	本当
+ごめ	ごめん
+おやす	おやすみ
+いただ	いただきます
+しつれ	失礼します
+りょうか	了解
+かくに	確認
+とりあ	とりあえず
+せっか	せっかく
+たぶ	多分
+ちょっ	ちょっと
+いっしょ	一緒
+きょうみ	興味
+れんら	連絡
+よてい	予定
+しごと	仕事
+でんしゃ	電車
+もうしわけ	申し訳ありません

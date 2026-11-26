@@ -1813,7 +1813,14 @@ class InputEngine(private val service: NacreInputMethodService) {
         clearCandidates()
     }
 
+    /**
+     * Phrase memory is learned (and persisted) data, so the password-field
+     * gate lives here like [recordEnglishSelection]'s: the 12-key commit
+     * paths that store an unconverted kana phrase call this without a
+     * password check of their own.
+     */
     private fun recordJapanesePhrase(reading: String, surface: String) {
+        if (isPasswordField) return
         (dictionary as? NacreDictionary)?.recordPhrase(reading, surface)
     }
 
@@ -2735,6 +2742,12 @@ data class ConversionCandidate(
     val reading: String,
     val cost: Int = 0,
     val segments: List<String> = emptyList(),
+    /**
+     * Mozc right POS id of the candidate's last word when the conversion
+     * lattice produced it (-1 otherwise). Becomes the left context of the
+     * next conversion once the candidate is committed.
+     */
+    val rightId: Int = -1,
 )
 
 interface DictionaryProvider {

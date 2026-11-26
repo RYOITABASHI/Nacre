@@ -102,7 +102,8 @@ fun CandidateBar(
         // turns red while recording. This is the single voice entry point, shared
         // by every layout that shows the candidate bar.
         val micColor = if (voiceListening) Color(0xFFFF4444) else accent
-        Box(
+        // Hidden when voice input is switched off in settings (issue #24).
+        if (service.voiceInputManager.voiceEnabled) Box(
             modifier = Modifier
                 .fillMaxHeight()
                 .width(44.dp)
