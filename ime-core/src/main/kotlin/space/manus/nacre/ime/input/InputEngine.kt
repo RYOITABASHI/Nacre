@@ -1813,7 +1813,14 @@ class InputEngine(private val service: NacreInputMethodService) {
         clearCandidates()
     }
 
+    /**
+     * Phrase memory is learned (and persisted) data, so the password-field
+     * gate lives here like [recordEnglishSelection]'s: the 12-key commit
+     * paths that store an unconverted kana phrase call this without a
+     * password check of their own.
+     */
     private fun recordJapanesePhrase(reading: String, surface: String) {
+        if (isPasswordField) return
         (dictionary as? NacreDictionary)?.recordPhrase(reading, surface)
     }
 
