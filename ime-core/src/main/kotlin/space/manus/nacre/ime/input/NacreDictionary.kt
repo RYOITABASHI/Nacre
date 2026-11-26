@@ -816,6 +816,14 @@ class NacreDictionary internal constructor(
                 }
             }
         }
+        // Surfaces the user committed for exactly this reading stay
+        // candidates even when the lattice no longer reaches them (a
+        // multi-word pick, or a new left context after the commit); the
+        // learning re-rank then decides where they go.
+        val floor = pool.values.minOfOrNull { it.cost } ?: 0
+        for (h in recentHistory) {
+            if (h.reading == kana && h.surface !in pool) offer(h.copy(cost = floor))
+        }
         val boosted = pool.values.map { c -> c.copy(cost = applyBoost(kana, c.surface, c.cost)) }
             .sortedBy { it.cost }.toMutableList()
         kenLmRescore(boosted)
