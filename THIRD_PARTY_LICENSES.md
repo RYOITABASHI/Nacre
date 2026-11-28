@@ -222,3 +222,20 @@ hand-written supplement of modern/tech terms. It powers ABC-mode
 English completion in the candidate bar. The derivation is documented
 in tools/build_english_assets.py; the generated file is distributed
 under the same CC-BY-SA-4.0 license.
+
+---
+
+## Japanese Wikipedia (collocation counts)
+
+Source: Wikipedia contributors, Japanese Wikipedia, via the Hugging Face dataset
+`wikimedia/wikipedia` (config `20231101.ja`).
+
+License: Creative Commons Attribution-ShareAlike 4.0 (CC BY-SA 4.0)
+https://creativecommons.org/licenses/by-sa/4.0/
+
+Usage in Nacre: `ime-core/src/main/assets/dict/collocations.tsv.gz` holds counts of
+noun + case particle + predicate co-occurrences computed from this text (no text is
+redistributed), built by `tools/dict/build_collocations.py`, and is used to choose
+between homophones during conversion. The table is distributed under CC BY-SA 4.0.
+
+Tokenisation used fugashi (MIT) with unidic-lite (BSD-3-Clause); neither is shipped.

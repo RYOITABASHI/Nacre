@@ -1,0 +1,22 @@
+# Held-out completion set — written BEFORE tuning the 2026-11-28 batch, never tuned on.
+# typed kana prefix <TAB> expected completed surface ('|'-separated alternatives)
+おはようござ	おはようございます
+よろしくおねがいしま	よろしくお願いします
+ありがとうござい	ありがとうございます
+すみませ	すみません
+きょうりょ	協力
+だいじょう	大丈夫
+かくにんしま	確認します
+もうしわけあり	申し訳ありません
+おねがいしま	お願いします
+しょうしょ	少々
+ちょっとま	ちょっと待って
+わかりま	分かりました|わかりました
+りょうかいで	了解です
+おつかれさま	お疲れ様です
+ありがと	ありがとう
+ほんとう	本当
+たしか	確か
+いっしょに	一緒に
+けっこ	結構
+ざんね	残念

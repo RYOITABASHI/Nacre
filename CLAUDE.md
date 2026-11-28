@@ -16,6 +16,8 @@
 | 変換は Mozc モデル準拠の格子（単語コスト＋接続コストそのまま、前向き Viterbi＋後ろ向き A* の N-best） | 旧ビームサーチは接続コスト /2・長さボーナス・ひらがな補正などの独自補正で Mozc のコストを崩していた（210文ベンチ top-1 21.4%→70.0%） | NacreDictionary.kt (latticeConvert / rankedConversions) |
 | mozc_dict.bin は同じ表記の品詞違い（DictEntry.variants）を保持 | 旧変換が（読み, 表記）で重複除去し、接続助詞の「て」などが消えて接続コストが破綻していた。Mozc b17e284（接続行列と同じ版）から復元 | tools/dict/restore_mozc_pos_variants.py, NacreDictionary.kt |
 | 人名コスト −1500 補正は廃止 | id 1921..1923 だけに効き 齋藤>斎藤 のように Mozc のコストを歪めていた | NacreDictionary.kt |
+| 数詞は格子に「組み立てた数」ノードを足す（アラビア数字優先） | 辞書は単独の数しか持たず にじゅうご→二重5 に割れていた。Gboard の第一候補はアラビア数字。連濁形（びゃく・ぜん）は さん の後だけ認める（ごぜん=午前 を 5000 にしない） | NumberReading.kt, NacreDictionary.addNumberNodes |
+| 同音異義は Wikipedia 由来の共起表で N-best を並べ替える | Mozc OSS の collocation.txt は40行の見本のみ。述語は表記の読みも照合（良い(よい) が いい の場面で加点されない）。重み 300 は本ベンチのみで選定 | Collocations.kt, assets/dict/collocations.tsv.gz, tools/dict/build_collocations.py |
 
 ## Module Structure
 
@@ -64,7 +66,9 @@ ime-ai/       — AI アドオン (whisper.cpp JNI, llama.cpp JNI, AIDL)
 - **辞書拡充**: `dict/slang_words.tsv` — テック用語、固有名詞、現代スラング
 - **変換格子**: 読みごとに最大40語（＋その品詞違い）、未知1文字ノード cost 12000、接頭詞で終わる経路 +3000
 - **予測**: 変換 N-best（上位12）＋補完（読みを延長する語、1語経路コスト −500 ＋余り1かなごと +200）＋履歴を同一コスト尺度で並べる
-- **ベンチ**: `tools/benchmark/sentences.tsv`（210文）と `tools/benchmark/completions.tsv`（補完30件）
+- **補完の価格**: 品詞違いのうち最も安い1語経路で評価（感動詞の ありがとう 等）
+- **共起表**: 名詞＋格助詞＋述語（K=漢字語幹:読み語幹、R=読み語幹）、件数10以上 約62万キー、ソート済みハッシュ配列で約6MB
+- **ベンチ**: 調整用 `tools/benchmark/sentences.tsv`（210文。`|` 区切りは別解で先頭が厳密解）と `completions.tsv`（補完30件）。ホールドアウト `heldout.tsv`（同音異義40・数詞12）と `completions_heldout.tsv`（20件）は調整に使わない
 
 ## Known Constraints
 - AIDL Java stubs are hand-written (aidl compiler is x86-64 only)

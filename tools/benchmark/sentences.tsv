@@ -1,6 +1,8 @@
 # Nacre conversion benchmark sentence set.
 # Columns: reading (full-sentence hiragana, as composed) <TAB> expected surface <TAB> category
 # Surfaces carry no sentence punctuation (、。), matching what convert() returns.
+# Several correct surfaces are '|'-separated; the FIRST is the strict answer. The numeric
+# rows list kanji numerals first (strict) and Arabic numerals second (Gboard's first choice).
 おはようございます	おはようございます	daily
 ありがとうございます	ありがとうございます	daily
 おつかれさまでした	お疲れ様でした	daily
@@ -193,21 +195,21 @@
 かいしゃのちかくにあたらしいこんびにができました	会社の近くに新しいコンビニができました	long
 せんせいはがくせいたちにやさしくおしえてくれました	先生は学生たちに優しく教えてくれました	long
 わたしのしゅみはさっかーをすることとおんがくをきくことです	私の趣味はサッカーをすることと音楽を聞くことです	long
-きょうはさんがつみっかです	今日は三月三日です	numeric
-たんじょうびはじゅういちがつじゅうよっかです	誕生日は十一月十四日です	numeric
-らいねんはにせんにじゅうろくねんです	来年は二千二十六年です	numeric
-かいぎはごぜんくじはんからです	会議は午前九時半からです	numeric
-このほんはせんにひゃくえんです	この本は千二百円です	numeric
+きょうはさんがつみっかです	今日は三月三日です|今日は3月3日です	numeric
+たんじょうびはじゅういちがつじゅうよっかです	誕生日は十一月十四日です|誕生日は11月14日です	numeric
+らいねんはにせんにじゅうろくねんです	来年は二千二十六年です|来年は2026年です	numeric
+かいぎはごぜんくじはんからです	会議は午前九時半からです|会議は午前9時半からです	numeric
+このほんはせんにひゃくえんです	この本は千二百円です|この本は1200円です	numeric
 ひとりでいきます	一人で行きます	numeric
 ふたりでいきました	二人で行きました	numeric
-ねこがさんびきいます	猫が三匹います	numeric
-いぬがにひきいます	犬が二匹います	numeric
-かみをさんまいください	紙を三枚ください	numeric
-ほんをにさつかいました	本を二冊買いました	numeric
+ねこがさんびきいます	猫が三匹います|猫が3匹います	numeric
+いぬがにひきいます	犬が二匹います|犬が2匹います	numeric
+かみをさんまいください	紙を三枚ください|紙を3枚ください	numeric
+ほんをにさつかいました	本を二冊買いました|本を2冊買いました	numeric
 かれははたちになりました	彼は二十歳になりました	numeric
-いっかいからさんかいまで	一階から三階まで	numeric
-でんしゃはごふんおくれです	電車は五分遅れです	numeric
-じゅうにじはんごろつきます	十二時半ごろ着きます	numeric
+いっかいからさんかいまで	一階から三階まで|1階から3階まで	numeric
+でんしゃはごふんおくれです	電車は五分遅れです|電車は5分遅れです	numeric
+じゅうにじはんごろつきます	十二時半ごろ着きます|12時半ごろ着きます|12時半頃着きます	numeric
 らいしゅうのきんようびにあいましょう	来週の金曜日に会いましょう	numeric
-かのじょはにじゅうごさいです	彼女は二十五歳です	numeric
-いちまんえんさつしかもっていません	一万円札しか持っていません	numeric
+かのじょはにじゅうごさいです	彼女は二十五歳です|彼女は25歳です	numeric
+いちまんえんさつしかもっていません	一万円札しか持っていません|1万円札しか持っていません	numeric

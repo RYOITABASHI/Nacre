@@ -56,6 +56,7 @@ class ConversionBenchmarkTest {
     private class Stats {
         var n = 0
         var top1 = 0
+        var strictTop1 = 0
         var top3 = 0
         var reciprocalRankSum = 0.0
     }
@@ -95,11 +96,15 @@ class ConversionBenchmarkTest {
 
         for (row in rows) {
             val candidates = dict.convert(row.reading)
-            val rank = candidates.indexOfFirst { it.surface == row.expected } // -1 = absent
+            // '|' separates equally correct surfaces; the first one is the strict answer.
+            val accepted = row.expected.split('|')
+            val rank = candidates.indexOfFirst { it.surface in accepted } // -1 = absent
+            val strictRank = candidates.indexOfFirst { it.surface == accepted[0] }
             val stats = perCategory.getOrPut(row.category) { Stats() }
             for (s in listOf(overall, stats)) {
                 s.n++
                 if (rank == 0) s.top1++
+                if (strictRank == 0) s.strictTop1++
                 if (rank in 0..2) s.top3++
                 if (rank >= 0) s.reciprocalRankSum += 1.0 / (rank + 1)
             }
@@ -114,9 +119,9 @@ class ConversionBenchmarkTest {
 
         fun pct(x: Int, n: Int): String = if (n == 0) "-" else "%.1f%%".format(100.0 * x / n)
         fun line(label: String, s: Stats): String =
-            "%-10s n=%3d  top1=%s  top3=%s  MRR=%.3f".format(
+            "%-10s n=%3d  top1=%s  top3=%s  MRR=%.3f  strictTop1=%s".format(
                 label, s.n, pct(s.top1, s.n), pct(s.top3, s.n),
-                if (s.n == 0) 0.0 else s.reciprocalRankSum / s.n,
+                if (s.n == 0) 0.0 else s.reciprocalRankSum / s.n, pct(s.strictTop1, s.n),
             )
 
         val report = buildString {

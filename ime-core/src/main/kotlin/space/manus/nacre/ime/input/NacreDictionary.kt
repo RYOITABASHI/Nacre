@@ -140,12 +140,26 @@ class NacreDictionary internal constructor(
     // KenLM 5-gram language model scorer (optional, loaded from ime-ai)
     @Volatile
     var kenLmScorer: KenLmScorer? = null
+
         set(value) {
             field = value
             // Viterbi scoring reads the scorer — memoized predict() results
             // computed without it (or with a previous one) are stale.
             bumpPredictStateVersion()
         }
+
+    /** Noun–particle–predicate counts for homophone choice (see Collocations). */
+    private var collocations: Collocations? = null
+
+    private fun loadCollocations() {
+        collocations = try {
+            assetOpener.open("dict/collocations.tsv.gz").use { Collocations.load(it) }
+                .also { Log.i("NacreDictionary", "Collocations loaded: ${it.size} keys") }
+        } catch (e: Exception) {
+            Log.i("NacreDictionary", "No collocation table (optional)")
+            null
+        }
+    }
 
     private var loaded = false
 
@@ -240,6 +254,7 @@ class NacreDictionary internal constructor(
             writeSnapshotQuietly()
         }
 
+        loadCollocations()
         loadUserBoost()
         loadUserDictionary()
         loadPhraseMemory()
@@ -745,7 +760,11 @@ class NacreDictionary internal constructor(
             val entries = dict[reading] ?: continue
             for (e in entries.take(2)) {
                 if (isLatticeSymbolSurface(e.surface)) continue
-                val path = rawConnectionCost(lastRightGroup, e.leftGroup) + e.cost + rawConnectionCost(e.rightGroup, 0) + eosPenalty(e.rightGroup)
+                // Cheapest POS reading of the word as a one-word path (ありがとう
+                // is cheap as 感動詞, not as its primary entry's POS).
+                val path = (listOf(e) + e.variants.orEmpty()).minOf { v ->
+                    rawConnectionCost(lastRightGroup, v.leftGroup) + v.cost + rawConnectionCost(v.rightGroup, 0) + eosPenalty(v.rightGroup)
+                }
                 val cost = applyBoost(reading, e.surface, path) + COMPLETION_BASE_PENALTY + extra * COMPLETION_PER_KANA_PENALTY
                 best.add(ConversionCandidate(surface = e.surface, reading = reading, cost = cost))
                 if (best.size > COMPLETION_LIMIT) best.poll()
@@ -2449,6 +2468,23 @@ class NacreDictionary internal constructor(
         private val PREFIX_POS_IDS = 2594..2640
         /** Cost added to a lattice path that ends on a prefix (see eosPenalty). */
         private const val LATTICE_PREFIX_END_PENALTY = 3000
+        /**
+         * Cost units per ln(1 + count) of a collocation (see collocationBonus).
+         * Tuned on tools/benchmark/sentences.tsv only (200/300/450/600 →
+         * 300 best); the held-out set was not used to pick it.
+         */
+        private const val COLLOCATION_WEIGHT = 300
+        /** Mozc POS ids: 名詞,数,アラビア数字 and 名詞,数,漢数字. */
+        private const val NUMBER_ARABIC_ID = 2042
+        private const val NUMBER_KANJI_ID = 2044
+        /** Word costs of composite numeral nodes (Arabic first, like Gboard). */
+        private const val NUMBER_ARABIC_COST = 1000
+        private const val NUMBER_KANJI_COST = 2500
+        private const val NUMBER_MIXED_EXTRA = 400
+        private const val NUMBER_MAX_KANA = 16
+        /** Syllables that can follow a geminated numeral (いっ|かい, じゅっ|ぷん). */
+        private const val GEMINATE_FOLLOWERS = "かきくけこさしすせそたちつてとぱぴぷぺぽ"
+        private val TENS_READINGS = mapOf("じゅう" to 10L, "にじゅう" to 20L, "さんじゅう" to 30L)
         /** Lattice paths taken from each normalized / variant reading. */
         private const val LATTICE_VARIANT_TAKE = 5
         /** Cost added to paths of a kana-variant reading (を→お …). */
@@ -2581,6 +2617,42 @@ class NacreDictionary internal constructor(
         )
     }
 
+    /** A word in the conversion lattice: kana span [start, end), Mozc ids, word cost. */
+    private class LNode(val start: Int, val end: Int, val surface: String, val lid: Int, val rid: Int, val wcost: Int) {
+        var best = Int.MAX_VALUE
+    }
+
+    /**
+     * Numeral nodes starting at [st]: every span NumberReading parses as one
+     * composite number becomes a word in Arabic digits (Gboard's first
+     * choice), in kanji numerals, and for 万/億 values in mixed form
+     * (1万2000). A span ending geminated (にじゅういっ) is only offered
+     * before a counter-like syllable. Day forms ending in よっか (14日, 24日)
+     * are added as one word with 日's POS on the right.
+     */
+    private fun addNumberNodes(kana: String, st: Int, add: (LNode) -> Unit) {
+        val maxEnd = minOf(kana.length, st + NUMBER_MAX_KANA)
+        for (end in st + 2..maxEnd) {
+            val span = kana.substring(st, end)
+            val parsed = NumberReading.parse(span)
+            if (parsed != null) {
+                if (parsed.geminated && (end >= kana.length || kana[end] !in GEMINATE_FOLLOWERS)) continue
+                val v = parsed.value
+                add(LNode(st, end, v.toString(), NUMBER_ARABIC_ID, NUMBER_ARABIC_ID, NUMBER_ARABIC_COST))
+                add(LNode(st, end, NumberReading.toKanji(v), NUMBER_KANJI_ID, NUMBER_KANJI_ID, NUMBER_KANJI_COST))
+                NumberReading.toMixed(v)?.let {
+                    add(LNode(st, end, it, NUMBER_ARABIC_ID, NUMBER_ARABIC_ID, NUMBER_ARABIC_COST + NUMBER_MIXED_EXTRA))
+                }
+            }
+            if (span.endsWith("よっか")) {
+                val tens = TENS_READINGS[span.removeSuffix("よっか")] ?: continue
+                val dayRid = dict["にち"]?.firstOrNull { it.surface == "日" }?.rightGroup ?: NUMBER_ARABIC_ID
+                add(LNode(st, end, "${tens + 4}日", NUMBER_ARABIC_ID, dayRid, NUMBER_ARABIC_COST))
+                add(LNode(st, end, NumberReading.toKanji(tens + 4L) + "日", NUMBER_KANJI_ID, dayRid, NUMBER_KANJI_COST))
+            }
+        }
+    }
+
     /** Raw (unscaled) Mozc connection cost. */
     private fun rawConnectionCost(prevRightId: Int, currLeftId: Int): Int {
         if (connectionCostFlat.isEmpty() || numIds == 0) return DEFAULT_CONNECTION_COST
@@ -2615,9 +2687,6 @@ class NacreDictionary internal constructor(
         val n = kana.length
         if (n == 0) return emptyList()
         val unknownId = LATTICE_UNKNOWN_POS_ID
-        class LNode(val start: Int, val end: Int, val surface: String, val lid: Int, val rid: Int, val wcost: Int) {
-            var best = Int.MAX_VALUE
-        }
         val endAt = Array(n + 1) { ArrayList<LNode>() }
         val startAt = Array(n + 1) { ArrayList<LNode>() }
         val maxLen = minOf(n, 16)
@@ -2642,6 +2711,9 @@ class NacreDictionary internal constructor(
                     }
                 }
             }
+            // Composite numerals (にじゅうご → 25 / 二十五): one node per span
+            // that reads as a whole number — see NumberReading.
+            addNumberNodes(kana, st) { node -> endAt[node.end].add(node); startAt[st].add(node) }
             // Unknown-word fallback so every position stays reachable.
             val ch = kana.substring(st, st + 1)
             val unk = LNode(st, st + 1, ch, unknownId, unknownId, LATTICE_UNKNOWN_COST)
@@ -2678,13 +2750,14 @@ class NacreDictionary internal constructor(
         while (pq.isNotEmpty() && results.size < 25 && pops < 20000) {
             val p = pq.poll(); pops++
             if (p.node.start == 0) {
-                val segs = ArrayList<String>()
-                var lastRid = p.node.rid
+                val nodes = ArrayList<LNode>()
                 var cur: Partial? = p
-                while (cur != null) { segs.add(cur.node.surface); lastRid = cur.node.rid; cur = cur.next }
+                while (cur != null) { nodes.add(cur.node); cur = cur.next }
+                val segs = nodes.map { it.surface }
                 val surface = segs.joinToString("")
                 if (seen.add(surface)) {
-                    results.add(ConversionCandidate(surface = surface, reading = kana, cost = p.f, segments = segs, rightId = lastRid))
+                    val cost = p.f - collocationBonus(kana, nodes)
+                    results.add(ConversionCandidate(surface = surface, reading = kana, cost = cost, segments = segs, rightId = nodes.last().rid))
                 }
                 continue
             }
@@ -2695,7 +2768,38 @@ class NacreDictionary internal constructor(
             }
         }
         if (results.isEmpty()) return exactMatch(kana)
+        // Collocation bonuses re-order the N-best (stable for equal costs).
+        results.sortBy { it.cost }
         return results
+    }
+
+    /**
+     * Sum of collocation bonuses for a lattice path: every "noun, case
+     * particle, predicate" run of three consecutive words is looked up in
+     * [collocations] — by the predicate's leading kanji when it has one
+     * (飼っ → 飼), else by its reading stem (ひき → ひ, as in 風邪をひき).
+     */
+    private fun collocationBonus(kana: String, nodes: List<LNode>): Int {
+        val table = collocations ?: return 0
+        var bonus = 0
+        for (i in 0 until nodes.size - 2) {
+            val particle = nodes[i + 1].surface
+            if (particle !in Collocations.PARTICLES) continue
+            val noun = nodes[i].surface
+            val pred = nodes[i + 2]
+            val kanjiStem = pred.surface.takeWhile { it in '一'..'鿿' || it == '々' }
+            // Reading stem as written, the same rule the table was counted
+            // with: the reading minus its last kana (かっ → か, ひき → ひ).
+            val reading = kana.substring(pred.start, pred.end)
+            val stem = if (reading.length > 1) reading.dropLast(1) else reading
+            val count = if (kanjiStem.isNotEmpty()) {
+                table.kanjiCount(noun, particle, kanjiStem, stem)
+            } else {
+                table.readingCount(noun, particle, stem)
+            }
+            bonus += Collocations.bonus(count, COLLOCATION_WEIGHT)
+        }
+        return bonus
     }
 
     /**
